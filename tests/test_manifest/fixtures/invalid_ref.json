@@ -1,0 +1,15 @@
+{
+  "scoped": {
+    "version": "1.0",
+    "namespace": "invalid",
+    "principals": [
+      {"name": "admin", "kind": "user"}
+    ],
+    "scopes": [
+      {"name": "scope-1", "owner": "nonexistent"}
+    ],
+    "objects": [
+      {"name": "doc-1", "type": "document", "owner": "ghost", "project_into": ["missing-scope"]}
+    ]
+  }
+}

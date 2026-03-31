@@ -1,0 +1,69 @@
+{
+  "scoped": {
+    "version": "1.0",
+    "namespace": "full-test",
+    "principals": [
+      {"name": "admin", "kind": "user", "display_name": "Admin"},
+      {"name": "alice", "kind": "user", "display_name": "Alice"},
+      {"name": "bob", "kind": "user", "display_name": "Bob"}
+    ],
+    "scopes": [
+      {"name": "org", "owner": "admin", "description": "Organization scope"},
+      {"name": "team", "owner": "admin", "parent": "org", "description": "Team scope"}
+    ],
+    "memberships": [
+      {"scope": "org", "principal": "alice", "role": "editor", "granted_by": "admin"},
+      {"scope": "team", "principal": "bob", "role": "viewer", "granted_by": "admin"}
+    ],
+    "objects": [
+      {
+        "name": "doc-1",
+        "type": "document",
+        "owner": "admin",
+        "data": {"title": "Shared Doc"},
+        "project_into": ["org"]
+      },
+      {
+        "name": "task-1",
+        "type": "task",
+        "owner": "alice",
+        "data": {"title": "First Task"}
+      }
+    ],
+    "rules": [
+      {
+        "name": "deny-external",
+        "rule_type": "access",
+        "effect": "deny",
+        "priority": 100,
+        "created_by": "admin",
+        "bind_to": [
+          {"target_type": "scope", "target": "org"}
+        ]
+      }
+    ],
+    "environments": [
+      {"name": "staging", "owner": "admin", "ephemeral": true}
+    ],
+    "pipelines": [
+      {
+        "name": "deploy-pipeline",
+        "owner": "admin",
+        "stages": [
+          {"name": "build", "order": 0},
+          {"name": "test", "order": 1},
+          {"name": "deploy", "order": 2}
+        ]
+      }
+    ],
+    "deployment_targets": [
+      {"name": "production", "target_type": "kubernetes", "owner": "admin", "config": {"cluster": "prod-1"}}
+    ],
+    "secrets": [
+      {"name": "db-password", "owner": "admin", "description": "Database password"}
+    ],
+    "plugins": [
+      {"name": "my-plugin", "owner": "admin", "version": "1.0.0", "scope": "org"}
+    ]
+  }
+}

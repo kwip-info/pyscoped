@@ -1,0 +1,19 @@
+{
+  "scoped": {
+    "version": "1.0",
+    "namespace": "minimal",
+    "principals": [
+      {
+        "name": "admin",
+        "kind": "user",
+        "display_name": "Admin User"
+      }
+    ],
+    "scopes": [
+      {
+        "name": "default-scope",
+        "owner": "admin"
+      }
+    ]
+  }
+}
