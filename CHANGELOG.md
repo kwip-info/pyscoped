@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 (2026-03-31)
+
+### Fixed
+- All documentation links now point to correct GitHub repository (kwip-info/pyscoped)
+- Clean repository structure — library-only, no application code
+
 ## 0.1.1 (2026-03-31)
 
 ### Fixed
