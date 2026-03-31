@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 (2026-03-31)
+
+### Added
+- **Management plane contract** — 30 Pydantic models defining the complete API between SDK and hosted management plane: account provisioning, API key management, sync batches, billing/usage, and health checks. Both sides import from `scoped.sync.models` — zero contract drift
+- **Sync agent** — `SyncAgent` background thread pushes audit metadata to the management plane. Full lifecycle: `start()`, `pause()`, `resume()`, `stop()`, `status()`, `verify()`. Watermark persisted in `_sync_state` table for crash recovery
+- **Transport security** — HMAC-SHA256 signed batches with derived signing key, content hashes, chain hashes tying to the tamper-evident audit trail. 5-layer security: TLS, Bearer auth, HMAC signing, content hash, chain hash
+- **`_sync_state` table** — migration m0011, colocated with user data for backup/restore. Tracks watermark position, sync status, error state with exponential backoff
+- **Sync exceptions** — `SyncError`, `SyncNotConfiguredError`, `SyncTransportError`, `SyncAuthenticationError`, `SyncBatchRejectedError`, `SyncVerificationError`
+- **`SyncConfig`** — configurable interval, batch size, retries, backoff, timeout
+- **`SyncEntryMetadata`** — audit entry model that deliberately excludes `before_state`/`after_state`. Customer data never leaves their infrastructure
+- **`ResourceCounts`** — active objects, principals, scopes snapshot for usage-based billing metering
+- **Billing models** — `PlanLimits`, `UsageSnapshot`, `UsageHistoryResponse`, `PlanInfoResponse` for usage-based pricing
+- **Account models** — `ProvisionRequest/Response`, `AccountInfo`, `ApiKeyMetadata`, key create/revoke/rotate models
+
+### Changed
+- **Pydantic is now a core dependency** (`pydantic>=2.0`). Required for the shared contract models between SDK and management plane
+- **`ScopedClient.start_sync()`** — now creates a real `SyncAgent` instead of raising `NotImplementedError`. Requires `api_key`
+- **`ScopedClient.sync_status()`** — returns `SyncStateSnapshot` dict when agent is active
+- **`ScopedClient.close()`** — stops the sync agent if running
+- SQLite and Postgres inline schemas include `_sync_state` table
+
 ## 0.3.0 (2026-03-31)
 
 ### Added

@@ -374,3 +374,31 @@ class ComplianceError(ScopedError):
 
 class ComplianceViolation(ComplianceError):
     """Raised at runtime when an operation violates framework compliance."""
+
+
+# ---------------------------------------------------------------------------
+# Sync
+# ---------------------------------------------------------------------------
+
+class SyncError(ScopedError):
+    """Base for sync-related errors."""
+
+
+class SyncNotConfiguredError(SyncError):
+    """Raised when sync operations are called without an API key."""
+
+
+class SyncTransportError(SyncError):
+    """Raised when HTTP communication with the management plane fails."""
+
+
+class SyncAuthenticationError(SyncError):
+    """Raised when the API key is rejected by the management plane (401/403)."""
+
+
+class SyncBatchRejectedError(SyncError):
+    """Raised when the management plane rejects a sync batch (400)."""
+
+
+class SyncVerificationError(SyncError):
+    """Raised when sync verification detects a chain mismatch."""

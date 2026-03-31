@@ -1268,4 +1268,21 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+
+-- =====================================================================
+-- SYNC STATE (management plane watermark)
+-- =====================================================================
+
+CREATE TABLE IF NOT EXISTS _sync_state (
+    id              TEXT PRIMARY KEY DEFAULT 'singleton',
+    last_sequence   INTEGER NOT NULL DEFAULT 0,
+    last_hash       TEXT NOT NULL DEFAULT '',
+    last_synced_at  TEXT,
+    last_batch_id   TEXT,
+    status          TEXT NOT NULL DEFAULT 'idle',
+    error_message   TEXT,
+    error_count     INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL DEFAULT '',
+    updated_at      TEXT NOT NULL DEFAULT ''
+);
 """

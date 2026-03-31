@@ -153,21 +153,29 @@ class TestAsPrincipal:
             assert ScopedContext.current_or_none() is None
 
 
-class TestSyncStubs:
-    def test_start_sync_not_implemented(self):
+class TestSync:
+    def test_start_sync_without_api_key_raises(self):
+        from scoped.exceptions import SyncNotConfiguredError
+
         with ScopedClient() as client:
-            with pytest.raises(NotImplementedError, match="0.3.0"):
+            with pytest.raises(SyncNotConfiguredError):
                 client.start_sync()
 
-    def test_sync_status_returns_not_configured(self):
+    def test_sync_status_not_configured(self):
         with ScopedClient() as client:
             status = client.sync_status()
             assert status["status"] == "not_configured"
 
-    def test_verify_sync_not_implemented(self):
+    def test_sync_status_with_api_key(self):
+        key = "psc_live_" + "a1" * 16
+        with ScopedClient(api_key=key) as client:
+            # Before starting sync, still not_configured (no agent yet)
+            status = client.sync_status()
+            assert status["status"] == "not_configured"
+
+    def test_stop_sync_noop_when_not_started(self):
         with ScopedClient() as client:
-            with pytest.raises(NotImplementedError):
-                client.verify_sync()
+            client.stop_sync()  # should not raise
 
 
 class TestRepr:

@@ -134,6 +134,7 @@ class ScopedClient:
         database_url: str | None = None,
         api_key: str | None = None,
         backend: StorageBackend | None = None,
+        sync_config: Any | None = None,
     ) -> None:
         """Initialize a pyscoped client.
 
@@ -181,6 +182,10 @@ class ScopedClient:
             self._backend = _create_backend(database_url)
             self._backend.initialize()
             self._owns_backend = True
+
+        # Sync config
+        self._sync_config = sync_config
+        self._sync_agent: Any = None
 
         # Wire services
         self._services = build_services(self._backend)
@@ -283,7 +288,27 @@ class ScopedClient:
         """The management plane API key, or ``None`` if not configured."""
         return self._api_key
 
-    # -- Sync (stubs for future management plane) --------------------------
+    # -- Sync --------------------------------------------------------------
+
+    def _ensure_sync_agent(self) -> Any:
+        """Lazy-init the sync agent on first use."""
+        if self._sync_agent is None:
+            from scoped.exceptions import SyncNotConfiguredError
+            from scoped.sync.agent import SyncAgent
+            from scoped.sync.config import SyncConfig
+
+            if self._api_key is None:
+                raise SyncNotConfiguredError(
+                    "Cannot start sync without an API key. "
+                    "Pass api_key to scoped.init() or ScopedClient()."
+                )
+            config = self._sync_config or SyncConfig()
+            self._sync_agent = SyncAgent(
+                backend=self._backend,
+                api_key=self._api_key,
+                config=config,
+            )
+        return self._sync_agent
 
     def start_sync(self) -> None:
         """Start syncing audit metadata to the management plane.
@@ -292,54 +317,61 @@ class ScopedClient:
         in the background and pushes audit entries, resource counts,
         and chain hashes to the management plane API.
 
-        .. note:: Available in pyscoped >= 0.3.0.
+        Raises:
+            SyncNotConfiguredError: If no ``api_key`` is set.
+            SyncError: If sync is already running.
         """
-        raise NotImplementedError(
-            "Sync requires pyscoped >= 0.3.0. "
-            "See https://github.com/kwip-info/pyscoped for updates."
-        )
+        self._ensure_sync_agent().start()
 
     def pause_sync(self) -> None:
         """Temporarily pause sync without losing state."""
-        raise NotImplementedError("Sync requires pyscoped >= 0.3.0.")
+        self._ensure_sync_agent().pause()
 
     def resume_sync(self) -> None:
         """Resume sync from where it was paused."""
-        raise NotImplementedError("Sync requires pyscoped >= 0.3.0.")
+        self._ensure_sync_agent().resume()
 
     def stop_sync(self) -> None:
         """Stop sync and clean up resources."""
-        raise NotImplementedError("Sync requires pyscoped >= 0.3.0.")
+        if self._sync_agent is not None:
+            self._sync_agent.stop()
 
     def sync_status(self) -> dict[str, Any]:
         """Return the current sync state.
 
         Returns:
-            A dict with ``"status"`` key. When sync is not configured,
-            returns ``{"status": "not_configured"}``.
+            A dict with sync state fields. When sync is not configured
+            (no API key), returns ``{"status": "not_configured"}``.
         """
-        return {"status": "not_configured"}
+        if self._api_key is None or self._sync_agent is None:
+            return {"status": "not_configured"}
+        return self._sync_agent.status().model_dump(mode="json")
 
-    def verify_sync(self) -> None:
+    def verify_sync(self) -> Any:
         """Verify that synced data matches local audit chain.
 
         Compares the local audit hash chain against what was reported
         to the management plane, confirming nothing was dropped or
         tampered with in transit.
 
-        .. note:: Available in pyscoped >= 0.3.0.
+        Returns:
+            A ``SyncVerifyResponse`` with ``verified`` (bool) and
+            chain hash comparison details.
         """
-        raise NotImplementedError("Sync requires pyscoped >= 0.3.0.")
+        return self._ensure_sync_agent().verify()
 
     # -- Lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
         """Close the client and release resources.
 
-        If the client created the backend (via ``database_url``), the
-        backend is closed. If the backend was passed in, it is not
-        closed (the caller is responsible).
+        Stops the sync agent if running. If the client created the
+        backend (via ``database_url``), the backend is closed. If the
+        backend was passed in, it is not closed (the caller is
+        responsible).
         """
+        if self._sync_agent is not None:
+            self._sync_agent.stop()
         if self._owns_backend:
             self._backend.close()
 
@@ -367,6 +399,7 @@ def init(
     database_url: str | None = None,
     api_key: str | None = None,
     backend: StorageBackend | None = None,
+    sync_config: Any | None = None,
 ) -> ScopedClient:
     """Initialize pyscoped and set the global default client.
 
@@ -385,6 +418,8 @@ def init(
         api_key: Management plane API key (optional).
         backend: Pre-built ``StorageBackend`` (advanced, overrides
                  ``database_url``).
+        sync_config: ``SyncConfig`` instance for the sync agent.
+                     If omitted, defaults are used when sync is started.
 
     Returns:
         The initialized ``ScopedClient`` instance.
@@ -396,17 +431,19 @@ def init(
         # Zero-config start
         scoped.init()
 
-        # Production PostgreSQL with management plane
+        # Production PostgreSQL with management plane sync
         scoped.init(
             database_url="postgresql://user:pass@db.example.com/myapp",
             api_key="psc_live_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
         )
+        scoped.client.start_sync()
     """
     global _default_client
     client = ScopedClient(
         database_url=database_url,
         api_key=api_key,
         backend=backend,
+        sync_config=sync_config,
     )
     _default_client = client
     return client

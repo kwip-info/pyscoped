@@ -4,7 +4,7 @@
 
 Scoped guarantees that anything built on it can be isolated, shared, traced, and rolled back — to any degree, at any time, by anyone with the right to do so.
 
-Zero dependencies. SQLite included. Postgres ready. 1,650+ tests. Python 3.11+.
+Postgres ready. 1,680+ tests. Python 3.11+.
 
 ```bash
 pip install pyscoped
@@ -355,7 +355,7 @@ from scoped.testing.fixtures import scoped_backend, scoped_services, alice, bob
 
 ```bash
 pip install pyscoped[dev]
-pytest                          # 1,650+ tests
+pytest                          # 1,680+ tests
 pytest tests/test_objects/      # one layer
 pytest tests/test_compliance/   # invariant validation
 ```
@@ -373,7 +373,8 @@ pytest tests/test_compliance/   # invariant validation
 | Auto-Rotation + Testing Utilities | 36 |
 | SDK Client + Namespaces | 58 |
 | OTel Instrumentation | 6 |
-| **Total** | **1,650+** |
+| Sync Agent + Contract Models | 37 |
+| **Total** | **1,688+** |
 
 ## Documentation
 
