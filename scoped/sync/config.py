@@ -39,7 +39,7 @@ class SyncConfig:
         auto_start: If True, sync starts automatically on client init.
     """
 
-    base_url: str = "https://api.pyscoped.dev/v1"
+    base_url: str = "https://kwip.tech/v1"
     interval_seconds: int = 60
     batch_size: int = 500
     max_retries: int = 5

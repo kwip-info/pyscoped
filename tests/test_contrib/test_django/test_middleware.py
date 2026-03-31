@@ -47,6 +47,7 @@ def _view(request):
     return JsonResponse({"principal_id": None})
 
 
+@pytest.mark.django_db(transaction=True)
 class TestScopedContextMiddleware:
     def test_sets_context_from_header(self, factory, user, backend):
         middleware = ScopedContextMiddleware(_view)

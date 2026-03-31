@@ -125,7 +125,9 @@ class DjangoORMBackend(StorageBackend):
 
     def transaction(self) -> DjangoTransaction:
         tx = DjangoTransaction(self._connection)
-        # Use savepoints for nested transaction support
+        # Use savepoints for nested transaction support.
+        # Requires an active transaction block — the ScopedContextMiddleware
+        # wraps requests in django.db.transaction.atomic() automatically.
         self._connection.cursor().execute("SAVEPOINT scoped_tx")
         return tx
 

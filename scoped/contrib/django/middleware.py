@@ -51,6 +51,33 @@ class ScopedContextMiddleware:
             self._resolved = True
         return self._resolver
 
+    def _handle_scoped_request(self, request: HttpRequest) -> HttpResponse:
+        """Resolve principal and wrap in transaction + context."""
+        from django.db import transaction
+
+        # Wrap in atomic() so the DjangoORMBackend can use SAVEPOINTs.
+        # This is safe to nest — Django's atomic() supports nesting via
+        # savepoints automatically.
+        with transaction.atomic():
+            return self._resolve_and_dispatch(request)
+
+    def _resolve_and_dispatch(self, request: HttpRequest) -> HttpResponse:
+        """Resolve principal, set context, dispatch to view."""
+        principal = self._resolve_principal(request)
+        if principal is None:
+            return self.get_response(request)
+
+        from scoped.identity.context import ScopedContext
+
+        ctx = ScopedContext(principal=principal)
+        ctx.__enter__()
+        try:
+            request.scoped_context = ctx  # type: ignore[attr-defined]
+            response = self.get_response(request)
+        finally:
+            ctx.__exit__(None, None, None)
+        return response
+
     def _resolve_principal(self, request: HttpRequest):
         resolver = self._get_resolver()
         if resolver:
@@ -73,18 +100,4 @@ class ScopedContextMiddleware:
         if any(request.path.startswith(p) for p in exempt):
             return self.get_response(request)
 
-        principal = self._resolve_principal(request)
-
-        if principal is None:
-            return self.get_response(request)
-
-        from scoped.identity.context import ScopedContext
-
-        ctx = ScopedContext(principal=principal)
-        ctx.__enter__()
-        try:
-            request.scoped_context = ctx  # type: ignore[attr-defined]
-            response = self.get_response(request)
-        finally:
-            ctx.__exit__(None, None, None)
-        return response
+        return self._handle_scoped_request(request)
