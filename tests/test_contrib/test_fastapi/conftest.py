@@ -9,11 +9,9 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scoped.contrib.fastapi import reset_backend, set_backend
 from scoped.contrib.fastapi.middleware import ScopedContextMiddleware
 from scoped.contrib.fastapi.router import router as scoped_router
 from scoped.identity.context import ScopedContext
-from scoped.identity.principal import PrincipalStore
 from scoped.storage.sqlite import SQLiteBackend
 
 
@@ -21,16 +19,18 @@ from scoped.storage.sqlite import SQLiteBackend
 def fastapi_backend():
     backend = SQLiteBackend(":memory:")
     backend.initialize()
-    set_backend(backend)
     yield backend
     backend.close()
-    reset_backend()
 
 
 @pytest.fixture
 def fastapi_user(fastapi_backend):
-    store = PrincipalStore(fastapi_backend)
-    return store.create_principal(kind="user", display_name="FastAPI User")
+    # Middleware init sets the global client, so use it
+    import scoped
+    from scoped.client import init
+
+    init(backend=fastapi_backend)
+    return scoped.principals.create("FastAPI User")
 
 
 @pytest.fixture

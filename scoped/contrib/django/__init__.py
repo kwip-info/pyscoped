@@ -4,8 +4,12 @@ Add ``'scoped.contrib.django'`` to ``INSTALLED_APPS`` and the middleware
 ``'scoped.contrib.django.middleware.ScopedContextMiddleware'`` to
 ``MIDDLEWARE`` to enable automatic ScopedContext injection on every request.
 
+After initialization, the simplified SDK (``scoped.objects``,
+``scoped.principals``, etc.) works in every view.
+
 Settings:
     SCOPED_BACKEND_USING:      Django DB alias (default ``"default"``)
+    SCOPED_API_KEY:            Management plane API key (optional)
     SCOPED_PRINCIPAL_HEADER:   HTTP header for principal ID
                                (default ``"HTTP_X_SCOPED_PRINCIPAL_ID"``)
     SCOPED_PRINCIPAL_RESOLVER: Dotted path to a callable(request) -> Principal | None
@@ -23,6 +27,7 @@ except ImportError as exc:
     ) from exc
 
 _backend_instance = None
+_client_instance = None
 
 
 def get_backend():
@@ -35,13 +40,33 @@ def get_backend():
     return _backend_instance
 
 
+def get_client():
+    """Return the singleton ScopedClient backed by Django's database.
+
+    Also sets the global default so ``scoped.objects``,
+    ``scoped.principals``, etc. work in views.
+    """
+    global _client_instance
+    if _client_instance is None:
+        from django.conf import settings
+
+        from scoped.client import init
+
+        api_key = getattr(settings, "SCOPED_API_KEY", None)
+        backend = get_backend()
+        _client_instance = init(backend=backend, api_key=api_key)
+    return _client_instance
+
+
 def reset_backend():
-    """Reset the singleton (for tests)."""
-    global _backend_instance
+    """Reset singletons (for tests)."""
+    global _backend_instance, _client_instance
     _backend_instance = None
+    _client_instance = None
 
 
 def _initialize_backend():
-    """Called from AppConfig.ready() — create Scoped tables if needed."""
+    """Called from AppConfig.ready() — create Scoped tables and initialize client."""
     backend = get_backend()
     backend.initialize()
+    get_client()

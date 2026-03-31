@@ -5,11 +5,19 @@ and latency visibility for production deployments.
 
 Usage::
 
-    from scoped.manifest import build_services
+    import scoped
+    from scoped.contrib.otel import instrument
+
+    client = scoped.init(database_url="postgresql://...")
+    instrument(client)  # Now all operations emit OTel spans
+
+Also accepts raw ``ScopedServices`` for advanced use::
+
+    from scoped.manifest._services import build_services
     from scoped.contrib.otel import instrument
 
     services = build_services(backend)
-    instrument(services)  # Now all operations emit OTel spans
+    instrument(services)
 
 Requires ``opentelemetry-api`` — install via ``pip install pyscoped[otel]``.
 If the package is not installed, ``instrument()`` is a silent no-op.
@@ -28,21 +36,38 @@ except ImportError:
     _HAS_OTEL = False
 
 
-def instrument(services: Any) -> Any:
+def instrument(target: Any) -> Any:
     """Wrap key service methods with OpenTelemetry spans.
 
-    This function mutates *services* in-place (and also returns it for
-    convenience).  If ``opentelemetry-api`` is not installed the call is
-    a silent no-op — no spans, no overhead, no errors.
+    Accepts either a ``ScopedClient`` or a ``ScopedServices`` instance.
+    Mutates *target* in-place and returns it for convenience. If
+    ``opentelemetry-api`` is not installed the call is a silent no-op.
 
-    Instrumented services and methods:
+    Instrumented operations:
 
-    - ``services.manager``  — create, get, update, tombstone, list_objects
-    - ``services.audit``    — record
-    - ``services.secrets``  — create_secret, rotate, resolve
+    - Object CRUD — create, get, update, tombstone, list_objects
+    - Audit recording — record
+    - Secrets — create_secret, rotate, resolve
+
+    Args:
+        target: A ``ScopedClient`` or ``ScopedServices`` instance.
+
+    Returns:
+        The same *target*, with methods wrapped.
+
+    Example::
+
+        import scoped
+        from scoped.contrib.otel import instrument
+
+        client = scoped.init(database_url="postgresql://...")
+        instrument(client)
     """
     if not _HAS_OTEL:
-        return services
+        return target
+
+    # Accept either ScopedClient (has .services) or ScopedServices directly
+    services = getattr(target, "services", target)
 
     tracer = trace.get_tracer("pyscoped", tracer_provider=trace.get_tracer_provider())
 
@@ -63,7 +88,7 @@ def instrument(services: Any) -> Any:
     _wrap(vault, "rotate", tracer, "scoped.secret.rotate", _attr_secret_rotate)
     _wrap(vault, "resolve", tracer, "scoped.secret.resolve", _attr_secret_resolve)
 
-    return services
+    return target
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 
 from scoped.contrib.fastapi.dependencies import get_principal, get_scoped_context, get_services
 from scoped.contrib.fastapi.middleware import ScopedContextMiddleware
-from scoped.identity.principal import PrincipalStore
 from scoped.storage.sqlite import SQLiteBackend
 
 
@@ -20,12 +19,12 @@ def dep_app():
     backend = SQLiteBackend(":memory:")
     backend.initialize()
 
-    from scoped.contrib.fastapi import set_backend, reset_backend
+    # Initialize the global client first so principals.create works
+    from scoped.client import init
+    init(backend=backend)
 
-    set_backend(backend)
-
-    store = PrincipalStore(backend)
-    user = store.create_principal(kind="user", display_name="Dep User")
+    import scoped
+    user = scoped.principals.create("Dep User")
 
     app = FastAPI()
     app.add_middleware(ScopedContextMiddleware, backend=backend)
@@ -44,7 +43,6 @@ def dep_app():
 
     yield {"app": app, "client": TestClient(app), "user": user, "backend": backend}
     backend.close()
-    reset_backend()
 
 
 class TestGetScopedContext:

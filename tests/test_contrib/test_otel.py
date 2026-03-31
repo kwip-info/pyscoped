@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scoped.identity.principal import PrincipalStore
+from scoped.client import ScopedClient
 from scoped.manifest._services import build_services
 from scoped.storage.sqlite import SQLiteBackend
 
@@ -16,11 +16,18 @@ def services():
     backend = SQLiteBackend(":memory:")
     backend.initialize()
     svc = build_services(backend)
-    # Create a test principal
     svc.principals.create_principal(
         kind="user", display_name="Alice", principal_id="alice"
     )
     return svc
+
+
+@pytest.fixture
+def otel_client():
+    client = ScopedClient()
+    client.principals.create("Alice", principal_id="alice-otel")
+    yield client
+    client.close()
 
 
 class TestInstrumentNoOp:
@@ -103,3 +110,15 @@ class TestInstrumentWithOTel:
         original_create = services.secrets.create_secret
         instrument(services)
         assert services.secrets.create_secret is not original_create
+
+    def test_accepts_scoped_client(self, otel_client):
+        self._skip_if_no_otel()
+        from scoped.contrib.otel import instrument
+
+        result = instrument(otel_client)
+        assert result is otel_client
+
+        # Operations still work through the client
+        with otel_client.as_principal(otel_client.principals.get("alice-otel")):
+            obj, v1 = otel_client.objects.create("doc", data={"x": 1})
+            assert obj is not None

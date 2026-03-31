@@ -6,13 +6,18 @@ import json
 from typing import Any
 
 
-def register_resources(server, services: dict[str, Any]) -> None:
-    """Register Scoped data as MCP resources."""
+def register_resources(server, client: Any) -> None:
+    """Register Scoped data as MCP resources.
+
+    Args:
+        server: A ``FastMCP`` server instance.
+        client: A ``ScopedClient`` instance.
+    """
 
     @server.resource("scoped://principals")
     def list_principals() -> str:
         """List all principals in the system."""
-        principals = services["principals"].list_principals()
+        principals = client.principals.list()
         return json.dumps(
             [
                 {
@@ -28,7 +33,10 @@ def register_resources(server, services: dict[str, Any]) -> None:
     @server.resource("scoped://health")
     def health_resource() -> str:
         """Current framework health status."""
-        status = services["health"].check_all()
+        from scoped.testing.health import HealthChecker
+
+        checker = HealthChecker(client.backend)
+        status = checker.check_all()
         return json.dumps(
             {
                 "healthy": status.healthy,
@@ -42,7 +50,7 @@ def register_resources(server, services: dict[str, Any]) -> None:
     @server.resource("scoped://audit/recent")
     def recent_audit() -> str:
         """Most recent 50 audit entries."""
-        entries = services["audit_query"].query(limit=50)
+        entries = client.audit.query(limit=50)
         return json.dumps(
             [
                 {

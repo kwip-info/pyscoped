@@ -5,15 +5,18 @@ from __future__ import annotations
 from typing import Any
 
 
-def register_tools(server, services: dict[str, Any]) -> None:
-    """Register Scoped operations as MCP tools."""
+def register_tools(server, client: Any) -> None:
+    """Register Scoped operations as MCP tools.
+
+    Args:
+        server: A ``FastMCP`` server instance.
+        client: A ``ScopedClient`` instance.
+    """
 
     @server.tool()
     def create_principal(kind: str, display_name: str) -> dict[str, str]:
         """Create a new Scoped principal (user, bot, team, etc.)."""
-        p = services["principals"].create_principal(
-            kind=kind, display_name=display_name
-        )
+        p = client.principals.create(display_name, kind=kind)
         return {"id": p.id, "kind": p.kind, "display_name": p.display_name}
 
     @server.tool()
@@ -23,8 +26,8 @@ def register_tools(server, services: dict[str, Any]) -> None:
         data: dict[str, Any],
     ) -> dict[str, Any]:
         """Create a new scoped object (creator-private by default)."""
-        obj, ver = services["manager"].create(
-            object_type=object_type, owner_id=owner_id, data=data
+        obj, ver = client.objects.create(
+            object_type, owner_id=owner_id, data=data,
         )
         return {
             "object_id": obj.id,
@@ -36,7 +39,7 @@ def register_tools(server, services: dict[str, Any]) -> None:
     @server.tool()
     def get_object(object_id: str, principal_id: str) -> dict[str, Any] | str:
         """Get an object by ID (owner-only access)."""
-        obj = services["manager"].get(object_id, principal_id=principal_id)
+        obj = client.objects.get(object_id, principal_id=principal_id)
         if obj is None:
             return "Object not found or access denied"
         return {
@@ -54,9 +57,7 @@ def register_tools(server, services: dict[str, Any]) -> None:
         description: str = "",
     ) -> dict[str, Any]:
         """Create a new scope (sharing boundary)."""
-        scope = services["scopes"].create_scope(
-            name=name, owner_id=owner_id, description=description
-        )
+        scope = client.scopes.create(name, owner_id=owner_id, description=description)
         return {
             "scope_id": scope.id,
             "name": scope.name,
@@ -76,7 +77,7 @@ def register_tools(server, services: dict[str, Any]) -> None:
         if target_id:
             kwargs["target_id"] = target_id
 
-        entries = services["audit_query"].query(**kwargs)
+        entries = client.audit.query(**kwargs)
         return [
             {
                 "id": e.id,
@@ -92,7 +93,10 @@ def register_tools(server, services: dict[str, Any]) -> None:
     @server.tool()
     def health_check() -> dict[str, Any]:
         """Run Scoped framework health checks."""
-        status = services["health"].check_all()
+        from scoped.testing.health import HealthChecker
+
+        checker = HealthChecker(client.backend)
+        status = checker.check_all()
         return {
             "healthy": status.healthy,
             "checks": {

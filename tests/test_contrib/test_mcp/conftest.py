@@ -6,9 +6,8 @@ import pytest
 
 mcp = pytest.importorskip("mcp")
 
-from scoped.contrib._base import build_services
+from scoped.client import ScopedClient
 from scoped.contrib.mcp.server import create_scoped_server
-from scoped.identity.principal import PrincipalStore
 from scoped.storage.sqlite import SQLiteBackend
 
 
@@ -21,8 +20,8 @@ def mcp_backend():
 
 
 @pytest.fixture
-def mcp_services(mcp_backend):
-    return build_services(mcp_backend)
+def mcp_client(mcp_backend):
+    return ScopedClient(backend=mcp_backend)
 
 
 @pytest.fixture
@@ -31,6 +30,5 @@ def mcp_server(mcp_backend):
 
 
 @pytest.fixture
-def mcp_user(mcp_backend):
-    store = PrincipalStore(mcp_backend)
-    return store.create_principal(kind="user", display_name="MCP User")
+def mcp_user(mcp_client):
+    return mcp_client.principals.create("MCP User")

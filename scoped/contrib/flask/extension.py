@@ -1,4 +1,35 @@
-"""Flask extension for Scoped — ``init_app`` pattern."""
+"""Flask extension for Scoped — ``init_app`` pattern.
+
+Integrates pyscoped into Flask with a single extension. After
+initialization, the simplified SDK (``scoped.objects``,
+``scoped.principals``, etc.) works in every request handler.
+
+Usage::
+
+    from flask import Flask
+    from scoped.contrib.flask import ScopedExtension
+
+    app = Flask(__name__)
+    app.config["SCOPED_DATABASE_URL"] = "postgresql://user:pass@host/db"
+    app.config["SCOPED_API_KEY"] = "psc_live_..."  # optional
+
+    ScopedExtension(app)
+
+    @app.route("/invoices", methods=["POST"])
+    def create_invoice():
+        # ScopedContext is set per-request — scoped.objects just works
+        import scoped
+        doc, v1 = scoped.objects.create("invoice", data=request.json)
+        return {"id": doc.id}
+
+Configuration keys:
+    ``SCOPED_DATABASE_URL``      Database URL (``sqlite:///``, ``postgresql://``)
+    ``SCOPED_API_KEY``           Management plane API key (optional)
+    ``SCOPED_PRINCIPAL_HEADER``  HTTP header for principal ID
+                                 (default ``X-Scoped-Principal-Id``)
+    ``SCOPED_PRINCIPAL_RESOLVER`` Callable(request) -> Principal | None
+    ``SCOPED_EXEMPT_PATHS``      List of path prefixes to skip
+"""
 
 from __future__ import annotations
 
@@ -6,68 +37,65 @@ from typing import Any, Callable
 
 
 class ScopedExtension:
-    """Flask extension that injects ``ScopedContext`` per request.
+    """Flask extension that initializes pyscoped and injects
+    ``ScopedContext`` per request.
 
-    Usage::
-
-        scoped = ScopedExtension()
-        scoped.init_app(app)
-
-    Or::
-
-        scoped = ScopedExtension(app)
-
-    After initialisation:
-    - ``g.scoped_context`` holds the active ``ScopedContext`` (or ``None``)
-    - ``current_app.extensions["scoped"]`` provides access to backend/services
+    After ``init_app()``:
+    - ``scoped.objects``, ``scoped.principals``, etc. work in route handlers
+    - ``g.scoped_context`` holds the active context (or ``None``)
+    - ``current_app.extensions["scoped"]`` provides the ``ScopedClient``
     """
 
     def __init__(self, app=None) -> None:
-        self._backend = None
-        self._services: dict[str, Any] | None = None
+        self._client = None
         if app is not None:
             self.init_app(app)
 
     def init_app(self, app) -> None:
+        """Initialize pyscoped for this Flask app.
+
+        Reads ``SCOPED_DATABASE_URL`` and ``SCOPED_API_KEY`` from
+        ``app.config``, creates a ``ScopedClient``, and registers
+        request hooks for automatic ``ScopedContext`` injection.
+        """
+        from scoped.client import init
+
+        database_url = app.config.get("SCOPED_DATABASE_URL")
+        api_key = app.config.get("SCOPED_API_KEY")
+
+        self._client = init(database_url=database_url, api_key=api_key)
         app.extensions["scoped"] = self
-
-        backend_type = app.config.get("SCOPED_STORAGE_BACKEND", "sqlite")
-        if backend_type == "sqlite":
-            from scoped.storage.sqlite import SQLiteBackend
-
-            path = app.config.get("SCOPED_SQLITE_PATH", ":memory:")
-            self._backend = SQLiteBackend(path)
-            self._backend.initialize()
-        elif backend_type == "postgres":
-            from scoped.storage.postgres import PostgresBackend
-
-            dsn = app.config.get("SCOPED_POSTGRES_DSN", "")
-            opts = app.config.get("SCOPED_POSTGRES_OPTIONS", {})
-            self._backend = PostgresBackend(dsn, **opts)
-            self._backend.initialize()
-
-        from scoped.contrib._base import build_services
-
-        self._services = build_services(self._backend)
 
         app.before_request(self._before_request)
         app.teardown_request(self._teardown_request)
 
     @property
-    def backend(self):
-        return self._backend
+    def client(self):
+        """The ``ScopedClient`` instance."""
+        return self._client
 
     @property
-    def services(self) -> dict[str, Any]:
-        return self._services or {}
+    def backend(self):
+        """The storage backend (shortcut for ``client.backend``)."""
+        return self._client.backend if self._client else None
+
+    @property
+    def services(self) -> dict:
+        """Service dict for backward compatibility.
+
+        Prefer using ``client`` directly for the simplified API.
+        """
+        if self._client is None:
+            return {}
+        from scoped.contrib._base import build_services
+
+        return build_services(self._client.backend)
 
     def _before_request(self) -> None:
         from flask import g, request
 
-        exempt = request.app.config.get("SCOPED_EXEMPT_PATHS", []) if hasattr(request, "app") else []
-        if not exempt:
-            from flask import current_app
-            exempt = current_app.config.get("SCOPED_EXEMPT_PATHS", [])
+        from flask import current_app
+        exempt = current_app.config.get("SCOPED_EXEMPT_PATHS", [])
 
         if any(request.path.startswith(p) for p in exempt):
             g.scoped_context = None
@@ -101,8 +129,6 @@ class ScopedExtension:
 
         header = current_app.config.get("SCOPED_PRINCIPAL_HEADER", "X-Scoped-Principal-Id")
         pid = request.headers.get(header)
-        if pid and self._backend:
-            from scoped.contrib._base import resolve_principal_from_id
-
-            return resolve_principal_from_id(self._backend, pid)
+        if pid and self._client:
+            return self._client.principals.find(pid)
         return None

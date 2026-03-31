@@ -4,7 +4,7 @@
 
 Scoped guarantees that anything built on it can be isolated, shared, traced, and rolled back — to any degree, at any time, by anyone with the right to do so.
 
-Zero dependencies. SQLite included. Postgres ready. 1,590+ tests. Python 3.11+.
+Zero dependencies. SQLite included. Postgres ready. 1,650+ tests. Python 3.11+.
 
 ```bash
 pip install pyscoped
@@ -25,67 +25,46 @@ This makes Scoped the base layer for multi-tenant applications, clinical systems
 ## Quick Start
 
 ```python
-from scoped.storage.sqlite import SQLiteBackend
-from scoped.identity.principal import PrincipalStore
-from scoped.objects.manager import ScopedManager
-from scoped.tenancy.lifecycle import ScopeLifecycle
-from scoped.tenancy.projection import ProjectionManager
-from scoped.audit.writer import AuditWriter
+import scoped
 
-# 1. Initialize storage (SQLite, zero config)
-backend = SQLiteBackend("app.db")
-backend.initialize()
+# 1. Initialize (zero config — in-memory SQLite)
+scoped.init()
+# Or: scoped.init(database_url="postgresql://user:pass@localhost/mydb")
 
-# 2. Create services
-principals = PrincipalStore(backend)
-audit = AuditWriter(backend)
-manager = ScopedManager(backend, audit_writer=audit)
-scopes = ScopeLifecycle(backend, audit_writer=audit)
-projections = ProjectionManager(backend, audit_writer=audit)
+# 2. Create principals (the acting users)
+alice = scoped.principals.create("Alice")
+bob = scoped.principals.create("Bob")
 
-# 3. Create a principal (the acting user)
-alice = principals.create_principal(kind="user", display_name="Alice")
-bob = principals.create_principal(kind="user", display_name="Bob")
+# 3. Set the acting principal and create objects
+with scoped.as_principal(alice):
+    # Create an object — it's creator-private by default
+    doc, v1 = scoped.objects.create(
+        "document", data={"title": "Q4 Report", "status": "draft"},
+    )
 
-# 4. Create an object — it's creator-private
-obj, v1 = manager.create(
-    object_type="document",
-    owner_id=alice.id,
-    data={"title": "Q4 Report", "status": "draft"},
-)
+    # Alice can read it
+    assert scoped.objects.get(doc.id) is not None
 
-# Alice can read it
-assert manager.get(obj.id, principal_id=alice.id) is not None
+# Bob cannot (isolation enforced)
+with scoped.as_principal(bob):
+    assert scoped.objects.get(doc.id) is None
 
-# Bob cannot
-assert manager.get(obj.id, principal_id=bob.id) is None
+# 4. Update creates a new immutable version
+with scoped.as_principal(alice):
+    doc, v2 = scoped.objects.update(
+        doc.id, data={"title": "Q4 Report", "status": "final"},
+    )
+    assert v2.version == 2  # v1 is preserved, untouched
 
-# 5. Update creates a new immutable version
-obj, v2 = manager.update(
-    obj.id,
-    principal_id=alice.id,
-    data={"title": "Q4 Report", "status": "final"},
-    change_reason="Finalized for review",
-)
-assert obj.current_version == 2  # v1 is preserved, untouched
+    # 5. Share via scope
+    team = scoped.scopes.create("Finance Team")
+    scoped.scopes.add_member(team, bob, role="viewer")
+    scoped.scopes.project(doc, team)
 
-# 6. Share via scope projection
-team = scopes.create_scope(name="Finance Team", owner_id=alice.id)
-from scoped.tenancy.models import ScopeRole
-scopes.add_member(team.id, principal_id=bob.id, role=ScopeRole.VIEWER, granted_by=alice.id)
-projections.project(scope_id=team.id, object_id=obj.id, projected_by=alice.id)
-
-# Now Bob can see it
-assert manager.get(obj.id, principal_id=bob.id) is None  # manager is owner-only
-# But visibility engine shows it
-from scoped.tenancy.engine import VisibilityEngine
-vis = VisibilityEngine(backend)
-assert obj.id in vis.visible_object_ids(bob.id)
-
-# 7. Every action was traced with hash-chained audit
-from scoped.audit.query import AuditQuery
-trail = AuditQuery(backend).for_target("document", obj.id)
+# 6. Every action was traced with hash-chained audit
+trail = scoped.audit.for_object(doc.id)
 assert len(trail) >= 2  # CREATE + UPDATE, each with before/after state
+assert scoped.audit.verify().valid  # Hash chain is intact
 ```
 
 ## Architecture
@@ -376,7 +355,7 @@ from scoped.testing.fixtures import scoped_backend, scoped_services, alice, bob
 
 ```bash
 pip install pyscoped[dev]
-pytest                          # 1,590+ tests
+pytest                          # 1,650+ tests
 pytest tests/test_objects/      # one layer
 pytest tests/test_compliance/   # invariant validation
 ```
@@ -392,8 +371,9 @@ pytest tests/test_compliance/   # invariant validation
 | Framework Adapters (D1-D4) | 83 |
 | Cloud Integrations (Postgres, AWS, GCP) | 46 |
 | Auto-Rotation + Testing Utilities | 36 |
+| SDK Client + Namespaces | 58 |
 | OTel Instrumentation | 6 |
-| **Total** | **1,591+** |
+| **Total** | **1,650+** |
 
 ## Documentation
 

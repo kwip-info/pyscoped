@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.0 (2026-03-31)
+
+### Added
+- **Simplified SDK** — `scoped.init()` single entry point with URL-based backend selection (`sqlite:///`, `postgresql://`). After init, use `scoped.objects.create()`, `scoped.principals.create()`, etc. at module level
+- **`ScopedClient`** — instance-based client with namespace proxies (`.objects`, `.principals`, `.scopes`, `.audit`, `.secrets`), context manager support, and `as_principal()` for setting the acting user
+- **Context-aware defaults** — all namespace methods infer `principal_id`, `owner_id`, `granted_by`, `projected_by` from the active `ScopedContext` when not passed explicitly
+- **Merged scopes namespace** — `client.scopes` unifies `ScopeLifecycle` and `ProjectionManager` into one API: `create()`, `add_member()`, `project()`, `unproject()`, `freeze()`, `archive()`
+- **API key validation** — `psc_live_<32hex>` / `psc_test_<32hex>` format, validated on init, stored for future management plane sync
+- **Sync method stubs** — `client.start_sync()`, `pause_sync()`, `resume_sync()`, `stop_sync()`, `sync_status()`, `verify_sync()` defined for the management plane (implementation in a future release)
+- **Object/ID flexibility** — all namespace methods accept model objects or string IDs interchangeably
+- **String enum acceptance** — pass `role="editor"` instead of importing `ScopeRole.EDITOR`
+
+### Changed
+- **Flask extension** — now accepts `SCOPED_DATABASE_URL` config key, creates a `ScopedClient` internally, sets the global default so `scoped.objects` works in route handlers
+- **FastAPI middleware** — now accepts `database_url` and `api_key` constructor args, creates a `ScopedClient` internally, sets the global default
+- **Django adapter** — `get_client()` creates a `ScopedClient` from `DjangoORMBackend` and sets the global default on `AppConfig.ready()`
+- **MCP server** — `create_scoped_server()` accepts a `ScopedClient` directly; tools and resources use the namespace API instead of dict-based service access
+- **OTel instrumentation** — `instrument()` now accepts both `ScopedClient` and `ScopedServices`
+- **FastAPI dependencies** — `get_services()` kept for backward compat; new `get_client()` dependency added
+
 ## 0.2.0 (2026-03-31)
 
 ### Added

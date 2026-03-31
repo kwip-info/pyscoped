@@ -61,9 +61,9 @@ class ScopedContextMiddleware:
         header = getattr(settings, "SCOPED_PRINCIPAL_HEADER", "HTTP_X_SCOPED_PRINCIPAL_ID")
         principal_id = request.META.get(header)
         if principal_id:
-            from scoped.contrib._base import resolve_principal_from_id
+            from scoped.contrib.django import get_client
 
-            return resolve_principal_from_id(self._get_backend(), principal_id)
+            return get_client().principals.find(principal_id)
         return None
 
     def __call__(self, request: HttpRequest) -> HttpResponse:
