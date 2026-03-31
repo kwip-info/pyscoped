@@ -1,20 +1,27 @@
 """Scope-aware full-text search over object data and metadata.
 
-Uses SQLite FTS5 for efficient full-text search. Index entries are
-created/updated when objects are indexed. Search results are filtered
-by the caller's visibility (owner-only at Layer 3, scope-aware when
-combined with Layer 4's VisibilityEngine).
+Uses pluggable strategies for the full-text index backend:
+- SQLite FTS5 (default)
+- PostgreSQL tsvector / tsquery
+
+Index entries are created/updated when objects are indexed. Search results
+are filtered by the caller's visibility (owner-only at Layer 3, scope-aware
+when combined with Layer 4's VisibilityEngine).
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from scoped.objects._search_strategies import (
+    PostgresFTSStrategy,
+    SearchStrategy,
+    SQLiteFTS5Strategy,
+)
 from scoped.storage.interface import StorageBackend
-from scoped.types import Lifecycle, generate_id, now_utc
+from scoped.types import generate_id, now_utc
 
 
 # ---------------------------------------------------------------------------
@@ -68,12 +75,17 @@ def index_entry_from_row(row: dict[str, Any]) -> IndexEntry:
 class SearchIndex:
     """Scope-aware full-text search index.
 
-    Indexes object data fields into an FTS5 virtual table for efficient
-    full-text queries. Results are filtered by principal visibility.
+    Indexes object data fields for efficient full-text queries.
+    Results are filtered by principal visibility.
     """
 
     def __init__(self, backend: StorageBackend) -> None:
         self._backend = backend
+        self._strategy: SearchStrategy = (
+            PostgresFTSStrategy()
+            if backend.dialect == "postgres"
+            else SQLiteFTS5Strategy()
+        )
 
     # ------------------------------------------------------------------
     # Indexing
@@ -97,7 +109,7 @@ class SearchIndex:
         Re-indexing the same object replaces old entries.
         """
         # Remove existing index entries for this object
-        self._remove_entries(object_id)
+        self._strategy.remove_entries(self._backend, object_id)
 
         ts = now_utc()
         count = 0
@@ -125,38 +137,19 @@ class SearchIndex:
                     key, text, scope_id, ts.isoformat(),
                 ),
             )
-            # Get the actual rowid assigned by SQLite
-            row = self._backend.fetch_one(
-                "SELECT rowid FROM search_index WHERE id = ?",
-                (entry_id,),
-            )
-            rowid = row["rowid"]
-            # Insert into FTS5 table with matching rowid
-            self._backend.execute(
-                "INSERT INTO search_index_fts (rowid, content) VALUES (?, ?)",
-                (rowid, text),
-            )
+            # Populate FTS index via strategy
+            self._strategy.index_entry(self._backend, entry_id, text)
             count += 1
 
         return count
 
     def remove_object(self, object_id: str) -> int:
         """Remove all index entries for an object. Returns count removed."""
-        # Get entries to remove from FTS
         entries = self._backend.fetch_all(
-            "SELECT rowid, content FROM search_index WHERE object_id = ?",
+            "SELECT id FROM search_index WHERE object_id = ?",
             (object_id,),
         )
-        for entry in entries:
-            self._backend.execute(
-                "DELETE FROM search_index_fts WHERE rowid = ?",
-                (entry["rowid"],),
-            )
-
-        self._backend.execute(
-            "DELETE FROM search_index WHERE object_id = ?",
-            (object_id,),
-        )
+        self._strategy.remove_entries(self._backend, object_id)
         return len(entries)
 
     def reindex_object(
@@ -215,17 +208,8 @@ class SearchIndex:
 
         where = " AND ".join(clauses)
 
-        sql = (
-            "SELECT si.object_id, si.object_type, si.owner_id, si.field_name, "
-            "si.content, fts.rank "
-            "FROM search_index_fts fts "
-            "JOIN search_index si ON si.rowid = fts.rowid "
-            f"WHERE fts.content MATCH ? AND {where} "
-            "ORDER BY fts.rank "
-            "LIMIT ?"
-        )
-
-        rows = self._backend.fetch_all(sql, (query, *params, limit))
+        sql, final_params = self._strategy.build_search_sql(query, where, params, limit)
+        rows = self._backend.fetch_all(sql, final_params)
 
         return [
             SearchResult(
@@ -266,17 +250,8 @@ class SearchIndex:
 
         where = " AND ".join(clauses)
 
-        sql = (
-            "SELECT si.object_id, si.object_type, si.owner_id, si.field_name, "
-            "si.content, fts.rank "
-            "FROM search_index_fts fts "
-            "JOIN search_index si ON si.rowid = fts.rowid "
-            f"WHERE fts.content MATCH ? AND {where} "
-            "ORDER BY fts.rank "
-            "LIMIT ?"
-        )
-
-        rows = self._backend.fetch_all(sql, (query, *params, limit))
+        sql, final_params = self._strategy.build_search_sql(query, where, params, limit)
+        rows = self._backend.fetch_all(sql, final_params)
 
         return [
             SearchResult(
@@ -315,14 +290,8 @@ class SearchIndex:
 
         where = " AND ".join(clauses)
 
-        sql = (
-            "SELECT COUNT(*) as cnt "
-            "FROM search_index_fts fts "
-            "JOIN search_index si ON si.rowid = fts.rowid "
-            f"WHERE fts.content MATCH ? AND {where}"
-        )
-
-        row = self._backend.fetch_one(sql, (query, *params))
+        sql, final_params = self._strategy.build_count_sql(query, where, params)
+        row = self._backend.fetch_one(sql, final_params)
         return row["cnt"] if row else 0
 
     # ------------------------------------------------------------------
@@ -353,22 +322,6 @@ class SearchIndex:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _remove_entries(self, object_id: str) -> None:
-        """Remove all entries for an object from both tables."""
-        entries = self._backend.fetch_all(
-            "SELECT rowid, content FROM search_index WHERE object_id = ?",
-            (object_id,),
-        )
-        for entry in entries:
-            self._backend.execute(
-                "DELETE FROM search_index_fts WHERE rowid = ?",
-                (entry["rowid"],),
-            )
-        self._backend.execute(
-            "DELETE FROM search_index WHERE object_id = ?",
-            (object_id,),
-        )
 
     @staticmethod
     def _to_text(value: Any) -> str:

@@ -70,6 +70,11 @@ class StorageBackend(ABC):
     - Raw query execution
     """
 
+    @property
+    def dialect(self) -> str:
+        """Return the SQL dialect identifier (e.g. ``'sqlite'``, ``'postgres'``)."""
+        return "generic"
+
     @abstractmethod
     def initialize(self) -> None:
         """

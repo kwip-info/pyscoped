@@ -10,24 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from scoped.storage._sql_utils import translate_placeholders as _translate_placeholders
 from scoped.storage.interface import StorageBackend, StorageTransaction
-
-# Pattern for translating ? placeholders to %s, skipping quoted strings.
-_PLACEHOLDER_RE = re.compile(r"'[^']*'|(\?)")
-
-
-def _translate_placeholders(sql: str) -> str:
-    """Convert SQLite-style ``?`` placeholders to Django-style ``%s``.
-
-    Respects single-quoted string literals.
-    """
-
-    def _replace(match: re.Match) -> str:
-        if match.group(1) is not None:
-            return "%s"
-        return match.group(0)
-
-    return _PLACEHOLDER_RE.sub(_replace, sql)
 
 
 def _adapt_schema(schema_sql: str, vendor: str) -> str:

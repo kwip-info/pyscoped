@@ -1,47 +1,66 @@
-"""SQLite storage backend using Python's built-in sqlite3.
+"""PostgreSQL storage backend using psycopg v3.
 
-Synchronous, file-based or in-memory. Ideal for development, testing,
-and single-process deployments.
+Production-grade backend with connection pooling, full ACID transactions,
+and native tsvector full-text search. Requires ``psycopg[binary]`` and
+``psycopg_pool`` — install via ``pip install pyscoped[postgres]``.
 """
 
 from __future__ import annotations
 
-import json
-import sqlite3
 from typing import Any
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+except ImportError as exc:
+    raise ImportError(
+        "PostgreSQL backend requires psycopg and psycopg_pool. "
+        "Install with: pip install pyscoped[postgres]"
+    ) from exc
+
+from scoped.storage._sql_utils import translate_placeholders
 from scoped.storage.interface import StorageBackend, StorageTransaction
 
 
-class SQLiteTransaction(StorageTransaction):
-    """Transaction wrapper around a sqlite3 connection."""
+class PostgresTransaction(StorageTransaction):
+    """Transaction backed by a psycopg connection acquired from the pool."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: psycopg.Connection) -> None:
         self._conn = conn
-        self._cursor = conn.cursor()
         self._conn.execute("BEGIN")
 
     def execute(self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()) -> Any:
-        self._cursor.execute(sql, params)
-        return self._cursor.lastrowid
+        sql = translate_placeholders(sql)
+        self._conn.execute(sql, params)
+        return None
 
     def execute_many(self, sql: str, params_seq: list[tuple[Any, ...]]) -> None:
-        self._cursor.executemany(sql, params_seq)
+        sql = translate_placeholders(sql)
+        cur = self._conn.cursor()
+        for params in params_seq:
+            cur.execute(sql, params)
 
-    def fetch_one(self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()) -> dict[str, Any] | None:
-        self._cursor.execute(sql, params)
-        row = self._cursor.fetchone()
+    def fetch_one(
+        self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()
+    ) -> dict[str, Any] | None:
+        sql = translate_placeholders(sql)
+        cur = self._conn.execute(sql, params)
+        row = cur.fetchone()
         if row is None:
             return None
-        columns = [desc[0] for desc in self._cursor.description]
+        columns = [desc.name for desc in cur.description]
         return dict(zip(columns, row))
 
-    def fetch_all(self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()) -> list[dict[str, Any]]:
-        self._cursor.execute(sql, params)
-        rows = self._cursor.fetchall()
+    def fetch_all(
+        self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()
+    ) -> list[dict[str, Any]]:
+        sql = translate_placeholders(sql)
+        cur = self._conn.execute(sql, params)
+        rows = cur.fetchall()
         if not rows:
             return []
-        columns = [desc[0] for desc in self._cursor.description]
+        columns = [desc.name for desc in cur.description]
         return [dict(zip(columns, row)) for row in rows]
 
     def commit(self) -> None:
@@ -51,91 +70,153 @@ class SQLiteTransaction(StorageTransaction):
         self._conn.rollback()
 
 
-class SQLiteBackend(StorageBackend):
-    """
-    SQLite storage backend.
+class PostgresBackend(StorageBackend):
+    """PostgreSQL storage backend with connection pooling.
 
     Args:
-        path: Database file path, or ":memory:" for in-memory.
-        pragmas: Optional dict of PRAGMA settings.
+        dsn: PostgreSQL connection string
+             (e.g. ``"postgresql://user:pass@localhost/mydb"``).
+        pool_min_size: Minimum connections kept open in the pool.
+        pool_max_size: Maximum connections the pool will create.
+        pool_timeout: Seconds to wait for a connection from the pool.
+        pool_kwargs: Extra keyword arguments forwarded to
+                     ``psycopg_pool.ConnectionPool``.
     """
 
-    def __init__(self, path: str = ":memory:", pragmas: dict[str, str] | None = None) -> None:
-        self._path = path
-        self._pragmas = pragmas or {
-            "journal_mode": "wal",
-            "foreign_keys": "on",
-            "busy_timeout": "5000",
-        }
-        self._conn: sqlite3.Connection | None = None
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        pool_min_size: int = 2,
+        pool_max_size: int = 10,
+        pool_timeout: float = 30.0,
+        pool_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        self._dsn = dsn
+        self._pool_min_size = pool_min_size
+        self._pool_max_size = pool_max_size
+        self._pool_timeout = pool_timeout
+        self._pool_kwargs = pool_kwargs or {}
+        self._pool: ConnectionPool | None = None
 
     @property
     def dialect(self) -> str:
-        return "sqlite"
+        return "postgres"
 
     @property
-    def connection(self) -> sqlite3.Connection:
-        if self._conn is None:
-            raise RuntimeError("SQLiteBackend not initialized — call initialize() first")
-        return self._conn
+    def pool(self) -> ConnectionPool:
+        if self._pool is None:
+            raise RuntimeError("PostgresBackend not initialized — call initialize() first")
+        return self._pool
 
     def initialize(self) -> None:
-        self._conn = sqlite3.connect(self._path, check_same_thread=False)
-        self._conn.row_factory = None  # we handle row→dict ourselves
-
-        for pragma, value in self._pragmas.items():
-            self._conn.execute(f"PRAGMA {pragma} = {value}")
-
+        self._pool = ConnectionPool(
+            self._dsn,
+            min_size=self._pool_min_size,
+            max_size=self._pool_max_size,
+            timeout=self._pool_timeout,
+            kwargs={"autocommit": True},
+            **self._pool_kwargs,
+        )
+        self._pool.wait()
         self._create_schema()
 
     def _create_schema(self) -> None:
         """Create all framework tables."""
-        conn = self.connection
-        conn.executescript(SCHEMA_SQL)
+        with self.pool.connection() as conn:
+            conn.autocommit = False
+            try:
+                for statement in SCHEMA_SQL.split(";"):
+                    stmt = statement.strip()
+                    if stmt and not stmt.startswith("--"):
+                        conn.execute(stmt)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.autocommit = True
 
-    def transaction(self) -> SQLiteTransaction:
-        return SQLiteTransaction(self.connection)
+    def transaction(self) -> PostgresTransaction:
+        conn = self.pool.getconn()
+        conn.autocommit = False
+        return _PoolReturningTransaction(conn, self.pool)
 
     def execute(self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()) -> Any:
-        cursor = self.connection.execute(sql, params)
-        self.connection.commit()
-        return cursor.lastrowid
+        sql = translate_placeholders(sql)
+        with self.pool.connection() as conn:
+            conn.execute(sql, params)
+        return None
 
-    def fetch_one(self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()) -> dict[str, Any] | None:
-        cursor = self.connection.execute(sql, params)
-        row = cursor.fetchone()
-        if row is None:
-            return None
-        columns = [desc[0] for desc in cursor.description]
-        return dict(zip(columns, row))
+    def fetch_one(
+        self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()
+    ) -> dict[str, Any] | None:
+        sql = translate_placeholders(sql)
+        with self.pool.connection() as conn:
+            cur = conn.execute(sql, params)
+            row = cur.fetchone()
+            if row is None:
+                return None
+            columns = [desc.name for desc in cur.description]
+            return dict(zip(columns, row))
 
-    def fetch_all(self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()) -> list[dict[str, Any]]:
-        cursor = self.connection.execute(sql, params)
-        rows = cursor.fetchall()
-        if not rows:
-            return []
-        columns = [desc[0] for desc in cursor.description]
-        return [dict(zip(columns, row)) for row in rows]
-
-    def execute_script(self, sql: str) -> None:
-        self.connection.executescript(sql)
+    def fetch_all(
+        self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()
+    ) -> list[dict[str, Any]]:
+        sql = translate_placeholders(sql)
+        with self.pool.connection() as conn:
+            cur = conn.execute(sql, params)
+            rows = cur.fetchall()
+            if not rows:
+                return []
+            columns = [desc.name for desc in cur.description]
+            return [dict(zip(columns, row)) for row in rows]
 
     def close(self) -> None:
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        if self._pool is not None:
+            self._pool.close()
+            self._pool = None
 
     def table_exists(self, table_name: str) -> bool:
-        result = self.fetch_one(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        row = self.fetch_one(
+            "SELECT 1 AS ok FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = ?",
             (table_name,),
         )
-        return result is not None
+        return row is not None
 
 
-# ---------------------------------------------------------------------------
-# Schema — all framework tables
-# ---------------------------------------------------------------------------
+class _PoolReturningTransaction(PostgresTransaction):
+    """Transaction that returns its connection to the pool on commit/rollback."""
+
+    def __init__(self, conn: psycopg.Connection, pool: ConnectionPool) -> None:
+        self._pool_ref = pool
+        super().__init__(conn)
+
+    def commit(self) -> None:
+        try:
+            self._conn.commit()
+        finally:
+            self._conn.autocommit = True
+            self._pool_ref.putconn(self._conn)
+
+    def rollback(self) -> None:
+        try:
+            self._conn.rollback()
+        finally:
+            self._conn.autocommit = True
+            self._pool_ref.putconn(self._conn)
+
+    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any) -> None:
+        if exc_type is not None:
+            self.rollback()
+
+
+# =========================================================================
+# Schema DDL — identical to SQLite except:
+#   • No FTS5 virtual table (Postgres uses tsvector column + GIN index)
+#   • BLOB → BYTEA for glacial_archives.compressed_data
+# =========================================================================
 
 SCHEMA_SQL = """
 -- =====================================================================
@@ -169,7 +250,7 @@ CREATE INDEX IF NOT EXISTS idx_registry_lifecycle ON registry_entries(lifecycle)
 
 CREATE TABLE IF NOT EXISTS principals (
     id              TEXT PRIMARY KEY,
-    kind            TEXT NOT NULL,          -- application-defined: "user", "team", "org", etc.
+    kind            TEXT NOT NULL,
     display_name    TEXT NOT NULL DEFAULT '',
     registry_entry_id TEXT NOT NULL,
     created_at      TEXT NOT NULL,
@@ -186,7 +267,7 @@ CREATE TABLE IF NOT EXISTS principal_relationships (
     id              TEXT PRIMARY KEY,
     parent_id       TEXT NOT NULL,
     child_id        TEXT NOT NULL,
-    relationship    TEXT NOT NULL DEFAULT 'member_of',  -- "member_of", "owns", "administers", etc.
+    relationship    TEXT NOT NULL DEFAULT 'member_of',
     created_at      TEXT NOT NULL,
     created_by      TEXT NOT NULL,
     metadata_json   TEXT NOT NULL DEFAULT '{}',
@@ -205,8 +286,8 @@ CREATE INDEX IF NOT EXISTS idx_principal_rel_child ON principal_relationships(ch
 
 CREATE TABLE IF NOT EXISTS scoped_objects (
     id              TEXT PRIMARY KEY,
-    object_type     TEXT NOT NULL,          -- registry kind / model name
-    owner_id        TEXT NOT NULL,          -- principal who created it
+    object_type     TEXT NOT NULL,
+    owner_id        TEXT NOT NULL,
     registry_entry_id TEXT,
     current_version INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL,
@@ -222,9 +303,9 @@ CREATE TABLE IF NOT EXISTS object_versions (
     id              TEXT PRIMARY KEY,
     object_id       TEXT NOT NULL,
     version         INTEGER NOT NULL,
-    data_json       TEXT NOT NULL,          -- serialized object state
+    data_json       TEXT NOT NULL,
     created_at      TEXT NOT NULL,
-    created_by      TEXT NOT NULL,          -- principal who made this version
+    created_by      TEXT NOT NULL,
     change_reason   TEXT NOT NULL DEFAULT '',
     checksum        TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (object_id) REFERENCES scoped_objects(id),
@@ -253,11 +334,11 @@ CREATE TABLE IF NOT EXISTS scopes (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
     description     TEXT NOT NULL DEFAULT '',
-    owner_id        TEXT NOT NULL,          -- principal who created the scope
-    parent_scope_id TEXT,                   -- for hierarchy (nullable = top-level)
+    owner_id        TEXT NOT NULL,
+    parent_scope_id TEXT,
     registry_entry_id TEXT,
     created_at      TEXT NOT NULL,
-    lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE, FROZEN, ARCHIVED
+    lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
     metadata_json   TEXT NOT NULL DEFAULT '{}',
     FOREIGN KEY (owner_id) REFERENCES principals(id),
     FOREIGN KEY (parent_scope_id) REFERENCES scopes(id)
@@ -271,10 +352,10 @@ CREATE TABLE IF NOT EXISTS scope_memberships (
     id              TEXT PRIMARY KEY,
     scope_id        TEXT NOT NULL,
     principal_id    TEXT NOT NULL,
-    role            TEXT NOT NULL DEFAULT 'viewer',  -- viewer, editor, admin, owner
+    role            TEXT NOT NULL DEFAULT 'viewer',
     granted_at      TEXT NOT NULL,
     granted_by      TEXT NOT NULL,
-    expires_at      TEXT,                   -- nullable = no expiry
+    expires_at      TEXT,
     lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
     FOREIGN KEY (scope_id) REFERENCES scopes(id),
     FOREIGN KEY (principal_id) REFERENCES principals(id),
@@ -290,8 +371,8 @@ CREATE TABLE IF NOT EXISTS scope_projections (
     scope_id        TEXT NOT NULL,
     object_id       TEXT NOT NULL,
     projected_at    TEXT NOT NULL,
-    projected_by    TEXT NOT NULL,          -- must be the object owner
-    access_level    TEXT NOT NULL DEFAULT 'read',  -- read, write, admin
+    projected_by    TEXT NOT NULL,
+    access_level    TEXT NOT NULL DEFAULT 'read',
     lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
     FOREIGN KEY (scope_id) REFERENCES scopes(id),
     FOREIGN KEY (object_id) REFERENCES scoped_objects(id),
@@ -310,10 +391,10 @@ CREATE TABLE IF NOT EXISTS rules (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
     description     TEXT NOT NULL DEFAULT '',
-    rule_type       TEXT NOT NULL,          -- access, sharing, visibility, ownership, constraint
-    effect          TEXT NOT NULL,          -- ALLOW, DENY
-    priority        INTEGER NOT NULL DEFAULT 0,  -- higher = evaluated first
-    conditions_json TEXT NOT NULL DEFAULT '{}',   -- when does this rule apply?
+    rule_type       TEXT NOT NULL,
+    effect          TEXT NOT NULL,
+    priority        INTEGER NOT NULL DEFAULT 0,
+    conditions_json TEXT NOT NULL DEFAULT '{}',
     registry_entry_id TEXT,
     created_at      TEXT NOT NULL,
     created_by      TEXT NOT NULL,
@@ -343,8 +424,8 @@ CREATE TABLE IF NOT EXISTS rule_versions (
 CREATE TABLE IF NOT EXISTS rule_bindings (
     id              TEXT PRIMARY KEY,
     rule_id         TEXT NOT NULL,
-    target_type     TEXT NOT NULL,          -- 'scope', 'principal', 'object_type', 'object'
-    target_id       TEXT NOT NULL,          -- the id of the scope/principal/object
+    target_type     TEXT NOT NULL,
+    target_id       TEXT NOT NULL,
     bound_at        TEXT NOT NULL,
     bound_by        TEXT NOT NULL,
     lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
@@ -362,19 +443,19 @@ CREATE INDEX IF NOT EXISTS idx_bindings_target ON rule_bindings(target_type, tar
 
 CREATE TABLE IF NOT EXISTS audit_trail (
     id              TEXT PRIMARY KEY,
-    sequence        INTEGER NOT NULL,       -- monotonic sequence number
-    actor_id        TEXT NOT NULL,          -- principal who performed the action
-    action          TEXT NOT NULL,          -- ActionType enum value
-    target_type     TEXT NOT NULL,          -- what kind of thing was acted on
-    target_id       TEXT NOT NULL,          -- id of the target
-    scope_id        TEXT,                   -- scope context (if applicable)
+    sequence        INTEGER NOT NULL,
+    actor_id        TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    target_type     TEXT NOT NULL,
+    target_id       TEXT NOT NULL,
+    scope_id        TEXT,
     timestamp       TEXT NOT NULL,
-    before_state    TEXT,                   -- JSON of state before action (nullable for creates)
-    after_state     TEXT,                   -- JSON of state after action (nullable for deletes)
+    before_state    TEXT,
+    after_state     TEXT,
     metadata_json   TEXT NOT NULL DEFAULT '{}',
-    parent_trace_id TEXT,                   -- for nested/cascaded operations
-    hash            TEXT NOT NULL,          -- hash of this entry (for chain integrity)
-    previous_hash   TEXT NOT NULL DEFAULT '',  -- hash of previous entry
+    parent_trace_id TEXT,
+    hash            TEXT NOT NULL,
+    previous_hash   TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (parent_trace_id) REFERENCES audit_trail(id)
 );
 
@@ -395,10 +476,10 @@ CREATE TABLE IF NOT EXISTS environments (
     name            TEXT NOT NULL,
     description     TEXT NOT NULL DEFAULT '',
     owner_id        TEXT NOT NULL,
-    template_id     TEXT,                   -- nullable: created from template or ad-hoc
-    scope_id        TEXT,                   -- the auto-created isolation scope for this env
-    state           TEXT NOT NULL DEFAULT 'spawning',  -- spawning, active, suspended, completed, discarded, promoted
-    ephemeral       INTEGER NOT NULL DEFAULT 1,  -- 1 = throwaway (default), 0 = persistent
+    template_id     TEXT,
+    scope_id        TEXT,
+    state           TEXT NOT NULL DEFAULT 'spawning',
+    ephemeral       INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL,
     completed_at    TEXT,
     metadata_json   TEXT NOT NULL DEFAULT '{}',
@@ -417,7 +498,7 @@ CREATE TABLE IF NOT EXISTS environment_templates (
     name            TEXT NOT NULL,
     description     TEXT NOT NULL DEFAULT '',
     owner_id        TEXT NOT NULL,
-    config_json     TEXT NOT NULL DEFAULT '{}',  -- template configuration
+    config_json     TEXT NOT NULL DEFAULT '{}',
     created_at      TEXT NOT NULL,
     lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
     FOREIGN KEY (owner_id) REFERENCES principals(id)
@@ -428,7 +509,7 @@ CREATE TABLE IF NOT EXISTS environment_snapshots (
     id              TEXT PRIMARY KEY,
     environment_id  TEXT NOT NULL,
     name            TEXT NOT NULL DEFAULT '',
-    snapshot_data   TEXT NOT NULL,           -- full serialized environment state
+    snapshot_data   TEXT NOT NULL,
     created_at      TEXT NOT NULL,
     created_by      TEXT NOT NULL,
     checksum        TEXT NOT NULL DEFAULT '',
@@ -442,7 +523,7 @@ CREATE TABLE IF NOT EXISTS environment_objects (
     id              TEXT PRIMARY KEY,
     environment_id  TEXT NOT NULL,
     object_id       TEXT NOT NULL,
-    origin          TEXT NOT NULL DEFAULT 'created',  -- 'created' (born here) or 'projected' (from outside)
+    origin          TEXT NOT NULL DEFAULT 'created',
     added_at        TEXT NOT NULL,
     FOREIGN KEY (environment_id) REFERENCES environments(id),
     FOREIGN KEY (object_id) REFERENCES scoped_objects(id),
@@ -458,9 +539,9 @@ CREATE INDEX IF NOT EXISTS idx_env_objects_env ON environment_objects(environmen
 
 CREATE TABLE IF NOT EXISTS stages (
     id              TEXT PRIMARY KEY,
-    pipeline_id     TEXT NOT NULL,           -- which pipeline this stage belongs to
+    pipeline_id     TEXT NOT NULL,
     name            TEXT NOT NULL,
-    ordinal         INTEGER NOT NULL,        -- position in pipeline
+    ordinal         INTEGER NOT NULL,
     metadata_json   TEXT NOT NULL DEFAULT '{}',
     UNIQUE(pipeline_id, name)
 );
@@ -479,7 +560,7 @@ CREATE TABLE IF NOT EXISTS pipelines (
 CREATE TABLE IF NOT EXISTS stage_transitions (
     id              TEXT PRIMARY KEY,
     object_id       TEXT NOT NULL,
-    from_stage_id   TEXT,                    -- nullable for initial placement
+    from_stage_id   TEXT,
     to_stage_id     TEXT NOT NULL,
     transitioned_at TEXT NOT NULL,
     transitioned_by TEXT NOT NULL,
@@ -496,11 +577,11 @@ CREATE INDEX IF NOT EXISTS idx_transitions_to ON stage_transitions(to_stage_id);
 CREATE TABLE IF NOT EXISTS flow_channels (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
-    source_type     TEXT NOT NULL,           -- 'environment', 'scope', 'stage'
+    source_type     TEXT NOT NULL,
     source_id       TEXT NOT NULL,
     target_type     TEXT NOT NULL,
     target_id       TEXT NOT NULL,
-    allowed_types   TEXT NOT NULL DEFAULT '[]',  -- JSON array of object types that can flow
+    allowed_types   TEXT NOT NULL DEFAULT '[]',
     owner_id        TEXT NOT NULL,
     created_at      TEXT NOT NULL,
     lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
@@ -514,9 +595,9 @@ CREATE INDEX IF NOT EXISTS idx_flow_target ON flow_channels(target_type, target_
 CREATE TABLE IF NOT EXISTS promotions (
     id              TEXT PRIMARY KEY,
     object_id       TEXT NOT NULL,
-    source_env_id   TEXT NOT NULL,           -- environment it came from
-    target_scope_id TEXT NOT NULL,           -- scope it's being promoted into
-    target_stage_id TEXT,                    -- optional: stage in the target pipeline
+    source_env_id   TEXT NOT NULL,
+    target_scope_id TEXT NOT NULL,
+    target_stage_id TEXT,
     promoted_at     TEXT NOT NULL,
     promoted_by     TEXT NOT NULL,
     FOREIGN KEY (object_id) REFERENCES scoped_objects(id),
@@ -536,7 +617,7 @@ CREATE INDEX IF NOT EXISTS idx_promotions_scope ON promotions(target_scope_id);
 CREATE TABLE IF NOT EXISTS deployment_targets (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
-    target_type     TEXT NOT NULL,           -- application-defined: 'production', 'staging', 'api', etc.
+    target_type     TEXT NOT NULL,
     config_json     TEXT NOT NULL DEFAULT '{}',
     owner_id        TEXT NOT NULL,
     created_at      TEXT NOT NULL,
@@ -548,13 +629,13 @@ CREATE TABLE IF NOT EXISTS deployment_targets (
 CREATE TABLE IF NOT EXISTS deployments (
     id              TEXT PRIMARY KEY,
     target_id       TEXT NOT NULL,
-    object_id       TEXT,                    -- specific object being deployed (nullable for bulk)
-    scope_id        TEXT,                    -- scope being deployed (nullable for single object)
+    object_id       TEXT,
+    scope_id        TEXT,
     version         INTEGER NOT NULL DEFAULT 1,
-    state           TEXT NOT NULL DEFAULT 'pending',  -- pending, deploying, deployed, failed, rolled_back
+    state           TEXT NOT NULL DEFAULT 'pending',
     deployed_at     TEXT,
     deployed_by     TEXT NOT NULL,
-    rollback_of     TEXT,                    -- nullable: if this deployment is a rollback of another
+    rollback_of     TEXT,
     metadata_json   TEXT NOT NULL DEFAULT '{}',
     FOREIGN KEY (target_id) REFERENCES deployment_targets(id),
     FOREIGN KEY (object_id) REFERENCES scoped_objects(id),
@@ -569,7 +650,7 @@ CREATE INDEX IF NOT EXISTS idx_deploy_state ON deployments(state);
 CREATE TABLE IF NOT EXISTS deployment_gates (
     id              TEXT PRIMARY KEY,
     deployment_id   TEXT NOT NULL,
-    gate_type       TEXT NOT NULL,           -- 'stage_check', 'rule_check', 'approval', 'custom'
+    gate_type       TEXT NOT NULL,
     passed          INTEGER NOT NULL DEFAULT 0,
     checked_at      TEXT NOT NULL,
     details_json    TEXT NOT NULL DEFAULT '{}',
@@ -588,11 +669,11 @@ CREATE TABLE IF NOT EXISTS secrets (
     name            TEXT NOT NULL,
     description     TEXT NOT NULL DEFAULT '',
     owner_id        TEXT NOT NULL,
-    object_id       TEXT NOT NULL,           -- secrets are scoped objects (versioned, isolated)
+    object_id       TEXT NOT NULL,
     current_version INTEGER NOT NULL DEFAULT 1,
-    classification  TEXT NOT NULL DEFAULT 'standard',  -- standard, sensitive, critical
+    classification  TEXT NOT NULL DEFAULT 'standard',
     created_at      TEXT NOT NULL,
-    expires_at      TEXT,                    -- nullable = no expiry
+    expires_at      TEXT,
     last_rotated_at TEXT,
     lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
     FOREIGN KEY (owner_id) REFERENCES principals(id),
@@ -607,12 +688,12 @@ CREATE TABLE IF NOT EXISTS secret_versions (
     id              TEXT PRIMARY KEY,
     secret_id       TEXT NOT NULL,
     version         INTEGER NOT NULL,
-    encrypted_value TEXT NOT NULL,           -- ciphertext only, never plaintext
+    encrypted_value TEXT NOT NULL,
     encryption_algo TEXT NOT NULL DEFAULT 'fernet',
-    key_id          TEXT NOT NULL,           -- which encryption key was used
+    key_id          TEXT NOT NULL,
     created_at      TEXT NOT NULL,
     created_by      TEXT NOT NULL,
-    reason          TEXT NOT NULL DEFAULT '',  -- rotation reason
+    reason          TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (secret_id) REFERENCES secrets(id),
     UNIQUE(secret_id, version)
 );
@@ -623,14 +704,14 @@ CREATE INDEX IF NOT EXISTS idx_secret_versions ON secret_versions(secret_id);
 CREATE TABLE IF NOT EXISTS secret_refs (
     id              TEXT PRIMARY KEY,
     secret_id       TEXT NOT NULL,
-    ref_token       TEXT NOT NULL UNIQUE,    -- opaque token used to reference without exposing value
-    granted_to      TEXT NOT NULL,           -- principal id
-    scope_id        TEXT,                    -- scope this ref is valid within
-    environment_id  TEXT,                    -- environment this ref is valid within
+    ref_token       TEXT NOT NULL UNIQUE,
+    granted_to      TEXT NOT NULL,
+    scope_id        TEXT,
+    environment_id  TEXT,
     granted_at      TEXT NOT NULL,
     granted_by      TEXT NOT NULL,
     expires_at      TEXT,
-    lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE, REVOKED
+    lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
     FOREIGN KEY (secret_id) REFERENCES secrets(id),
     FOREIGN KEY (granted_to) REFERENCES principals(id)
 );
@@ -645,11 +726,11 @@ CREATE TABLE IF NOT EXISTS secret_access_log (
     secret_id       TEXT NOT NULL,
     ref_id          TEXT,
     accessor_id     TEXT NOT NULL,
-    access_type     TEXT NOT NULL,           -- 'read', 'rotate', 'revoke'
+    access_type     TEXT NOT NULL,
     accessed_at     TEXT NOT NULL,
     environment_id  TEXT,
     scope_id        TEXT,
-    result          TEXT NOT NULL DEFAULT 'success',  -- success, denied, expired
+    result          TEXT NOT NULL DEFAULT 'success',
     FOREIGN KEY (secret_id) REFERENCES secrets(id),
     FOREIGN KEY (accessor_id) REFERENCES principals(id)
 );
@@ -660,12 +741,12 @@ CREATE INDEX IF NOT EXISTS idx_secret_access_time ON secret_access_log(accessed_
 
 CREATE TABLE IF NOT EXISTS secret_policies (
     id              TEXT PRIMARY KEY,
-    secret_id       TEXT,                    -- nullable = applies globally to classification
-    classification  TEXT,                    -- nullable = applies to specific secret
-    max_age_seconds INTEGER,                 -- max time before rotation required
+    secret_id       TEXT,
+    classification  TEXT,
+    max_age_seconds INTEGER,
     auto_rotate     INTEGER NOT NULL DEFAULT 0,
-    allowed_scopes  TEXT NOT NULL DEFAULT '[]',   -- JSON array of scope ids
-    allowed_envs    TEXT NOT NULL DEFAULT '[]',   -- JSON array of environment ids
+    allowed_scopes  TEXT NOT NULL DEFAULT '[]',
+    allowed_envs    TEXT NOT NULL DEFAULT '[]',
     created_at      TEXT NOT NULL,
     created_by      TEXT NOT NULL,
     FOREIGN KEY (secret_id) REFERENCES secrets(id)
@@ -680,11 +761,11 @@ CREATE TABLE IF NOT EXISTS integrations (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
     description     TEXT NOT NULL DEFAULT '',
-    integration_type TEXT NOT NULL,          -- 'github', 'slack', 'database', 'api', 'custom'
+    integration_type TEXT NOT NULL,
     owner_id        TEXT NOT NULL,
-    scope_id        TEXT,                    -- scope this integration operates within
-    config_json     TEXT NOT NULL DEFAULT '{}',  -- non-secret configuration
-    credentials_ref TEXT,                    -- secret_ref id for credentials
+    scope_id        TEXT,
+    config_json     TEXT NOT NULL DEFAULT '{}',
+    credentials_ref TEXT,
     created_at      TEXT NOT NULL,
     lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
     metadata_json   TEXT NOT NULL DEFAULT '{}',
@@ -702,9 +783,9 @@ CREATE TABLE IF NOT EXISTS plugins (
     description     TEXT NOT NULL DEFAULT '',
     version         TEXT NOT NULL DEFAULT '0.1.0',
     owner_id        TEXT NOT NULL,
-    scope_id        TEXT,                    -- plugin's own isolation scope
-    manifest_json   TEXT NOT NULL DEFAULT '{}',  -- declared permissions, hooks, kinds
-    state           TEXT NOT NULL DEFAULT 'installed',  -- installed, active, suspended, uninstalled
+    scope_id        TEXT,
+    manifest_json   TEXT NOT NULL DEFAULT '{}',
+    state           TEXT NOT NULL DEFAULT 'installed',
     installed_at    TEXT NOT NULL,
     activated_at    TEXT,
     metadata_json   TEXT NOT NULL DEFAULT '{}',
@@ -718,8 +799,8 @@ CREATE INDEX IF NOT EXISTS idx_plugins_state ON plugins(state);
 CREATE TABLE IF NOT EXISTS plugin_hooks (
     id              TEXT PRIMARY KEY,
     plugin_id       TEXT NOT NULL,
-    hook_point      TEXT NOT NULL,           -- e.g. 'pre_object_create', 'post_scope_modify'
-    handler_ref     TEXT NOT NULL,           -- registry URN of the handler function
+    hook_point      TEXT NOT NULL,
+    handler_ref     TEXT NOT NULL,
     priority        INTEGER NOT NULL DEFAULT 0,
     lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
     FOREIGN KEY (plugin_id) REFERENCES plugins(id)
@@ -732,8 +813,8 @@ CREATE INDEX IF NOT EXISTS idx_plugin_hooks_plugin ON plugin_hooks(plugin_id);
 CREATE TABLE IF NOT EXISTS plugin_permissions (
     id              TEXT PRIMARY KEY,
     plugin_id       TEXT NOT NULL,
-    permission_type TEXT NOT NULL,           -- 'scope_access', 'object_type', 'secret_access', 'hook'
-    target_ref      TEXT NOT NULL,           -- what the permission applies to
+    permission_type TEXT NOT NULL,
+    target_ref      TEXT NOT NULL,
     granted_at      TEXT NOT NULL,
     granted_by      TEXT NOT NULL,
     lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
@@ -751,12 +832,12 @@ CREATE TABLE IF NOT EXISTS connectors (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
     description     TEXT NOT NULL DEFAULT '',
-    local_org_id    TEXT NOT NULL,           -- our side
-    remote_org_id   TEXT NOT NULL,           -- their side (external identifier)
-    remote_endpoint TEXT NOT NULL,           -- how to reach the other side
-    state           TEXT NOT NULL DEFAULT 'proposed',  -- proposed, pending_approval, active, suspended, revoked
-    direction       TEXT NOT NULL DEFAULT 'bidirectional',  -- inbound, outbound, bidirectional
-    local_scope_id  TEXT,                    -- connector scope on our side
+    local_org_id    TEXT NOT NULL,
+    remote_org_id   TEXT NOT NULL,
+    remote_endpoint TEXT NOT NULL,
+    state           TEXT NOT NULL DEFAULT 'proposed',
+    direction       TEXT NOT NULL DEFAULT 'bidirectional',
+    local_scope_id  TEXT,
     created_at      TEXT NOT NULL,
     created_by      TEXT NOT NULL,
     approved_at     TEXT,
@@ -773,7 +854,7 @@ CREATE INDEX IF NOT EXISTS idx_connectors_org ON connectors(local_org_id);
 CREATE TABLE IF NOT EXISTS connector_policies (
     id              TEXT PRIMARY KEY,
     connector_id    TEXT NOT NULL,
-    policy_type     TEXT NOT NULL,           -- 'allow_types', 'deny_types', 'rate_limit', 'classification'
+    policy_type     TEXT NOT NULL,
     config_json     TEXT NOT NULL DEFAULT '{}',
     created_at      TEXT NOT NULL,
     created_by      TEXT NOT NULL,
@@ -786,10 +867,10 @@ CREATE INDEX IF NOT EXISTS idx_connector_policies ON connector_policies(connecto
 CREATE TABLE IF NOT EXISTS connector_traffic (
     id              TEXT PRIMARY KEY,
     connector_id    TEXT NOT NULL,
-    direction       TEXT NOT NULL,           -- 'inbound' or 'outbound'
+    direction       TEXT NOT NULL,
     object_type     TEXT NOT NULL,
     object_id       TEXT,
-    action          TEXT NOT NULL,           -- 'sync', 'read', 'event'
+    action          TEXT NOT NULL,
     timestamp       TEXT NOT NULL,
     status          TEXT NOT NULL DEFAULT 'success',
     size_bytes      INTEGER,
@@ -804,14 +885,14 @@ CREATE TABLE IF NOT EXISTS marketplace_listings (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
     description     TEXT NOT NULL DEFAULT '',
-    publisher_id    TEXT NOT NULL,           -- principal who published
-    listing_type    TEXT NOT NULL,           -- 'connector_template', 'plugin', 'integration'
+    publisher_id    TEXT NOT NULL,
+    listing_type    TEXT NOT NULL,
     version         TEXT NOT NULL DEFAULT '1.0.0',
-    config_template TEXT NOT NULL DEFAULT '{}',  -- template for creating instances
-    visibility      TEXT NOT NULL DEFAULT 'public',  -- public, unlisted, private
+    config_template TEXT NOT NULL DEFAULT '{}',
+    visibility      TEXT NOT NULL DEFAULT 'public',
     published_at    TEXT NOT NULL,
     updated_at      TEXT,
-    lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE, DEPRECATED, REMOVED
+    lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
     download_count  INTEGER NOT NULL DEFAULT 0,
     metadata_json   TEXT NOT NULL DEFAULT '{}',
     FOREIGN KEY (publisher_id) REFERENCES principals(id)
@@ -843,9 +924,9 @@ CREATE TABLE IF NOT EXISTS marketplace_installs (
     installer_id    TEXT NOT NULL,
     installed_at    TEXT NOT NULL,
     version         TEXT NOT NULL,
-    config_json     TEXT NOT NULL DEFAULT '{}',  -- instance-specific config
-    result_ref      TEXT,                    -- id of the created connector/plugin/integration
-    result_type     TEXT,                    -- 'connector', 'plugin', 'integration'
+    config_json     TEXT NOT NULL DEFAULT '{}',
+    result_ref      TEXT,
+    result_type     TEXT,
     FOREIGN KEY (listing_id) REFERENCES marketplace_listings(id),
     FOREIGN KEY (installer_id) REFERENCES principals(id)
 );
@@ -861,7 +942,7 @@ CREATE TABLE IF NOT EXISTS contracts (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
     description     TEXT NOT NULL DEFAULT '',
-    object_type     TEXT NOT NULL,          -- which object type this contract describes
+    object_type     TEXT NOT NULL,
     owner_id        TEXT NOT NULL,
     current_version INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL,
@@ -878,8 +959,8 @@ CREATE TABLE IF NOT EXISTS contract_versions (
     id              TEXT PRIMARY KEY,
     contract_id     TEXT NOT NULL,
     version         INTEGER NOT NULL,
-    fields_json     TEXT NOT NULL DEFAULT '[]',     -- array of field definitions
-    constraints_json TEXT NOT NULL DEFAULT '[]',    -- array of cross-field constraints
+    fields_json     TEXT NOT NULL DEFAULT '[]',
+    constraints_json TEXT NOT NULL DEFAULT '[]',
     created_at      TEXT NOT NULL,
     created_by      TEXT NOT NULL,
     change_reason   TEXT NOT NULL DEFAULT '',
@@ -899,13 +980,13 @@ CREATE TABLE IF NOT EXISTS blobs (
     filename        TEXT NOT NULL,
     content_type    TEXT NOT NULL,
     size_bytes      INTEGER NOT NULL,
-    content_hash    TEXT NOT NULL,          -- SHA-256 of content
+    content_hash    TEXT NOT NULL,
     owner_id        TEXT NOT NULL,
     created_at      TEXT NOT NULL,
-    storage_path    TEXT NOT NULL,          -- backend-specific path/key
+    storage_path    TEXT NOT NULL,
     current_version INTEGER NOT NULL DEFAULT 1,
     lifecycle       TEXT NOT NULL DEFAULT 'ACTIVE',
-    object_id       TEXT,                   -- optional link to a scoped_object
+    object_id       TEXT,
     metadata_json   TEXT NOT NULL DEFAULT '{}',
     FOREIGN KEY (owner_id) REFERENCES principals(id),
     FOREIGN KEY (object_id) REFERENCES scoped_objects(id)
@@ -957,7 +1038,7 @@ CREATE INDEX IF NOT EXISTS idx_scope_settings_key ON scope_settings(key);
 
 
 -- =====================================================================
--- SEARCH INDEX (full-text search)
+-- SEARCH INDEX (Postgres tsvector full-text search)
 -- =====================================================================
 
 CREATE TABLE IF NOT EXISTS search_index (
@@ -969,6 +1050,7 @@ CREATE TABLE IF NOT EXISTS search_index (
     content         TEXT NOT NULL,
     scope_id        TEXT,
     indexed_at      TEXT NOT NULL,
+    search_vector   tsvector,
     FOREIGN KEY (object_id) REFERENCES scoped_objects(id)
 );
 
@@ -976,11 +1058,7 @@ CREATE INDEX IF NOT EXISTS idx_search_object ON search_index(object_id);
 CREATE INDEX IF NOT EXISTS idx_search_owner ON search_index(owner_id);
 CREATE INDEX IF NOT EXISTS idx_search_type ON search_index(object_type);
 CREATE INDEX IF NOT EXISTS idx_search_scope ON search_index(scope_id);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS search_index_fts USING fts5(
-    content,
-    content_rowid='rowid'
-);
+CREATE INDEX IF NOT EXISTS idx_search_fts ON search_index USING gin(search_vector);
 
 
 -- =====================================================================
@@ -1072,7 +1150,7 @@ CREATE TABLE IF NOT EXISTS glacial_archives (
     sealed          INTEGER NOT NULL DEFAULT 0,
     sealed_at       TEXT,
     content_hash    TEXT NOT NULL,
-    compressed_data BLOB NOT NULL,
+    compressed_data BYTEA NOT NULL,
     compressed_size INTEGER NOT NULL,
     original_size   INTEGER NOT NULL,
     entry_count     INTEGER NOT NULL DEFAULT 0,

@@ -792,8 +792,18 @@ class InitialSchema(BaseMigration):
 
     def down(self, backend: StorageBackend) -> None:
         # Drop all tables in reverse dependency order.
-        # We disable foreign keys temporarily for clean drops.
-        statements = ["PRAGMA foreign_keys = OFF"]
+        # Disable FK checks temporarily for clean drops.
+        statements: list[str] = []
+        if backend.dialect == "postgres":
+            statements.append("SET session_replication_role = replica")
+        else:
+            statements.append("PRAGMA foreign_keys = OFF")
+
         statements.extend(f"DROP TABLE IF EXISTS {table}" for table in _TABLES)
-        statements.append("PRAGMA foreign_keys = ON")
+
+        if backend.dialect == "postgres":
+            statements.append("SET session_replication_role = DEFAULT")
+        else:
+            statements.append("PRAGMA foreign_keys = ON")
+
         backend.execute_script(";\n".join(statements))

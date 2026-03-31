@@ -38,6 +38,13 @@ class ScopedExtension:
             path = app.config.get("SCOPED_SQLITE_PATH", ":memory:")
             self._backend = SQLiteBackend(path)
             self._backend.initialize()
+        elif backend_type == "postgres":
+            from scoped.storage.postgres import PostgresBackend
+
+            dsn = app.config.get("SCOPED_POSTGRES_DSN", "")
+            opts = app.config.get("SCOPED_POSTGRES_OPTIONS", {})
+            self._backend = PostgresBackend(dsn, **opts)
+            self._backend.initialize()
 
         from scoped.contrib._base import build_services
 

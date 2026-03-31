@@ -4,7 +4,7 @@
 
 Scoped guarantees that anything built on it can be isolated, shared, traced, and rolled back — to any degree, at any time, by anyone with the right to do so.
 
-Zero dependencies. SQLite included. 1,500+ tests. Python 3.11+.
+Zero dependencies. SQLite included. Postgres ready. 1,590+ tests. Python 3.11+.
 
 ```bash
 pip install pyscoped
@@ -296,7 +296,11 @@ mcp.run()
 
 ## Storage
 
-The default backend is SQLite (zero dependencies, included). The `StorageBackend` interface can be implemented for any database:
+The default backend is SQLite (zero dependencies, included). PostgreSQL is supported for production via `psycopg` v3 with connection pooling:
+
+```bash
+pip install pyscoped[postgres]
+```
 
 ```python
 from scoped.storage.sqlite import SQLiteBackend
@@ -309,37 +313,70 @@ backend.initialize()
 backend = SQLiteBackend("app.db")
 backend.initialize()
 
-# Django ORM backend (production)
+# PostgreSQL (production)
+from scoped.storage.postgres import PostgresBackend
+backend = PostgresBackend("postgresql://user:pass@localhost/mydb")
+backend.initialize()
+
+# Django ORM backend
 from scoped.contrib.django import get_backend
 backend = get_backend()
 ```
 
-## Testing
+### Cloud Integrations
 
-Scoped includes a compliance testing engine for verifying invariants:
+```bash
+pip install pyscoped[aws]     # S3 blob storage + AWS KMS encryption
+pip install pyscoped[gcp]     # GCS blob storage + GCP Cloud KMS encryption
+pip install pyscoped[otel]    # OpenTelemetry instrumentation
+```
 
 ```python
-from scoped.testing.base import ScopedTestCase
+# AWS KMS for secrets (Layer 11)
+from scoped.secrets import AWSKMSBackend
+encryption = AWSKMSBackend(region_name="us-east-1")
 
-class MyTest(ScopedTestCase):
-    def test_isolation(self):
-        obj = self.create_object("doc", self.user_a, {"title": "Private"})
-        # user_b cannot read user_a's object
-        assert self.read_object(obj.id, as_principal=self.user_b) is None
+# S3 for blob storage (Extension A4)
+from scoped.storage import S3BlobBackend
+blobs = S3BlobBackend("my-bucket")
 
-    def test_versioning(self):
-        obj = self.create_object("doc", self.user_a, {"v": 1})
-        self.manager.update(obj.id, principal_id=self.user_a.id, data={"v": 2})
-        # Both versions exist
-        versions = self.backend.fetch_all(
-            "SELECT * FROM object_versions WHERE object_id = ?", (obj.id,)
-        )
-        assert len(versions) == 2
+# OpenTelemetry instrumentation
+from scoped.contrib.otel import instrument
+services = build_services(backend)
+instrument(services)  # All operations now emit OTel spans
+```
+
+## Testing
+
+Scoped includes a compliance testing engine, test factories, assertion helpers, and importable pytest fixtures:
+
+```python
+from scoped.testing.factories import ScopedFactory
+from scoped.testing.assertions import assert_isolated, assert_version_count
+
+def test_isolation(scoped_services, alice, bob):
+    factory = ScopedFactory(scoped_services)
+    doc, _ = factory.object(alice, data={"title": "Private"})
+
+    assert_isolated(scoped_services.backend, doc.id, alice.id, bob.id)
+
+def test_versioning(scoped_services, alice):
+    factory = ScopedFactory(scoped_services)
+    doc, _ = factory.object(alice, data={"v": 1})
+    scoped_services.manager.update(doc.id, principal_id=alice.id, data={"v": 2})
+
+    assert_version_count(scoped_services.backend, doc.id, 2)
+```
+
+Register the fixtures in your `conftest.py`:
+
+```python
+from scoped.testing.fixtures import scoped_backend, scoped_services, alice, bob
 ```
 
 ```bash
 pip install pyscoped[dev]
-pytest                          # 1,500+ tests
+pytest                          # 1,590+ tests
 pytest tests/test_objects/      # one layer
 pytest tests/test_compliance/   # invariant validation
 ```
@@ -353,7 +390,10 @@ pytest tests/test_compliance/   # invariant validation
 | Events, Notifications, Scheduling | 117 |
 | Compliance Engine (Layer 0) | 87 |
 | Framework Adapters (D1-D4) | 83 |
-| **Total** | **1,493+** |
+| Cloud Integrations (Postgres, AWS, GCP) | 46 |
+| Auto-Rotation + Testing Utilities | 36 |
+| OTel Instrumentation | 6 |
+| **Total** | **1,591+** |
 
 ## Documentation
 
@@ -369,6 +409,7 @@ pytest tests/test_compliance/   # invariant validation
 
 - Python 3.11+
 - No required dependencies (SQLite backend included)
+- Optional: `pyscoped[postgres]`, `pyscoped[aws]`, `pyscoped[gcp]`, `pyscoped[otel]`
 
 ## License
 

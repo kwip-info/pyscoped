@@ -28,6 +28,7 @@ __all__ = [
     "ArchiveEntry",
     "ArchiveManager",
     "BlobBackend",
+    "GCSBlobBackend",
     "GlacialArchive",
     "InMemoryBlobBackend",
     "LocalBlobBackend",
@@ -36,7 +37,9 @@ __all__ = [
     "MigrationRegistry",
     "MigrationRunner",
     "MigrationStatus",
+    "PostgresBackend",
     "RetentionPolicy",
+    "S3BlobBackend",
     "StorageBackend",
     "StorageTier",
     "StorageTransaction",
@@ -45,3 +48,19 @@ __all__ = [
     "TierManager",
     "TierTransitionCandidate",
 ]
+
+
+def __getattr__(name: str):
+    if name == "PostgresBackend":
+        from scoped.storage.postgres import PostgresBackend
+
+        return PostgresBackend
+    if name == "S3BlobBackend":
+        from scoped.storage.blobs_s3 import S3BlobBackend
+
+        return S3BlobBackend
+    if name == "GCSBlobBackend":
+        from scoped.storage.blobs_gcs import GCSBlobBackend
+
+        return GCSBlobBackend
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

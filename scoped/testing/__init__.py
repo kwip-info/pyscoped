@@ -3,8 +3,18 @@
 Validates all framework invariants — at test time (static) and at runtime.
 """
 
+from scoped.testing.assertions import (
+    assert_audit_recorded,
+    assert_hash_chain_valid,
+    assert_isolated,
+    assert_secret_never_leaked,
+    assert_tombstoned,
+    assert_version_count,
+    assert_visible,
+)
 from scoped.testing.base import ScopedTestCase
 from scoped.testing.auditor import ComplianceAuditor
+from scoped.testing.factories import ScopedFactory
 from scoped.testing.fuzzer import IsolationFuzzer
 from scoped.testing.rollback import RollbackVerifier
 from scoped.testing.introspection import RegistryIntrospector
@@ -24,6 +34,7 @@ from scoped.testing.manifest import (
 )
 
 __all__ = [
+    "ScopedFactory",
     "ScopedTestCase",
     "ComplianceAuditor",
     "IsolationFuzzer",
@@ -43,4 +54,11 @@ __all__ = [
     "get_layers_for_invariant",
     "get_registry_layers",
     "get_audit_layers",
+    "assert_audit_recorded",
+    "assert_hash_chain_valid",
+    "assert_isolated",
+    "assert_secret_never_leaked",
+    "assert_tombstoned",
+    "assert_version_count",
+    "assert_visible",
 ]

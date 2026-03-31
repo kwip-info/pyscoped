@@ -23,10 +23,22 @@ class SQLiteRegistryStore(RegistryStore):
         snapshot = entry.snapshot()
         self._backend.execute(
             """
-            INSERT OR REPLACE INTO registry_entries
+            INSERT INTO registry_entries
                 (id, urn, kind, namespace, name, lifecycle, registered_at,
                  registered_by, entry_version, previous_entry_id, metadata_json, tags_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                urn = excluded.urn,
+                kind = excluded.kind,
+                namespace = excluded.namespace,
+                name = excluded.name,
+                lifecycle = excluded.lifecycle,
+                registered_at = excluded.registered_at,
+                registered_by = excluded.registered_by,
+                entry_version = excluded.entry_version,
+                previous_entry_id = excluded.previous_entry_id,
+                metadata_json = excluded.metadata_json,
+                tags_json = excluded.tags_json
             """,
             (
                 snapshot["id"],

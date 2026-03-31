@@ -17,11 +17,18 @@ from scoped.secrets.models import (
     SecretVersion,
 )
 from scoped.secrets.policy import SecretPolicyManager
+from scoped.secrets.rotation import (
+    make_rotation_executor,
+    run_pending_rotations,
+    schedule_auto_rotations,
+)
 from scoped.secrets.vault import SecretVault
 
 __all__ = [
     "AccessResult",
+    "AWSKMSBackend",
     "FernetBackend",
+    "GCPKMSBackend",
     "InMemoryBackend",
     "LeakDetector",
     "Secret",
@@ -33,4 +40,19 @@ __all__ = [
     "SecretRef",
     "SecretVault",
     "SecretVersion",
+    "make_rotation_executor",
+    "run_pending_rotations",
+    "schedule_auto_rotations",
 ]
+
+
+def __getattr__(name: str):
+    if name == "AWSKMSBackend":
+        from scoped.secrets.aws_kms import AWSKMSBackend
+
+        return AWSKMSBackend
+    if name == "GCPKMSBackend":
+        from scoped.secrets.gcp_kms import GCPKMSBackend
+
+        return GCPKMSBackend
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

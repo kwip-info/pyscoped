@@ -83,7 +83,10 @@ class AddTieringArchival(BaseMigration):
         return "add_tiering_archival"
 
     def up(self, backend: StorageBackend) -> None:
-        backend.execute_script(_UP_SQL)
+        sql = _UP_SQL
+        if backend.dialect == "postgres":
+            sql = sql.replace("BLOB NOT NULL", "BYTEA NOT NULL")
+        backend.execute_script(sql)
 
     def down(self, backend: StorageBackend) -> None:
         backend.execute_script(

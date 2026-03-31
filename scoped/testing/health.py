@@ -88,11 +88,23 @@ class HealthChecker:
                 required_tables.extend(ext.tables)
 
         try:
-            existing = self._backend.fetch_all(
-                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')",
-                (),
-            )
+            if self._backend.dialect == "postgres":
+                existing = self._backend.fetch_all(
+                    "SELECT table_name AS name FROM information_schema.tables "
+                    "WHERE table_schema = 'public'",
+                    (),
+                )
+            else:
+                existing = self._backend.fetch_all(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')",
+                    (),
+                )
             existing_names = {r["name"] for r in existing}
+
+            # search_index_fts is a SQLite FTS5 virtual table; Postgres uses
+            # a tsvector column on search_index instead.
+            if self._backend.dialect == "postgres":
+                required_tables = [t for t in required_tables if t != "search_index_fts"]
 
             missing = [t for t in required_tables if t not in existing_names]
 
@@ -117,6 +129,15 @@ class HealthChecker:
     def check_fk_integrity(self) -> HealthCheck:
         """Verify foreign key constraints are satisfied across all tables."""
         try:
+            if self._backend.dialect == "postgres":
+                # Postgres enforces FK constraints at write-time; no batch check
+                # is needed. Report as healthy.
+                return HealthCheck(
+                    name="fk_integrity",
+                    passed=True,
+                    detail="PostgreSQL enforces FK constraints natively",
+                )
+
             violations = self._backend.fetch_all(
                 "PRAGMA foreign_key_check", (),
             )
@@ -165,11 +186,18 @@ class HealthChecker:
     def check_migration_state(self) -> HealthCheck:
         """Verify the migration table exists and has entries."""
         try:
-            row = self._backend.fetch_one(
-                "SELECT COUNT(*) as cnt FROM sqlite_master "
-                "WHERE type='table' AND name='scoped_migrations'",
-                (),
-            )
+            if self._backend.dialect == "postgres":
+                row = self._backend.fetch_one(
+                    "SELECT COUNT(*) as cnt FROM information_schema.tables "
+                    "WHERE table_schema = 'public' AND table_name = 'scoped_migrations'",
+                    (),
+                )
+            else:
+                row = self._backend.fetch_one(
+                    "SELECT COUNT(*) as cnt FROM sqlite_master "
+                    "WHERE type='table' AND name='scoped_migrations'",
+                    (),
+                )
             if row and row["cnt"] > 0:
                 count = self._backend.fetch_one(
                     "SELECT COUNT(*) as cnt FROM scoped_migrations", (),

@@ -20,6 +20,9 @@ class ScopedConfig:
     # SQLite database path (when using sqlite backend)
     sqlite_path: str = ":memory:"
 
+    # PostgreSQL DSN (when using postgres backend)
+    postgres_dsn: str = ""
+
     # Whether to enforce compliance checks at runtime (not just test time)
     runtime_compliance: bool = True
 
