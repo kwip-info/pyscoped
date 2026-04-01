@@ -23,7 +23,11 @@ The audit trail is append-only and immutable. Each entry contains:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from scoped.audit.models import TraceEntry
+    from scoped.audit.query import ChainVerification
 
 
 class AuditNamespace:
@@ -51,7 +55,7 @@ class AuditNamespace:
             self._query = AuditQuery(self._svc.backend)
         return self._query
 
-    def for_object(self, object_id: str, *, limit: int = 100) -> list[Any]:
+    def for_object(self, object_id: str, *, limit: int = 100) -> list[TraceEntry]:
         """Get audit entries for a specific object.
 
         Returns all actions that targeted this object (create, update,
@@ -72,7 +76,7 @@ class AuditNamespace:
         """
         return self._audit_query.query(target_id=object_id, limit=limit)
 
-    def for_principal(self, principal_id: str, *, limit: int = 100) -> list[Any]:
+    def for_principal(self, principal_id: str, *, limit: int = 100) -> list[TraceEntry]:
         """Get audit entries for actions performed by a principal.
 
         Args:
@@ -84,7 +88,7 @@ class AuditNamespace:
         """
         return self._audit_query.query(actor_id=principal_id, limit=limit)
 
-    def for_scope(self, scope_id: str, *, limit: int = 100) -> list[Any]:
+    def for_scope(self, scope_id: str, *, limit: int = 100) -> list[TraceEntry]:
         """Get audit entries within a scope.
 
         Args:
@@ -96,7 +100,7 @@ class AuditNamespace:
         """
         return self._audit_query.query(scope_id=scope_id, limit=limit)
 
-    def query(self, **kwargs: Any) -> list[Any]:
+    def query(self, **kwargs: Any) -> list[TraceEntry]:
         """Flexible audit query with multiple filters.
 
         Supports all filters available on ``AuditQuery.query()``:
@@ -125,7 +129,7 @@ class AuditNamespace:
         *,
         from_sequence: int = 1,
         to_sequence: int | None = None,
-    ) -> Any:
+    ) -> ChainVerification:
         """Verify the integrity of the audit hash chain.
 
         Each audit entry contains a SHA-256 hash of itself and a

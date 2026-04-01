@@ -104,8 +104,20 @@ class WebhookDelivery:
             tuple(params) + (limit,),
         )
 
-    def retry_failed(self) -> list[DeliveryAttempt]:
-        """Retry all failed deliveries that haven't exceeded max retries."""
+    def retry_failed(self, *, backoff_base: int = 60) -> list[DeliveryAttempt]:
+        """Retry failed deliveries that haven't exceeded max retries.
+
+        Uses exponential backoff: only retries deliveries where enough
+        time has elapsed since the last attempt. The delay is
+        ``backoff_base * 2^(attempt_number - 1)`` seconds.
+
+        Args:
+            backoff_base: Base delay in seconds (default 60). First retry
+                          waits 60s, second 120s, third 240s, etc.
+        """
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
         rows = self._backend.fetch_all(
             "SELECT * FROM webhook_deliveries "
             "WHERE status = 'failed' AND attempt_number < ? "
@@ -114,7 +126,18 @@ class WebhookDelivery:
         )
         attempts: list[DeliveryAttempt] = []
         for row in rows:
-            # Reset to pending for re-attempt
+            # Exponential backoff check
+            attempt_num = row.get("attempt_number", 0)
+            delay_seconds = backoff_base * (2 ** max(0, attempt_num - 1))
+            attempted_at = row.get("attempted_at")
+            if attempted_at:
+                last_attempt = datetime.fromisoformat(attempted_at)
+                if last_attempt.tzinfo is None:
+                    last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+                elapsed = (now - last_attempt).total_seconds()
+                if elapsed < delay_seconds:
+                    continue  # Not enough time has passed
+
             self._backend.execute(
                 "UPDATE webhook_deliveries SET status = 'retrying' WHERE id = ?",
                 (row["id"],),
@@ -212,3 +235,57 @@ class WebhookDelivery:
     def _default_transport(endpoint: WebhookEndpoint, event: Event) -> tuple[int, str]:
         """Default no-op transport for testing — always succeeds."""
         return (200, "ok")
+
+    @staticmethod
+    def http_transport(
+        endpoint: WebhookEndpoint,
+        event: Event,
+        *,
+        timeout: int = 10,
+    ) -> tuple[int, str]:
+        """Real HTTP transport using stdlib urllib.
+
+        Posts the event as JSON to the endpoint URL. Returns
+        ``(status_code, response_body)``.
+
+        Pass as ``transport=WebhookDelivery.http_transport`` when
+        constructing the delivery manager for production use.
+        """
+        import urllib.request
+        import urllib.error
+
+        payload = json.dumps({
+            "event_id": event.id,
+            "event_type": event.event_type.value if hasattr(event.event_type, "value") else str(event.event_type),
+            "actor_id": event.actor_id,
+            "target_type": event.target_type,
+            "target_id": event.target_id,
+            "timestamp": event.timestamp.isoformat(),
+            "scope_id": event.scope_id,
+            "data": event.data,
+        }).encode("utf-8")
+
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "pyscoped-webhook/1.0",
+        }
+        # Merge endpoint config headers if present
+        extra_headers = endpoint.config.get("headers", {})
+        headers.update(extra_headers)
+
+        req = urllib.request.Request(
+            endpoint.url,
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                return (resp.status, body)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+            return (exc.code, body)
+        except urllib.error.URLError as exc:
+            raise ConnectionError(f"Webhook delivery failed: {exc.reason}") from exc

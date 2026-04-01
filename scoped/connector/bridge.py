@@ -31,16 +31,31 @@ from scoped.types import ActionType, generate_id, now_utc
 
 
 class ConnectorManager:
-    """Manage cross-organization connectors, policies, and traffic."""
+    """Manage cross-organization connectors, policies, and traffic.
+
+    For real federation, pass a ``transport`` callable that performs
+    the HTTP push to the remote endpoint::
+
+        def my_transport(endpoint_url, payload):
+            resp = httpx.post(endpoint_url, json=payload, timeout=10)
+            return resp.status_code, resp.text
+
+        mgr = ConnectorManager(backend, transport=my_transport)
+
+    Without a transport, ``sync_object`` validates policies and records
+    traffic but does not push data over the network.
+    """
 
     def __init__(
         self,
         backend: StorageBackend,
         *,
         audit_writer: Any | None = None,
+        transport: Any | None = None,
     ) -> None:
         self._backend = backend
         self._audit = audit_writer
+        self._transport = transport
 
     # -- Connector CRUD ----------------------------------------------------
 
@@ -457,6 +472,42 @@ class ConnectorManager:
                 },
             )
 
+        # Push data to remote endpoint if transport is configured
+        if self._transport and direction == "outbound":
+            try:
+                payload = {
+                    "connector_id": connector_id,
+                    "object_type": object_type,
+                    "object_id": object_id,
+                    "direction": direction,
+                    "timestamp": now_utc().isoformat(),
+                }
+                status_code, response_body = self._transport(
+                    connector.remote_endpoint, payload,
+                )
+                if status_code < 200 or status_code >= 300:
+                    return self.record_traffic(
+                        connector_id=connector_id,
+                        direction=direction,
+                        object_type=object_type,
+                        object_id=object_id,
+                        action="sync",
+                        status=TrafficStatus.FAILED,
+                        size_bytes=size_bytes,
+                        metadata={"status_code": status_code, "response": response_body},
+                    )
+            except Exception as exc:
+                return self.record_traffic(
+                    connector_id=connector_id,
+                    direction=direction,
+                    object_type=object_type,
+                    object_id=object_id,
+                    action="sync",
+                    status=TrafficStatus.FAILED,
+                    size_bytes=size_bytes,
+                    metadata={"error": str(exc)},
+                )
+
         # Record successful traffic
         return self.record_traffic(
             connector_id=connector_id,
@@ -467,3 +518,41 @@ class ConnectorManager:
             status=TrafficStatus.SUCCESS,
             size_bytes=size_bytes,
         )
+
+    @staticmethod
+    def http_transport(
+        endpoint_url: str,
+        payload: dict[str, Any],
+        *,
+        timeout: int = 10,
+    ) -> tuple[int, str]:
+        """Real HTTP transport using stdlib urllib.
+
+        Posts the payload as JSON to the endpoint URL. Returns
+        ``(status_code, response_body)``.
+
+        Pass as ``transport=ConnectorManager.http_transport`` when
+        constructing the manager for production use.
+        """
+        import urllib.error
+        import urllib.request
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint_url,
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "pyscoped-connector/1.0",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                return (resp.status, body)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+            return (exc.code, body)
+        except urllib.error.URLError as exc:
+            raise ConnectionError(f"Connector sync failed: {exc.reason}") from exc

@@ -1,23 +1,51 @@
-# Getting Started with Scoped
+---
+title: Getting Started
+description: Quickstart guide for pyscoped — from installation to audit trail verification in under ten minutes.
+category: guides
+---
 
-This guide walks you through building a real application on Scoped -- from
-installing the package to rolling back changes across time.  Every code example
-is runnable.  By the end you will have principals, versioned objects, scoped
-sharing, policy rules, an auditable hash-chained trail, and point-in-time
-rollback.
+# Getting Started
+
+This guide takes you from zero to a working pyscoped application. By the end
+you will have principals, versioned objects, scope-based sharing, a
+tamper-evident audit trail, and chain verification running — all in about fifty
+lines of code.
 
 ---
 
 ## 1. Installation
 
-Scoped is published on PyPI as **`pyscoped`** and imported as **`scoped`**.  It
-has zero runtime dependencies -- SQLite ships with Python.
+pyscoped is published on PyPI and imported as `scoped`. The core package has
+zero runtime dependencies — SQLite ships with Python.
 
 ```bash
 pip install pyscoped
 ```
 
-Requirements: **Python 3.11+** (developed and tested on 3.13).
+**Requirements:** Python 3.11+ (developed and tested on 3.13).
+
+### Extras
+
+Install optional extras for production backends and framework integrations:
+
+```bash
+# PostgreSQL (psycopg v3 + connection pool)
+pip install pyscoped[postgres]
+
+# Web framework adapters
+pip install pyscoped[django]
+pip install pyscoped[fastapi]
+pip install pyscoped[flask]
+
+# OpenTelemetry instrumentation
+pip install pyscoped[otel]
+```
+
+You can combine extras:
+
+```bash
+pip install pyscoped[postgres,fastapi,otel]
+```
 
 Verify the install:
 
@@ -28,45 +56,45 @@ print(scoped.__version__)  # e.g. "0.1.1"
 
 ---
 
-## 2. Initialize Storage
+## 2. Zero-Config Start (In-Memory SQLite)
 
-Everything in Scoped is persisted through a `StorageBackend`.  The built-in
-`SQLiteBackend` works with both on-disk files and in-memory databases.
+The fastest way to start is with no arguments at all. `scoped.init()` creates
+an in-memory SQLite database, initializes the full 16-layer schema, and
+returns a `ScopedClient`:
 
 ```python
-from scoped.storage.sqlite import SQLiteBackend
+import scoped
 
-# Use ":memory:" for experiments, or a file path for persistence.
-backend = SQLiteBackend(":memory:")
-backend.initialize()  # Creates all tables -- call this exactly once.
+client = scoped.init()
 ```
 
-> **Important:** Always call `backend.initialize()` after creating the backend.
-> It sets up the full schema (registry, principals, objects, scopes, audit
-> trail, rules, and more).
+That single line gives you the complete framework — principals, versioned
+objects, scopes, rules, audit, secrets, and more. The in-memory backend is
+ideal for development, testing, and experimentation. Everything disappears when
+the process exits.
 
-For a real application, point at a file:
+For file-backed persistence during development:
 
 ```python
-backend = SQLiteBackend("my_app.db")
-backend.initialize()
+client = scoped.init(database_url="sqlite:///app.db")
 ```
 
 ---
 
-## 3. Create Principals
+## 3. Creating Principals
 
-A **principal** is any entity that can act in the system -- a user, a bot, a
-service account, a team.  The `kind` field is application-defined; Scoped does
-not prescribe what kinds exist.
+A **principal** is any entity that acts in the system: a user, a team, a
+service account, an AI agent. The `kind` field is application-defined — pyscoped
+does not prescribe what kinds exist.
 
 ```python
-from scoped.identity.principal import PrincipalStore
+import scoped
 
-principals = PrincipalStore(backend)
+client = scoped.init()
 
-alice = principals.create_principal(kind="user", display_name="Alice")
-bob = principals.create_principal(kind="user", display_name="Bob")
+alice = scoped.principals.create("Alice", kind="user")
+bob = scoped.principals.create("Bob", kind="user")
+ops_bot = scoped.principals.create("DeployBot", kind="service")
 
 print(alice.id)            # UUID hex string, e.g. "a1b2c3d4..."
 print(alice.kind)          # "user"
@@ -74,551 +102,386 @@ print(alice.display_name)  # "Alice"
 ```
 
 Every principal is automatically registered in the universal registry (Layer 1)
-and receives a unique URN.
+and receives a unique URN. Principals persist for the lifetime of the database.
 
-> **Common pitfall:** The method is `create_principal()`, not `create()`.
-
-### ScopedContext -- who is acting
-
-Every operation in Scoped requires an acting principal.  Wrap your work in a
-`ScopedContext`:
+### Listing and finding principals
 
 ```python
-from scoped.identity.context import ScopedContext
-
-with ScopedContext(principal=alice):
-    ctx = ScopedContext.current()
-    print(ctx.principal_id)    # alice.id
-    print(ctx.principal_kind)  # "user"
+users = scoped.principals.list(kind="user")        # All users
+found = scoped.principals.get(alice.id)             # By ID (raises if missing)
+maybe = scoped.principals.find(alice.id)            # By ID (returns None if missing)
 ```
-
-Contexts nest -- entering a new context pushes a frame that is restored on exit.
 
 ---
 
-## 4. Create Objects
+## 4. Setting the Acting Principal
 
-A **ScopedObject** is a versioned, isolated data record.  Every mutation
-creates a new version; nothing is modified in place.
+Every operation in pyscoped requires an acting principal. Use `as_principal()`
+to declare who is performing the work:
 
 ```python
-from scoped.objects.manager import ScopedManager
-from scoped.audit.writer import AuditWriter
-from scoped.types import ActionType
+with scoped.as_principal(alice):
+    # Everything in this block is attributed to Alice.
+    # The context is thread-safe (via contextvars) and async-safe.
+    doc, v1 = scoped.objects.create("invoice", data={"amount": 500})
+```
 
-# Wire up the audit writer so every object operation is traced automatically.
-audit = AuditWriter(backend)
-manager = ScopedManager(backend, audit_writer=audit)
+Without an active principal context, operations raise `NoContextError`.
 
-with ScopedContext(principal=alice):
-    # Create -- returns (object, version_1)
-    doc, v1 = manager.create(
-        object_type="document",
-        owner_id=alice.id,
-        data={"title": "Draft", "body": "Hello, world."},
+Contexts nest — entering a new context pushes a frame that is restored on exit:
+
+```python
+with scoped.as_principal(alice):
+    # Alice is acting
+    with scoped.as_principal(bob):
+        # Bob is acting (Alice's context is saved)
+        pass
+    # Alice is acting again
+```
+
+---
+
+## 5. Creating and Updating Objects
+
+A **ScopedObject** is a versioned, isolated data record. Every mutation creates
+a new immutable version — nothing is modified in place.
+
+### Create
+
+```python
+with scoped.as_principal(alice):
+    doc, v1 = scoped.objects.create(
+        "document",
+        data={"title": "Q4 Report", "status": "draft"},
     )
 
-    print(doc.id)              # unique object ID
+    print(doc.id)              # Unique object ID
     print(doc.object_type)     # "document"
     print(doc.owner_id)        # alice.id
     print(doc.current_version) # 1
-    print(v1.data)             # {"title": "Draft", "body": "Hello, world."}
+    print(v1.data)             # {"title": "Q4 Report", "status": "draft"}
 ```
 
-### Read
+Objects are **creator-private by default**. Only Alice can see this document.
+Bob gets `None`:
 
 ```python
-    # Owner can always read their own objects.
-    fetched = manager.get(doc.id, principal_id=alice.id)
-    print(fetched.id == doc.id)  # True
+with scoped.as_principal(bob):
+    result = scoped.objects.get(doc.id)
+    print(result)  # None — Bob cannot see Alice's object
 ```
 
 ### Update (creates a new version)
 
 ```python
-    doc, v2 = manager.update(
+with scoped.as_principal(alice):
+    doc, v2 = scoped.objects.update(
         doc.id,
-        principal_id=alice.id,
-        data={"title": "Final", "body": "Hello, world."},
-        change_reason="Finalized title",
+        data={"title": "Q4 Report", "status": "final"},
+        change_reason="Finalized for review",
     )
 
     print(doc.current_version)  # 2
-    print(v2.data["title"])     # "Final"
+    print(v2.data["status"])    # "final"
 ```
 
 ### Soft delete (tombstone)
 
-Nothing is truly deleted in Scoped.  Objects are tombstoned -- the record and
-all versions remain.
+Nothing is truly deleted in pyscoped. Objects are tombstoned — the record and
+all versions remain for audit and rollback:
 
 ```python
-    tombstone = manager.tombstone(doc.id, principal_id=alice.id, reason="obsolete")
-    print(tombstone.reason)  # "obsolete"
+with scoped.as_principal(alice):
+    scoped.objects.delete(doc.id, reason="Superseded by Q1 report")
+```
+
+### Version history
+
+```python
+with scoped.as_principal(alice):
+    versions = scoped.objects.versions(doc.id)
+    for v in versions:
+        print(f"v{v.version}: {v.data} ({v.change_reason})")
 ```
 
 ---
 
-## 5. Understand Isolation
+## 6. Creating Scopes and Sharing via Projection
 
-Scoped enforces **creator-private by default**.  When Alice creates an object,
-only Alice can see it.  Bob gets `None`:
-
-```python
-with ScopedContext(principal=alice):
-    doc, _ = manager.create(
-        object_type="note",
-        owner_id=alice.id,
-        data={"text": "Private thought"},
-    )
-
-with ScopedContext(principal=bob):
-    result = manager.get(doc.id, principal_id=bob.id)
-    print(result)  # None -- Bob cannot see Alice's object
-```
-
-This is **Invariant 3: Nothing is shared by default.**  Sharing must be
-explicit, and it happens through scopes and projections (next section).
-
-> **Note:** `ScopedManager.get()` enforces owner-only access.  Scope projections
-> enable visibility through a separate query path in the tenancy engine, not
-> through the manager.
-
----
-
-## 6. Share via Scopes
-
-A **scope** is a named isolation boundary -- the sharing primitive.  You create
-a scope, add members, and project objects into it.
+A **scope** is the sharing primitive — a named isolation boundary. You create a
+scope, add members with roles, and project objects into it.
 
 ### Create a scope
 
 ```python
-from scoped.tenancy.lifecycle import ScopeLifecycle
-from scoped.tenancy.projection import ProjectionManager
-from scoped.tenancy.models import ScopeRole, AccessLevel
-
-scopes = ScopeLifecycle(backend, audit_writer=audit)
-projections = ProjectionManager(backend, audit_writer=audit)
-
-with ScopedContext(principal=alice):
-    # Create a scope -- the owner is automatically added as OWNER member.
-    team = scopes.create_scope(name="Team Alpha", owner_id=alice.id)
-
-    print(team.id)    # unique scope ID
-    print(team.name)  # "Team Alpha"
+with scoped.as_principal(alice):
+    team = scoped.scopes.create("Engineering", description="Core team workspace")
+    # Alice is automatically added as the OWNER member.
 ```
-
-> **Common pitfall:** The method is `create_scope()`, not `create()`.
 
 ### Add members
 
 ```python
-    # Add Bob as an EDITOR.  ScopeRole is an enum, not a string.
-    scopes.add_member(
-        team.id,
-        principal_id=bob.id,
-        role=ScopeRole.EDITOR,
-        granted_by=alice.id,
-    )
+with scoped.as_principal(alice):
+    scoped.scopes.add_member(team, bob, role="editor")
 ```
 
-Available roles: `ScopeRole.VIEWER`, `ScopeRole.EDITOR`, `ScopeRole.ADMIN`,
-`ScopeRole.OWNER`.
+Available roles: `"viewer"`, `"editor"`, `"admin"`, `"owner"`.
 
-> **Common pitfall:** `add_member()` requires `granted_by` and the `ScopeRole`
-> enum -- not a string.
+### Project an object (share it)
 
-### Project an object into a scope
-
-Only the object's **owner** can project it.  This is the explicit sharing act.
+Only the object's **owner** can project it. This is the explicit sharing act:
 
 ```python
-    # First, create a document to share.
-    doc, _ = manager.create(
-        object_type="document",
-        owner_id=alice.id,
-        data={"title": "Shared Design Doc"},
-    )
+with scoped.as_principal(alice):
+    doc, _ = scoped.objects.create("design_doc", data={"title": "Architecture v2"})
 
-    # Project the document into the team scope.
-    projection = projections.project(
-        scope_id=team.id,
-        object_id=doc.id,
-        projected_by=alice.id,
-        access_level=AccessLevel.READ,  # or AccessLevel.WRITE, AccessLevel.ADMIN
-    )
-
-    print(projection.scope_id)   # team.id
-    print(projection.object_id)  # doc.id
+    # Project the document into the team scope
+    scoped.scopes.project(doc, team, access_level="read")
+    # Bob (an editor in the team scope) can now see this document.
 ```
 
 ### Revoke a projection
 
 ```python
-    projections.revoke_projection(
-        scope_id=team.id,
-        object_id=doc.id,
-        revoked_by=alice.id,
-    )
+with scoped.as_principal(alice):
+    scoped.scopes.unproject(doc, team)
+    # Bob can no longer see the document. Revocation is immediate.
 ```
 
-> **Common pitfall:** The method is `revoke_projection()`, not `revoke()`.
-
-Revocation is immediate (Invariant 7) -- it takes effect in the same
-transaction, not eventually.
-
----
-
-## 7. Enforce Rules
-
-The rule engine uses a **deny-overrides** model: when rules conflict, DENY
-always wins (Invariant 6).
-
-### Create a rule
+### Batch member operations
 
 ```python
-from scoped.rules.engine import RuleStore, RuleEngine
-from scoped.rules.models import RuleType, RuleEffect, BindingTargetType
-
-rule_store = RuleStore(backend, audit_writer=audit)
-
-with ScopedContext(principal=alice):
-    # Create a DENY rule for external access.
-    deny_rule = rule_store.create_rule(
-        name="deny-external-read",
-        rule_type=RuleType.ACCESS,
-        effect=RuleEffect.DENY,
-        conditions={"action": ["read"], "principal_kind": ["external"]},
-        priority=10,
-        created_by=alice.id,
-    )
-```
-
-### Bind the rule to a scope
-
-Rules are inert until bound to a target -- a scope, a principal, an object
-type, etc.
-
-```python
-    rule_store.bind_rule(
-        deny_rule.id,
-        target_type=BindingTargetType.SCOPE,
-        target_id=team.id,
-        bound_by=alice.id,
-    )
-```
-
-### Evaluate access
-
-```python
-    engine = RuleEngine(backend)
-
-    result = engine.evaluate(
-        action="read",
-        principal_id=bob.id,
-        scope_id=team.id,
-    )
-
-    print(result.allowed)       # True or False
-    print(result.deny_rules)    # tuple of matching DENY rules
-    print(result.allow_rules)   # tuple of matching ALLOW rules
-```
-
-The `EvaluationResult` is also truthy/falsy:
-
-```python
-    if engine.evaluate(action="write", principal_id=bob.id, scope_id=team.id):
-        print("Access granted")
-    else:
-        print("Access denied")
+with scoped.as_principal(alice):
+    scoped.scopes.add_members(team, [
+        (charlie, "viewer"),
+        (dana, "editor"),
+        (ops_bot, "viewer"),
+    ])
 ```
 
 ---
 
-## 8. Audit Trail
+## 7. Querying the Audit Trail
 
-Every action in Scoped produces an immutable, hash-chained trace entry
-(Invariant 4).  The chain links each entry to its predecessor via a SHA-256
-hash, making tampering detectable.
-
-### Record a trace entry
-
-If you passed `audit_writer` to `ScopedManager`, `ScopeLifecycle`, or
-`RuleStore`, traces are recorded automatically.  You can also record custom
-entries:
+Every action in pyscoped produces an immutable, hash-chained trace entry. The
+chain links each entry to its predecessor via a SHA-256 hash, making tampering
+detectable.
 
 ```python
-from scoped.audit.writer import AuditWriter
-from scoped.audit.query import AuditQuery
-from scoped.types import ActionType
+with scoped.as_principal(alice):
+    # Full audit history for a specific object
+    trail = scoped.audit.for_object(doc.id)
+    for entry in trail:
+        print(f"[{entry.sequence}] {entry.action.value} by {entry.actor_id} at {entry.timestamp}")
 
-# The audit writer you created earlier.
-audit = AuditWriter(backend)
+    # History for a principal
+    alice_trail = scoped.audit.for_principal(alice.id, limit=50)
 
-entry = audit.record(
-    actor_id=alice.id,
-    action=ActionType.CREATE,
-    target_type="report",
-    target_id="report-001",
-    after_state={"title": "Q4 Results"},
-)
-
-print(entry.id)        # unique trace entry ID
-print(entry.sequence)  # monotonically increasing integer
-print(entry.hash)      # SHA-256 hash linking to the previous entry
-```
-
-### Query the trail
-
-```python
-query = AuditQuery(backend)
-
-# Full history for a specific target.
-history = query.history(target_type="report", target_id="report-001")
-for e in history:
-    print(f"[{e.sequence}] {e.action.value} by {e.actor_id} at {e.timestamp}")
-
-# Flexible filtering.
-entries = query.query(
-    actor_id=alice.id,
-    action=ActionType.CREATE,
-    limit=50,
-)
-```
-
-### Verify chain integrity
-
-```python
-verification = query.verify_chain()
-print(verification)  # Shows whether the hash chain is intact
-```
-
-If any entry has been tampered with, the verification will flag the break.
-
----
-
-## 9. Rollback
-
-Every action can be reversed to any point in time (Invariant 9).  Rollbacks are
-themselves traced -- you get full auditability of the undo itself.
-
-### Setup
-
-```python
-from scoped.temporal.rollback import RollbackExecutor
-
-rollback = RollbackExecutor(backend, audit_writer=audit)
-```
-
-### Roll back a single action
-
-Pass the `trace_id` of the audit entry you want to reverse:
-
-```python
-with ScopedContext(principal=alice):
-    # Create an object and capture the trace entry.
-    doc, _ = manager.create(
-        object_type="memo",
-        owner_id=alice.id,
-        data={"text": "This was a mistake."},
-    )
-
-    # Find the trace entry for the create action.
-    query = AuditQuery(backend)
-    history = query.history(target_type="memo", target_id=doc.id)
-    create_trace = history[0]
-
-    # Roll it back.
-    result = rollback.rollback_action(
-        create_trace.id,
+    # Flexible querying with filters
+    from scoped.types import ActionType
+    creates = scoped.audit.query(
         actor_id=alice.id,
-        reason="Created in error",
+        action=ActionType.CREATE,
+        since=yesterday,
+        limit=100,
     )
-
-    print(result.success)         # True
-    print(result.rolled_back)     # (trace_id,)
-    print(result.rollback_trace_ids)  # IDs of the new rollback trace entries
-```
-
-### Roll back to a point in time
-
-Restore a target to its state at a specific timestamp.  All actions after that
-timestamp are reversed in reverse chronological order:
-
-```python
-from datetime import datetime, timezone
-
-# Snapshot a timestamp before a series of changes.
-checkpoint = datetime.now(timezone.utc)
-
-# ... make several updates ...
-manager.update(doc.id, principal_id=alice.id, data={"text": "Change 1"})
-manager.update(doc.id, principal_id=alice.id, data={"text": "Change 2"})
-manager.update(doc.id, principal_id=alice.id, data={"text": "Change 3"})
-
-# Roll everything back to the checkpoint.
-result = rollback.rollback_to_timestamp(
-    target_type="memo",
-    target_id=doc.id,
-    at=checkpoint,
-    actor_id=alice.id,
-    reason="Reverting to last known good state",
-)
-
-print(f"Rolled back {len(result.rolled_back)} actions")
 ```
 
 ---
 
-## 10. Putting It All Together
+## 8. Verifying Chain Integrity
 
-Here is a complete, runnable script that uses everything covered above:
+The audit trail is a SHA-256 hash chain. Each entry contains the hash of the
+previous entry, creating a tamper-evident sequence. If any entry is modified or
+deleted, the chain breaks:
 
 ```python
-from scoped.storage.sqlite import SQLiteBackend
-from scoped.identity.principal import PrincipalStore
-from scoped.identity.context import ScopedContext
-from scoped.objects.manager import ScopedManager
-from scoped.tenancy.lifecycle import ScopeLifecycle
-from scoped.tenancy.projection import ProjectionManager
-from scoped.tenancy.models import ScopeRole, AccessLevel
-from scoped.audit.writer import AuditWriter
-from scoped.audit.query import AuditQuery
-from scoped.rules.engine import RuleStore, RuleEngine
-from scoped.rules.models import RuleType, RuleEffect, BindingTargetType
-from scoped.types import ActionType
+verification = scoped.audit.verify()
 
-# --- Bootstrap ---
-backend = SQLiteBackend(":memory:")
+print(verification.valid)       # True if chain is intact
+print(verification.entries)     # Number of entries verified
+print(verification.first_seq)   # First sequence number
+print(verification.last_seq)    # Last sequence number
+```
+
+For large audit trails, verify specific ranges:
+
+```python
+# Verify only entries in a range
+partial = scoped.audit.verify(from_sequence=1000, to_sequence=2000)
+```
+
+---
+
+## 9. PostgreSQL Setup
+
+For production, use PostgreSQL with connection pooling:
+
+```python
+import scoped
+
+client = scoped.init(
+    database_url="postgresql://user:password@localhost:5432/myapp",
+)
+```
+
+This creates a PostgresBackend with psycopg v3 and a managed connection pool.
+The full schema is created automatically on first init.
+
+### Connection pool tuning
+
+For advanced control, construct the backend directly:
+
+```python
+from scoped.storage.postgres import PostgresBackend
+
+backend = PostgresBackend(
+    "postgresql://user:password@localhost:5432/myapp",
+    pool_min_size=5,
+    pool_max_size=20,
+    pool_timeout=30.0,
+    enable_rls=True,   # Row-level security (see Security docs)
+)
 backend.initialize()
 
-audit = AuditWriter(backend)
-principals = PrincipalStore(backend, audit_writer=audit)
-manager = ScopedManager(backend, audit_writer=audit)
-scopes = ScopeLifecycle(backend, audit_writer=audit)
-projections = ProjectionManager(backend, audit_writer=audit)
-rule_store = RuleStore(backend, audit_writer=audit)
-rule_engine = RuleEngine(backend)
-query = AuditQuery(backend)
+client = scoped.ScopedClient(backend=backend)
+```
+
+---
+
+## 10. Management Plane Sync
+
+The pyscoped management plane provides a dashboard, compliance reports, and
+alerting. Connect your SDK instance with an API key:
+
+```python
+import scoped
+
+client = scoped.init(
+    database_url="postgresql://user:pass@host/db",
+    api_key="psc_live_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+)
+
+# Start pushing audit metadata to the management plane
+client.start_sync()
+```
+
+API key formats:
+- `psc_live_<32hex>` for production
+- `psc_test_<32hex>` for sandbox/staging
+
+The SDK works fully without an API key and without sync enabled. The management
+plane is optional and additive — it does not change SDK behavior.
+
+Check sync status:
+
+```python
+status = client.sync_status()
+print(status)
+```
+
+---
+
+## 11. Complete Example
+
+Here is a self-contained script that demonstrates every concept from this guide:
+
+```python
+import scoped
+
+# --- Initialize (in-memory SQLite, zero config) ---
+client = scoped.init()
 
 # --- Create principals ---
-alice = principals.create_principal(kind="user", display_name="Alice")
-bob = principals.create_principal(kind="user", display_name="Bob")
+alice = scoped.principals.create("Alice", kind="user")
+bob = scoped.principals.create("Bob", kind="user")
 
-with ScopedContext(principal=alice):
-    # --- Create an object (creator-private) ---
-    doc, v1 = manager.create(
-        object_type="design_doc",
-        owner_id=alice.id,
+with scoped.as_principal(alice):
+    # --- Create an object (creator-private by default) ---
+    doc, v1 = scoped.objects.create(
+        "design_doc",
         data={"title": "Architecture v2", "status": "draft"},
     )
 
-    # --- Verify isolation ---
-    assert manager.get(doc.id, principal_id=bob.id) is None  # Bob cannot see it
+    # --- Verify isolation: Bob cannot see Alice's object ---
+    with scoped.as_principal(bob):
+        assert scoped.objects.get(doc.id) is None
+
+    # --- Update creates a new version ---
+    doc, v2 = scoped.objects.update(
+        doc.id,
+        data={"title": "Architecture v2", "status": "review"},
+        change_reason="Ready for team review",
+    )
+    assert doc.current_version == 2
 
     # --- Create a scope and share ---
-    team = scopes.create_scope(name="Engineering", owner_id=alice.id)
-    scopes.add_member(
-        team.id,
-        principal_id=bob.id,
-        role=ScopeRole.EDITOR,
-        granted_by=alice.id,
-    )
-    projections.project(
-        scope_id=team.id,
-        object_id=doc.id,
-        projected_by=alice.id,
-        access_level=AccessLevel.READ,
-    )
+    team = scoped.scopes.create("Engineering")
+    scoped.scopes.add_member(team, bob, role="editor")
+    scoped.scopes.project(doc, team, access_level="read")
 
-    # --- Add a policy rule ---
-    rule = rule_store.create_rule(
-        name="allow-team-read",
-        rule_type=RuleType.ACCESS,
-        effect=RuleEffect.ALLOW,
-        conditions={"action": ["read"]},
-        priority=5,
-        created_by=alice.id,
-    )
-    rule_store.bind_rule(
-        rule.id,
-        target_type=BindingTargetType.SCOPE,
-        target_id=team.id,
-        bound_by=alice.id,
-    )
-
-    # --- Evaluate access ---
-    result = rule_engine.evaluate(
-        action="read",
-        principal_id=bob.id,
-        scope_id=team.id,
-    )
-    print(f"Bob can read: {result.allowed}")
-
-    # --- Inspect the audit trail ---
-    trail = query.query(actor_id=alice.id, limit=20)
-    print(f"\nAudit trail ({len(trail)} entries):")
+    # --- Query the audit trail ---
+    trail = scoped.audit.for_object(doc.id)
+    print(f"Audit trail ({len(trail)} entries):")
     for entry in trail:
-        print(f"  [{entry.sequence}] {entry.action.value} -> {entry.target_type}:{entry.target_id}")
+        print(f"  [{entry.sequence}] {entry.action.value} -> "
+              f"{entry.target_type}:{entry.target_id}")
 
     # --- Verify chain integrity ---
-    verification = query.verify_chain()
-    print(f"\nChain integrity: {verification}")
+    verification = scoped.audit.verify()
+    print(f"\nChain integrity: valid={verification.valid}, "
+          f"entries={verification.entries}")
 
 print("\nDone.")
 ```
 
 ---
 
-## 11. Next Steps
+## 12. Next Steps
 
-Now that you have the fundamentals, explore deeper:
+Now that you have the fundamentals:
 
-- **Layer documentation** -- detailed docs for each of the 16 layers live in
-  [`docs/layers/`](layers/), from `00-compliance.md` through `16-scheduling.md`.
+- **[Architecture](architecture.md)** — the 16-layer model, invariants, and
+  design philosophy.
 
-- **Extensions** -- 9 extensions enrich existing layers (migrations, contracts,
-  blobs, config hierarchy, search, templates, tiering, import/export).  See
-  [`docs/extensions/`](extensions/).
+- **[Security & Isolation](security.md)** — defense-in-depth isolation, rules
+  engine, Postgres RLS, secret handling, and cryptographic details.
 
-- **Architecture overview** -- the full system design is in
-  [`docs/architecture.md`](architecture.md).
+- **[Multi-Tenant Isolation](multi-tenant.md)** — Postgres RLS,
+  database-per-tenant routing, and combining both tiers.
 
-- **Framework adapters** -- integrate Scoped with Django, FastAPI, Flask, or
-  MCP.  Install with extras:
+- **[API Reference](api-reference.md)** — complete namespace and model
+  documentation.
+
+- **Layer documentation** — detailed docs for each of the 16 layers in
+  [`docs/layers/`](layers/).
+
+- **Extensions** — schema migrations, contracts, blobs, search, templates,
+  tiering, and import/export in [`docs/extensions/`](extensions/).
+
+- **Framework adapters** — integrate with Django, FastAPI, Flask, or MCP:
 
   ```bash
   pip install pyscoped[django]
   pip install pyscoped[fastapi]
   pip install pyscoped[flask]
-  pip install pyscoped[mcp]
   ```
-
-  Adapter documentation lives in `scoped/contrib/`.
-
-- **Advanced features** -- environments (Layer 8), flow pipelines (Layer 9),
-  deployments with gate checks (Layer 10), encrypted secrets (Layer 11),
-  sandboxed integrations (Layer 12), cross-org federation (Layer 13), event bus
-  (Layer 14), notifications (Layer 15), and scheduled jobs (Layer 16).
 
 ---
 
 ## The 10 Invariants
 
-These are the guarantees Scoped enforces at every layer.  They are absolute and
-cannot be overridden:
+These are the guarantees pyscoped enforces at every layer. They are absolute
+and cannot be overridden:
 
 1. **Nothing exists without registration.** Every construct has a registry entry with a URN.
-2. **Nothing happens without identity.** Every operation requires a `ScopedContext` with an acting principal.
+2. **Nothing happens without identity.** Every operation requires a principal.
 3. **Nothing is shared by default.** Every object starts creator-private.
-4. **Nothing happens without a trace.** Every action produces an immutable, hash-chained audit entry.
-5. **Nothing is truly deleted.** Objects are tombstoned. Versions are retained. Audit is append-only.
-6. **Deny always wins.** When rules conflict, DENY overrides ALLOW.
+4. **Nothing happens without a trace.** Every action produces a hash-chained audit entry.
+5. **Nothing is truly deleted.** Objects are tombstoned; versions are retained.
+6. **Deny always wins.** DENY rules override ALLOW rules.
 7. **Revocation is immediate.** Same-transaction enforcement, not eventual consistency.
-8. **Everything is versioned.** Every mutation creates a new version.
+8. **Everything is versioned.** Every mutation creates a new immutable version.
 9. **Everything is rollbackable.** Any action can be reversed to any point in time.
 10. **Secrets never leak.** Values never appear in audit trails, snapshots, or connector traffic.
-
-These invariants are enforced by the compliance engine (Layer 0) and validated
-by over 1,400 tests.

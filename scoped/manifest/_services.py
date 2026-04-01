@@ -22,6 +22,7 @@ class ScopedServices:
     _scopes: Any = None
     _projections: Any = None
     _rules: Any = None
+    _rule_engine: Any = None
     _environments: Any = None
     _pipelines: Any = None
     _flow: Any = None
@@ -45,7 +46,11 @@ class ScopedServices:
     def manager(self) -> Any:
         if self._manager is None:
             from scoped.objects.manager import ScopedManager
-            self._manager = ScopedManager(self.backend, audit_writer=self.audit)
+            self._manager = ScopedManager(
+                self.backend,
+                audit_writer=self.audit,
+                rule_engine=self.rule_engine,
+            )
         return self._manager
 
     @property
@@ -68,6 +73,13 @@ class ScopedServices:
             from scoped.rules.engine import RuleStore
             self._rules = RuleStore(self.backend)
         return self._rules
+
+    @property
+    def rule_engine(self) -> Any:
+        if self._rule_engine is None:
+            from scoped.rules.engine import RuleEngine
+            self._rule_engine = RuleEngine(self.backend, audit_writer=self.audit)
+        return self._rule_engine
 
     @property
     def environments(self) -> Any:

@@ -1,0 +1,58 @@
+{
+  "version": "0.6.0",
+  "generated": "2026-04-01",
+  "base_url": "/docs",
+  "categories": [
+    {"id": "guide", "label": "Guides", "order": 1},
+    {"id": "api", "label": "API Reference", "order": 2},
+    {"id": "integration", "label": "Integrations", "order": 3},
+    {"id": "feature", "label": "Features", "order": 4},
+    {"id": "reference", "label": "Reference", "order": 5},
+    {"id": "layer", "label": "Layer Deep-Dives", "order": 6}
+  ],
+  "pages": [
+    {"path": "getting-started.md", "title": "Getting Started", "category": "guide", "order": 1, "description": "Zero to working in 5 minutes"},
+    {"path": "architecture.md", "title": "Architecture", "category": "guide", "order": 2, "description": "16-layer model, invariants, and design philosophy"},
+    {"path": "security.md", "title": "Security & Isolation", "category": "guide", "order": 3, "description": "Isolation model, RLS, rules engine, audit chain"},
+    {"path": "multi-tenant.md", "title": "Multi-Tenant Isolation", "category": "guide", "order": 4, "description": "Postgres RLS and database-per-tenant setup"},
+
+    {"path": "api/client.md", "title": "Client & Initialization", "category": "api", "order": 1, "description": "ScopedClient, init(), context management"},
+    {"path": "api/principals.md", "title": "Principals", "category": "api", "order": 2, "description": "Identity management — users, teams, services"},
+    {"path": "api/objects.md", "title": "Objects", "category": "api", "order": 3, "description": "Versioned, isolated data objects"},
+    {"path": "api/scopes.md", "title": "Scopes", "category": "api", "order": 4, "description": "Tenancy, sharing, membership, projection"},
+    {"path": "api/audit.md", "title": "Audit Trail", "category": "api", "order": 5, "description": "Tamper-evident hash-chained audit queries"},
+    {"path": "api/secrets.md", "title": "Secrets", "category": "api", "order": 6, "description": "Encrypted vault with zero-trust access"},
+    {"path": "api/storage.md", "title": "Storage Backends", "category": "api", "order": 7, "description": "SQLite, PostgreSQL, TenantRouter"},
+
+    {"path": "integrations/django.md", "title": "Django", "category": "integration", "order": 1, "description": "Middleware, DRF, async views, management commands"},
+    {"path": "integrations/fastapi.md", "title": "FastAPI", "category": "integration", "order": 2, "description": "Middleware, dependencies, WebSocket support"},
+    {"path": "integrations/flask.md", "title": "Flask", "category": "integration", "order": 3, "description": "Extension, app factory, admin blueprint"},
+    {"path": "integrations/mcp.md", "title": "MCP Server", "category": "integration", "order": 4, "description": "Model Context Protocol tools and resources"},
+
+    {"path": "events-webhooks.md", "title": "Events & Webhooks", "category": "feature", "order": 1, "description": "Event bus, webhook delivery, notifications"},
+    {"path": "scheduling.md", "title": "Scheduling & Jobs", "category": "feature", "order": 2, "description": "Recurring schedules, job queue, execution"},
+    {"path": "connectors.md", "title": "Connectors & Federation", "category": "feature", "order": 3, "description": "Cross-org sync, policies, state machine"},
+    {"path": "operations.md", "title": "Operations", "category": "feature", "order": 4, "description": "Migrations, sync agent, monitoring, logging"},
+
+    {"path": "testing.md", "title": "Testing", "category": "reference", "order": 1, "description": "Test utilities, fixtures, assertion helpers"},
+    {"path": "exceptions.md", "title": "Exceptions", "category": "reference", "order": 2, "description": "Complete exception hierarchy reference"},
+
+    {"path": "layers/00-compliance.md", "title": "Layer 0: Compliance", "category": "layer", "order": 0, "description": "Invariant validation across all layers"},
+    {"path": "layers/01-registry.md", "title": "Layer 1: Registry", "category": "layer", "order": 1, "description": "Universal construct registration (URNs)"},
+    {"path": "layers/02-identity.md", "title": "Layer 2: Identity", "category": "layer", "order": 2, "description": "Principals and ScopedContext"},
+    {"path": "layers/03-objects.md", "title": "Layer 3: Objects", "category": "layer", "order": 3, "description": "Versioned, isolation-enforced data"},
+    {"path": "layers/04-tenancy.md", "title": "Layer 4: Tenancy", "category": "layer", "order": 4, "description": "Scopes, membership, projections"},
+    {"path": "layers/05-rules.md", "title": "Layer 5: Rules", "category": "layer", "order": 5, "description": "Policy engine with deny-overrides"},
+    {"path": "layers/06-audit.md", "title": "Layer 6: Audit", "category": "layer", "order": 6, "description": "Hash-chained immutable trail"},
+    {"path": "layers/07-temporal.md", "title": "Layer 7: Temporal", "category": "layer", "order": 7, "description": "Rollback and reconstruction"},
+    {"path": "layers/08-environments.md", "title": "Layer 8: Environments", "category": "layer", "order": 8, "description": "Ephemeral workspaces"},
+    {"path": "layers/09-flow.md", "title": "Layer 9: Flow", "category": "layer", "order": 9, "description": "Stages, pipelines, promotions"},
+    {"path": "layers/10-deployments.md", "title": "Layer 10: Deployments", "category": "layer", "order": 10, "description": "Graduation to external targets"},
+    {"path": "layers/11-secrets.md", "title": "Layer 11: Secrets", "category": "layer", "order": 11, "description": "Encrypted vault"},
+    {"path": "layers/12-integrations.md", "title": "Layer 12: Integrations", "category": "layer", "order": 12, "description": "Sandboxed plugins"},
+    {"path": "layers/13-connector.md", "title": "Layer 13: Connector", "category": "layer", "order": 13, "description": "Cross-org federation"},
+    {"path": "layers/14-events.md", "title": "Layer 14: Events", "category": "layer", "order": 14, "description": "Async event bus and webhooks"},
+    {"path": "layers/15-notifications.md", "title": "Layer 15: Notifications", "category": "layer", "order": 15, "description": "Principal-targeted messages"},
+    {"path": "layers/16-scheduling.md", "title": "Layer 16: Scheduling", "category": "layer", "order": 16, "description": "Recurring schedules and jobs"}
+  ]
+}

@@ -125,38 +125,40 @@ class VisibilityEngine:
         return [r["principal_id"] for r in rows]
 
     def ancestor_scope_ids(self, scope_id: str, *, max_depth: int = 20) -> list[str]:
-        """Walk the scope hierarchy upward, returning ancestor scope IDs."""
-        result: list[str] = []
-        current = scope_id
-        for _ in range(max_depth):
-            row = self._backend.fetch_one(
-                "SELECT parent_scope_id FROM scopes WHERE id = ?",
-                (current,),
-            )
-            if row is None or row["parent_scope_id"] is None:
-                break
-            result.append(row["parent_scope_id"])
-            current = row["parent_scope_id"]
-        return result
+        """Walk the scope hierarchy upward, returning ancestor scope IDs.
+
+        Uses a recursive CTE (single query) instead of one query per level.
+        """
+        rows = self._backend.fetch_all(
+            "WITH RECURSIVE ancestors(id, parent_scope_id, depth) AS ("
+            "  SELECT id, parent_scope_id, 0 FROM scopes WHERE id = ? "
+            "  UNION ALL "
+            "  SELECT s.id, s.parent_scope_id, a.depth + 1 "
+            "  FROM scopes s JOIN ancestors a ON s.id = a.parent_scope_id "
+            "  WHERE a.depth < ?"
+            ") "
+            "SELECT id FROM ancestors WHERE depth > 0 ORDER BY depth ASC",
+            (scope_id, max_depth),
+        )
+        return [r["id"] for r in rows]
 
     def descendant_scope_ids(self, scope_id: str, *, max_depth: int = 20) -> list[str]:
-        """Walk the scope hierarchy downward, returning descendant scope IDs."""
-        result: list[str] = []
-        queue = [scope_id]
-        depth = 0
-        while queue and depth < max_depth:
-            next_queue: list[str] = []
-            for sid in queue:
-                rows = self._backend.fetch_all(
-                    "SELECT id FROM scopes WHERE parent_scope_id = ? AND lifecycle != ?",
-                    (sid, Lifecycle.ARCHIVED.name),
-                )
-                for r in rows:
-                    result.append(r["id"])
-                    next_queue.append(r["id"])
-            queue = next_queue
-            depth += 1
-        return result
+        """Walk the scope hierarchy downward, returning descendant scope IDs.
+
+        Uses a recursive CTE (single query) instead of one query per level.
+        """
+        rows = self._backend.fetch_all(
+            "WITH RECURSIVE descendants(id, depth) AS ("
+            "  SELECT id, 0 FROM scopes WHERE id = ? "
+            "  UNION ALL "
+            "  SELECT s.id, d.depth + 1 "
+            "  FROM scopes s JOIN descendants d ON s.parent_scope_id = d.id "
+            "  WHERE s.lifecycle != ? AND d.depth < ?"
+            ") "
+            "SELECT id FROM descendants WHERE depth > 0 ORDER BY depth ASC",
+            (scope_id, Lifecycle.ARCHIVED.name, max_depth),
+        )
+        return [r["id"] for r in rows]
 
     # ------------------------------------------------------------------
     # Internal
@@ -208,26 +210,25 @@ class VisibilityEngine:
         return [r["object_id"] for r in rows]
 
     def _visible_via_hierarchy(self, principal_id: str, object_id: str) -> bool:
-        """Check if object is visible through parent scope inheritance."""
-        # Get all scopes the principal is a member of
-        member_scopes = self._backend.fetch_all(
-            "SELECT scope_id FROM scope_memberships "
-            "WHERE principal_id = ? AND lifecycle = ?",
-            (principal_id, Lifecycle.ACTIVE.name),
+        """Check if object is visible through parent scope inheritance.
+
+        Uses a recursive CTE to walk all ancestor scopes for the
+        principal's memberships in a single query, then checks projections.
+        """
+        row = self._backend.fetch_one(
+            "WITH RECURSIVE member_ancestors(scope_id, depth) AS ("
+            "  SELECT sm.scope_id, 0 "
+            "  FROM scope_memberships sm "
+            "  WHERE sm.principal_id = ? AND sm.lifecycle = ? "
+            "  UNION ALL "
+            "  SELECT s.parent_scope_id, ma.depth + 1 "
+            "  FROM scopes s JOIN member_ancestors ma ON s.id = ma.scope_id "
+            "  WHERE s.parent_scope_id IS NOT NULL AND ma.depth < 20"
+            ") "
+            "SELECT 1 FROM scope_projections sp "
+            "WHERE sp.object_id = ? AND sp.lifecycle = ? "
+            "AND sp.scope_id IN (SELECT scope_id FROM member_ancestors WHERE depth > 0) "
+            "LIMIT 1",
+            (principal_id, Lifecycle.ACTIVE.name, object_id, Lifecycle.ACTIVE.name),
         )
-        if not member_scopes:
-            return False
-
-        # For each scope, walk up the hierarchy and check projections
-        for ms in member_scopes:
-            ancestors = self.ancestor_scope_ids(ms["scope_id"])
-            for ancestor_id in ancestors:
-                row = self._backend.fetch_one(
-                    "SELECT 1 FROM scope_projections "
-                    "WHERE scope_id = ? AND object_id = ? AND lifecycle = ?",
-                    (ancestor_id, object_id, Lifecycle.ACTIVE.name),
-                )
-                if row is not None:
-                    return True
-
-        return False
+        return row is not None

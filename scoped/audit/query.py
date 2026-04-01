@@ -177,6 +177,7 @@ class AuditQuery:
         *,
         from_sequence: int = 1,
         to_sequence: int | None = None,
+        chunk_size: int = 5000,
     ) -> ChainVerification:
         """
         Verify hash chain integrity over a range of entries.
@@ -185,59 +186,90 @@ class AuditQuery:
         (inclusive) and checks that each entry's ``previous_hash``
         matches the preceding entry's ``hash``.
 
+        Processes entries in chunks of ``chunk_size`` to bound memory
+        usage on large audit trails.
+
         Returns a ``ChainVerification`` result.
         """
-        clauses = ["sequence >= ?"]
-        params: list[Any] = [from_sequence]
-        if to_sequence is not None:
-            clauses.append("sequence <= ?")
-            params.append(to_sequence)
+        total_checked = 0
+        first_seq: int | None = None
+        last_seq = 0
+        prev_hash: str | None = None
+        current_from = from_sequence
 
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM audit_trail WHERE {' AND '.join(clauses)} "
-            f"ORDER BY sequence ASC",
-            tuple(params),
-        )
+        while True:
+            clauses = ["sequence >= ?"]
+            params: list[Any] = [current_from]
+            if to_sequence is not None:
+                clauses.append("sequence <= ?")
+                params.append(to_sequence)
 
-        if not rows:
+            rows = self._backend.fetch_all(
+                f"SELECT * FROM audit_trail WHERE {' AND '.join(clauses)} "
+                f"ORDER BY sequence ASC LIMIT ?",
+                tuple(params) + (chunk_size,),
+            )
+
+            if not rows:
+                break
+
+            entries = [self._row_to_entry(r) for r in rows]
+
+            for i, entry in enumerate(entries):
+                if first_seq is None:
+                    first_seq = entry.sequence
+
+                # Recompute hash
+                expected = compute_hash(
+                    entry_id=entry.id,
+                    sequence=entry.sequence,
+                    actor_id=entry.actor_id,
+                    action=entry.action.value,
+                    target_type=entry.target_type,
+                    target_id=entry.target_id,
+                    timestamp=entry.timestamp.isoformat(),
+                    previous_hash=entry.previous_hash,
+                    algorithm=self._algorithm,
+                )
+                if entry.hash != expected:
+                    return ChainVerification(
+                        valid=False,
+                        entries_checked=total_checked + i + 1,
+                        first_sequence=first_seq,
+                        last_sequence=entry.sequence,
+                        broken_at_sequence=entry.sequence,
+                    )
+
+                # Check chain link against previous entry
+                if prev_hash is not None and entry.previous_hash != prev_hash:
+                    return ChainVerification(
+                        valid=False,
+                        entries_checked=total_checked + i + 1,
+                        first_sequence=first_seq,
+                        last_sequence=entry.sequence,
+                        broken_at_sequence=entry.sequence,
+                    )
+
+                prev_hash = entry.hash
+                last_seq = entry.sequence
+
+            total_checked += len(entries)
+
+            # If we got fewer than chunk_size, we've reached the end
+            if len(entries) < chunk_size:
+                break
+            current_from = entries[-1].sequence + 1
+
+        if first_seq is None:
             return ChainVerification(
                 valid=True, entries_checked=0, first_sequence=0, last_sequence=0,
             )
 
-        entries = [self._row_to_entry(r) for r in rows]
-        broken_at: int | None = None
-
-        for i, entry in enumerate(entries):
-            # Recompute hash
-            expected = compute_hash(
-                entry_id=entry.id,
-                sequence=entry.sequence,
-                actor_id=entry.actor_id,
-                action=entry.action.value,
-                target_type=entry.target_type,
-                target_id=entry.target_id,
-                timestamp=entry.timestamp.isoformat(),
-                previous_hash=entry.previous_hash,
-                algorithm=self._algorithm,
-            )
-            if entry.hash != expected:
-                broken_at = entry.sequence
-                break
-
-            # Check chain link (skip first entry in range — its previous
-            # hash links to an entry we may not have loaded)
-            if i > 0:
-                prev = entries[i - 1]
-                if entry.previous_hash != prev.hash:
-                    broken_at = entry.sequence
-                    break
-
         return ChainVerification(
-            valid=broken_at is None,
-            entries_checked=len(entries),
-            first_sequence=entries[0].sequence,
-            last_sequence=entries[-1].sequence,
-            broken_at_sequence=broken_at,
+            valid=True,
+            entries_checked=total_checked,
+            first_sequence=first_seq,
+            last_sequence=last_seq,
         )
 
     # -- Row mapping --------------------------------------------------------

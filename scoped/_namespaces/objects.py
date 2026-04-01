@@ -22,9 +22,12 @@ automatically. You can always override them explicitly.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from scoped._namespaces._base import _resolve_principal_id
+
+if TYPE_CHECKING:
+    from scoped.objects.models import ObjectVersion, ScopedObject, Tombstone
 
 
 class ObjectsNamespace:
@@ -51,7 +54,7 @@ class ObjectsNamespace:
         data: dict[str, Any],
         owner_id: str | None = None,
         change_reason: str = "created",
-    ) -> tuple[Any, Any]:
+    ) -> tuple[ScopedObject, ObjectVersion]:
         """Create a new scoped object.
 
         The object is creator-private — only the owner can read it until
@@ -88,12 +91,34 @@ class ObjectsNamespace:
             change_reason=change_reason,
         )
 
+    def create_many(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        owner_id: str | None = None,
+    ) -> list[tuple[ScopedObject, ObjectVersion]]:
+        """Create multiple objects atomically.
+
+        Each item dict must have ``object_type`` and ``data`` keys.
+
+        Args:
+            items: List of dicts with ``object_type``, ``data``, and
+                   optionally ``change_reason``.
+            owner_id: Owner for all objects. If omitted, inferred from
+                      context.
+
+        Returns:
+            List of ``(ScopedObject, ObjectVersion)`` tuples.
+        """
+        owner = _resolve_principal_id(owner_id)
+        return self._svc.manager.create_many(items=items, owner_id=owner)
+
     def get(
         self,
         object_id: str,
         *,
         principal_id: str | None = None,
-    ) -> Any:
+    ) -> ScopedObject | None:
         """Read an object by ID.
 
         Returns ``None`` if the object does not exist or the principal
@@ -116,7 +141,7 @@ class ObjectsNamespace:
         data: dict[str, Any],
         principal_id: str | None = None,
         change_reason: str = "",
-    ) -> tuple[Any, Any]:
+    ) -> tuple[ScopedObject, ObjectVersion]:
         """Update an object, creating a new immutable version.
 
         The previous version is preserved — no data is overwritten.
@@ -148,7 +173,7 @@ class ObjectsNamespace:
         *,
         principal_id: str | None = None,
         reason: str = "",
-    ) -> Any:
+    ) -> Tombstone:
         """Soft-delete an object (tombstone).
 
         The object and all its versions are preserved but marked as
@@ -175,7 +200,7 @@ class ObjectsNamespace:
         order_by: str = "created_at",
         limit: int = 100,
         offset: int = 0,
-    ) -> list[Any]:
+    ) -> list[ScopedObject]:
         """List objects visible to the acting principal.
 
         Only returns objects the principal owns or has access to via
@@ -206,15 +231,21 @@ class ObjectsNamespace:
         object_id: str,
         *,
         principal_id: str | None = None,
-    ) -> list[Any]:
-        """List all versions of an object.
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ObjectVersion]:
+        """List versions of an object.
 
         Args:
             object_id: The object whose history to retrieve.
             principal_id: Who is reading. If omitted, inferred from context.
+            limit: Maximum versions to return. ``None`` for all.
+            offset: Number of versions to skip.
 
         Returns:
             List of ``ObjectVersion`` instances, ordered by version number.
         """
         pid = _resolve_principal_id(principal_id)
-        return self._svc.manager.list_versions(object_id, principal_id=pid)
+        return self._svc.manager.list_versions(
+            object_id, principal_id=pid, limit=limit, offset=offset,
+        )

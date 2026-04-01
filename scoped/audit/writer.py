@@ -56,6 +56,19 @@ class AuditWriter:
             return 0, ""
         return row["sequence"], row["hash"]
 
+    def _reseed_if_stale(self) -> None:
+        """Re-read the latest sequence from DB if another process advanced it.
+
+        In multi-process deployments (e.g. gunicorn workers sharing a
+        Postgres database), another process may have written entries since
+        this writer was initialized. Re-seeding under the lock prevents
+        sequence collisions.
+        """
+        db_seq, db_hash = self._seed_chain()
+        if db_seq > self._sequence:
+            self._sequence = db_seq
+            self._last_hash = db_hash
+
     def record(
         self,
         *,
@@ -74,8 +87,13 @@ class AuditWriter:
 
         This is the primary API.  It assigns a sequence number, computes
         the hash chain link, persists the entry, and returns it.
+
+        Re-seeds from the database to handle multi-process scenarios
+        where another process may have advanced the sequence.
         """
         with self._lock:
+            self._reseed_if_stale()
+
             entry_id = generate_id()
             ts = now_utc()
             seq = self._sequence + 1
@@ -128,6 +146,7 @@ class AuditWriter:
         """
         results: list[TraceEntry] = []
         with self._lock:
+            self._reseed_if_stale()
             ts = now_utc()
             with self._backend.transaction() as txn:
                 for entry_kwargs in entries:

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.0 (2026-04-01)
+
+### Added
+- **Entity update methods** — `PrincipalStore.update_principal()` and `ScopeLifecycle.update_scope()` for updating display names, descriptions, and metadata with audit trails. Metadata merges (additive, not replace). Exposed via `principals.update()` and `scopes.update()` namespaces
+- **Bulk operations** — `ScopedManager.create_many()` for atomic batch object creation in a single transaction with batched audit entries. `ScopeLifecycle.add_members()` for adding multiple members at once. Exposed via `objects.create_many()` and `scopes.add_members()`
+- **Rules enforcement** — `RuleEngine` wired into `ScopedServices` and injected into `ScopedManager`. DENY rules are now enforced before `create()`, `update()`, and `tombstone()` operations, raising `AccessDeniedError`. No-op when no rules are configured (backward compatible)
+- **Paginated list_versions()** — accepts `limit` and `offset` parameters to avoid loading all version data into memory
+- **Chunked verify_chain()** — processes audit entries in configurable `chunk_size` chunks (default 5000) instead of loading the entire trail. Maintains chain linkage across chunk boundaries
+- **Django async middleware** — `ScopedContextMiddleware` now supports both sync and async views via `@sync_and_async_middleware` (Django 4.1+)
+- **Django REST Framework integration** — new `scoped.contrib.django.rest_framework` module with `ScopedAuthentication` (resolves from resolver, header, or Django auth), `IsScopedPrincipal` and `HasScopeAccess` permission classes, and `ScopedUser` wrapper
+- **FastAPI WebSocket support** — middleware handles `scope["type"] == "websocket"`, sets `ScopedContext` from handshake headers for the connection lifetime
+- **Proper return type hints** — all namespace methods now return specific types (`Principal`, `Scope`, `ScopedObject`, `TraceEntry`, etc.) instead of `Any`, using `TYPE_CHECKING` guards to avoid circular imports
+- **Structured logging** — new `scoped.logging` module with `ScopedLogger` (JSON structured output), `get_logger()` factory, auto-enrichment with principal_id from context, `SCOPED_LOG_LEVEL` env var
+- **Extended OpenTelemetry** — `instrument()` now covers 21 operations: scope lifecycle (create, rename, update, add_member, revoke_member, freeze, archive, list), principal management (create, get, update, list), and rule evaluation, in addition to existing object CRUD, audit, and secret operations
+- **Webhook HTTP transport** — `WebhookDelivery.http_transport` static method using stdlib `urllib.request` for production webhook delivery. Supports custom headers from endpoint config
+- **Exponential backoff retries** — `retry_failed(backoff_base=60)` enforces delay between retry attempts: `backoff_base * 2^(attempt-1)` seconds. `backoff_base=0` disables for testing
+- **Scheduler → JobQueue bridge** — `Scheduler.process_due_actions(queue)` enqueues all due actions, advances recurring schedules by interval, and archives one-shot actions
+- **Connector federation transport** — `ConnectorManager` accepts a pluggable `transport` callable for HTTP push to remote endpoints. `sync_object()` now pushes data for outbound syncs, records `FAILED` traffic on transport errors. `ConnectorManager.http_transport` static method provided
+- **Postgres Row-Level Security** — `PostgresBackend(enable_rls=True)` sets `app.current_principal_id` per-connection from `ScopedContext`. Migration m0013 creates RLS policies on 21+ tables with `FORCE ROW LEVEL SECURITY`. Uses `SET LOCAL` for transactions, `SET` + `RESET` for autocommit
+- **Database-per-tenant isolation** — new `TenantRouter` storage backend routes operations to per-tenant databases based on `ScopedContext`. Thread-safe backend cache, tenant lifecycle management (`provision_tenant`, `teardown_tenant`, `list_tenants`)
+- **Composite indexes** — migration m0012 adds `(scope_id, lifecycle)`, `(principal_id, lifecycle)`, and `(action, timestamp)` indexes for visibility JOINs and rate-limit queries
+- **CLAUDE.md** — comprehensive LLM workspace context file (520 lines) covering full API surface, architecture, isolation model, and integration guides
+- **Full documentation** — 21 new docs (9,100+ lines) across guides, API reference, integrations, features, and reference categories with `manifest.json` for platform export
+
+### Changed
+- **Recursive CTE hierarchy traversal** — `ancestor_scope_ids()`, `descendant_scope_ids()`, and `_visible_via_hierarchy()` rewritten from N+1 query loops to single `WITH RECURSIVE` queries (both SQLite and Postgres)
+- **Thread-safe global client** — `scoped.init()` protected by `threading.Lock` to prevent race conditions on `_default_client`
+- **Multi-process audit safety** — `AuditWriter` re-seeds sequence from database before each write to handle multi-process scenarios (e.g. gunicorn workers)
+- **`inspect.isawaitable()`** — FastAPI middleware uses `inspect.isawaitable()` instead of `hasattr(result, "__await__")` for async principal resolver detection
+
 ## 0.5.0 (2026-04-01)
 
 ### Added

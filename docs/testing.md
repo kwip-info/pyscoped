@@ -1,0 +1,381 @@
+---
+title: "Testing Guide"
+description: "Write reliable tests for pyscoped-powered applications using the built-in test utilities, fixtures, and patterns."
+category: "Guides"
+---
+
+# Testing Guide
+
+pyscoped ships with dedicated testing utilities that make it straightforward to
+write fast, isolated tests. This guide covers the base test class, data
+factories, pytest fixtures, integration patterns for Django and FastAPI, and
+recipes for testing rules, audit trails, and more.
+
+## ScopedTestCase
+
+`ScopedTestCase` is a `unittest.TestCase` subclass that sets up and tears down
+a fresh in-memory SQLite backend for every test method.
+
+```python
+from scoped.testing.base import ScopedTestCase
+
+
+class TestMyFeature(ScopedTestCase):
+    def test_create_scope(self):
+        scope = self.client.create_scope(
+            name="test-scope",
+            owner_id="user-1",
+        )
+        self.assertEqual(scope["name"], "test-scope")
+```
+
+`self.client` is a fully initialised `scoped.Client` backed by an in-memory
+SQLite database. `self.storage` gives direct access to the storage backend.
+
+Every test method gets a clean database -- no state leaks between tests.
+
+## ScopedFactory
+
+`ScopedFactory` generates test data with sensible defaults so your tests can
+focus on the behaviour under test rather than boilerplate setup.
+
+```python
+from scoped.testing.base import ScopedTestCase
+from scoped.testing.factory import ScopedFactory
+
+
+class TestWithFactory(ScopedTestCase):
+    def setUp(self):
+        super().setUp()
+        self.factory = ScopedFactory(self.client)
+
+    def test_membership(self):
+        scope = self.factory.scope()
+        user = self.factory.principal()
+        self.factory.membership(scope_id=scope["id"], principal_id=user[0])
+
+        members = self.client.list_members(scope_id=scope["id"])
+        self.assertEqual(len(members), 1)
+```
+
+The factory provides methods for creating scopes, principals, objects, rules,
+environments, secrets, connectors, and more. Every method accepts optional
+keyword arguments to override defaults.
+
+## pytest fixtures
+
+For pytest users, pyscoped provides ready-made fixtures in `scoped.testing.fixtures`.
+
+### sqlite_backend
+
+An in-memory SQLite backend that is created and destroyed per test. Migrations
+are applied automatically.
+
+```python
+import pytest
+from scoped.testing.fixtures import sqlite_backend
+
+
+def test_scope_creation(sqlite_backend):
+    from scoped import Client
+
+    client = Client(backend=sqlite_backend)
+    scope = client.create_scope(name="demo", owner_id="user-1")
+    assert scope["name"] == "demo"
+```
+
+### storage_backend (parametrized)
+
+The `storage_backend` fixture runs every test against both SQLite and PostgreSQL
+(when available). PostgreSQL is activated by setting the `PYSCOPED_TEST_PG_DSN`
+environment variable.
+
+```python
+from scoped.testing.fixtures import storage_backend
+
+
+def test_cross_backend(storage_backend):
+    from scoped import Client
+
+    client = Client(backend=storage_backend)
+    scope = client.create_scope(name="x-backend", owner_id="user-1")
+    assert scope["id"]
+```
+
+Run with PostgreSQL:
+
+```bash
+export PYSCOPED_TEST_PG_DSN="postgresql://test:test@localhost:5432/scoped_test"
+pytest tests/
+```
+
+When the env var is absent, the PostgreSQL parameter is skipped automatically.
+
+### registry
+
+A fresh `Registry` instance per test, ensuring no cross-test contamination of
+registered types or plugins.
+
+```python
+from scoped.testing.fixtures import registry
+
+
+def test_register_type(registry):
+    registry.register("Document", schema={"title": str})
+    assert registry.is_registered("Document")
+```
+
+## Recommended patterns
+
+### Fixture-first
+
+Always create your test data through fixtures or the factory rather than
+calling storage directly. This ensures migrations are applied and invariants
+are maintained.
+
+```python
+def test_with_fixtures(sqlite_backend):
+    from scoped import Client
+    from scoped.testing.factory import ScopedFactory
+
+    client = Client(backend=sqlite_backend)
+    factory = ScopedFactory(client)
+
+    scope = factory.scope(name="fixture-scope")
+    obj = factory.object(scope_id=scope["id"], type="Document")
+    assert obj["scope_id"] == scope["id"]
+```
+
+### Principal tuple unpacking
+
+Factory-created principals return a `(principal_id, principal_dict)` tuple.
+Unpack it for clean test code:
+
+```python
+pid, principal = factory.principal(name="Alice")
+client.add_member(scope_id=scope["id"], principal_id=pid, role="editor")
+```
+
+### Global state reset (autouse fixture)
+
+If your application uses global registry state, define an autouse fixture that
+resets it between tests:
+
+```python
+import pytest
+from scoped.registry import _global_registry
+
+
+@pytest.fixture(autouse=True)
+def reset_global_state():
+    _global_registry.reset()
+    yield
+    _global_registry.reset()
+```
+
+## Testing with Django
+
+### test_settings.py
+
+Create a dedicated settings module that configures pyscoped with an in-memory
+SQLite backend:
+
+```python
+# myproject/test_settings.py
+from myproject.settings import *  # noqa: F401,F403
+
+DATABASES["scoped"] = {
+    "ENGINE": "django.db.backends.sqlite3",
+    "NAME": ":memory:",
+}
+
+PYSCOPED_BACKEND = "sqlite"
+PYSCOPED_BACKEND_OPTIONS = {"database": ":memory:"}
+```
+
+Run tests with:
+
+```bash
+DJANGO_SETTINGS_MODULE=myproject.test_settings pytest tests/
+```
+
+### Separate test database
+
+When testing against PostgreSQL, use Django's `TEST` database configuration so
+the test database is created and destroyed automatically:
+
+```python
+DATABASES["scoped"] = {
+    "ENGINE": "django.db.backends.postgresql",
+    "NAME": "scoped_production",
+    "TEST": {"NAME": "scoped_test"},
+}
+```
+
+## Testing with FastAPI
+
+Use Starlette's `TestClient` with the pyscoped middleware applied:
+
+```python
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from scoped.integrations.fastapi import ScopedMiddleware
+
+app = FastAPI()
+app.add_middleware(ScopedMiddleware, backend=sqlite_backend)
+
+
+@app.get("/scopes")
+def list_scopes():
+    from scoped import current_client
+
+    return current_client().list_scopes()
+
+
+def test_list_scopes(sqlite_backend):
+    app.add_middleware(ScopedMiddleware, backend=sqlite_backend)
+    client = TestClient(app)
+    resp = client.get("/scopes", headers={"X-Principal-Id": "user-1"})
+    assert resp.status_code == 200
+```
+
+## Testing rules
+
+Create a rule, bind it to a scope, and verify that access checks behave
+correctly:
+
+```python
+from scoped.exceptions import AccessDeniedError
+import pytest
+
+
+def test_deny_rule(sqlite_backend):
+    from scoped import Client
+    from scoped.testing.factory import ScopedFactory
+
+    client = Client(backend=sqlite_backend)
+    factory = ScopedFactory(client)
+
+    scope = factory.scope()
+    pid, _ = factory.principal()
+    factory.membership(scope_id=scope["id"], principal_id=pid, role="viewer")
+
+    # Create a deny rule for delete operations
+    client.create_rule(
+        scope_id=scope["id"],
+        effect="deny",
+        action="delete",
+        role="viewer",
+    )
+
+    # Verify enforcement
+    with pytest.raises(AccessDeniedError):
+        client.delete_object(
+            scope_id=scope["id"],
+            object_id="obj-1",
+            principal_id=pid,
+        )
+```
+
+## Testing audit
+
+Verify that the audit chain maintains integrity after a sequence of operations:
+
+```python
+def test_audit_chain_integrity(sqlite_backend):
+    from scoped import Client
+    from scoped.testing.factory import ScopedFactory
+
+    client = Client(backend=sqlite_backend)
+    factory = ScopedFactory(client)
+
+    scope = factory.scope()
+    pid, _ = factory.principal()
+    factory.membership(scope_id=scope["id"], principal_id=pid, role="admin")
+
+    # Perform several operations
+    obj = client.create_object(
+        scope_id=scope["id"],
+        type="Document",
+        data={"title": "Test"},
+        principal_id=pid,
+    )
+    client.update_object(
+        scope_id=scope["id"],
+        object_id=obj["id"],
+        data={"title": "Updated"},
+        principal_id=pid,
+    )
+
+    # Verify chain integrity
+    trail = client.query_audit(scope_id=scope["id"])
+    assert len(trail) >= 2
+
+    # Each entry should reference the previous hash
+    for i in range(1, len(trail)):
+        assert trail[i]["prev_hash"] == trail[i - 1]["hash"]
+```
+
+## Example test class
+
+A complete example combining the test case, factory, rules, and audit:
+
+```python
+from scoped.testing.base import ScopedTestCase
+from scoped.testing.factory import ScopedFactory
+from scoped.exceptions import AccessDeniedError
+
+
+class TestDocumentWorkflow(ScopedTestCase):
+    def setUp(self):
+        super().setUp()
+        self.factory = ScopedFactory(self.client)
+        self.scope = self.factory.scope(name="engineering")
+        self.admin_id, _ = self.factory.principal(name="Admin")
+        self.viewer_id, _ = self.factory.principal(name="Viewer")
+        self.factory.membership(
+            scope_id=self.scope["id"],
+            principal_id=self.admin_id,
+            role="admin",
+        )
+        self.factory.membership(
+            scope_id=self.scope["id"],
+            principal_id=self.viewer_id,
+            role="viewer",
+        )
+
+    def test_admin_can_create(self):
+        obj = self.client.create_object(
+            scope_id=self.scope["id"],
+            type="Document",
+            data={"title": "Spec"},
+            principal_id=self.admin_id,
+        )
+        self.assertIsNotNone(obj["id"])
+
+    def test_viewer_cannot_delete(self):
+        obj = self.factory.object(
+            scope_id=self.scope["id"],
+            type="Document",
+        )
+        self.client.create_rule(
+            scope_id=self.scope["id"],
+            effect="deny",
+            action="delete",
+            role="viewer",
+        )
+        with self.assertRaises(AccessDeniedError):
+            self.client.delete_object(
+                scope_id=self.scope["id"],
+                object_id=obj["id"],
+                principal_id=self.viewer_id,
+            )
+
+    def test_audit_trail_populated(self):
+        self.factory.object(
+            scope_id=self.scope["id"],
+            type="Document",
+        )
+        trail = self.client.query_audit(scope_id=self.scope["id"])
+        self.assertGreater(len(trail), 0)
+```

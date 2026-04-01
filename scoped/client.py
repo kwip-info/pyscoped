@@ -66,6 +66,7 @@ Sync:
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any
 
 from scoped._namespaces.audit import AuditNamespace
@@ -392,6 +393,7 @@ class ScopedClient:
 # =========================================================================
 
 _default_client: ScopedClient | None = None
+_default_client_lock = threading.Lock()
 
 
 def init(
@@ -411,6 +413,8 @@ def init(
     - ``scoped.scopes.create(...)``
     - ``scoped.audit.for_object(...)``
     - ``with scoped.as_principal(...):``
+
+    Thread-safe — concurrent calls to ``init()`` are serialized.
 
     Args:
         database_url: Database connection URL. See ``ScopedClient``
@@ -439,13 +443,14 @@ def init(
         scoped.client.start_sync()
     """
     global _default_client
-    client = ScopedClient(
-        database_url=database_url,
-        api_key=api_key,
-        backend=backend,
-        sync_config=sync_config,
-    )
-    _default_client = client
+    with _default_client_lock:
+        client = ScopedClient(
+            database_url=database_url,
+            api_key=api_key,
+            backend=backend,
+            sync_config=sync_config,
+        )
+        _default_client = client
     return client
 
 
@@ -455,11 +460,12 @@ def _get_default_client() -> ScopedClient:
     This is called internally by ``scoped.__getattr__`` to proxy
     module-level attribute access.
     """
-    if _default_client is None:
+    client = _default_client
+    if client is None:
         raise RuntimeError(
             "No pyscoped client initialized. Call scoped.init() first."
         )
-    return _default_client
+    return client
 
 
 # =========================================================================

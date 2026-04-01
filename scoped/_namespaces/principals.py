@@ -20,9 +20,12 @@ of operations.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from scoped._namespaces._base import _to_id, _try_resolve_principal_id
+
+if TYPE_CHECKING:
+    from scoped.identity.principal import Principal
 
 
 class PrincipalsNamespace:
@@ -47,7 +50,7 @@ class PrincipalsNamespace:
         kind: str = "user",
         metadata: dict[str, Any] | None = None,
         principal_id: str | None = None,
-    ) -> Any:
+    ) -> Principal:
         """Create a new principal.
 
         Args:
@@ -77,7 +80,7 @@ class PrincipalsNamespace:
             principal_id=principal_id,
         )
 
-    def get(self, principal_id: str) -> Any:
+    def get(self, principal_id: str) -> Principal:
         """Get a principal by ID.
 
         Args:
@@ -91,7 +94,7 @@ class PrincipalsNamespace:
         """
         return self._svc.principals.get_principal(principal_id)
 
-    def find(self, principal_id: str) -> Any:
+    def find(self, principal_id: str) -> Principal | None:
         """Find a principal by ID, returning ``None`` if not found.
 
         Args:
@@ -102,7 +105,33 @@ class PrincipalsNamespace:
         """
         return self._svc.principals.find_principal(principal_id)
 
-    def list(self, *, kind: str | None = None) -> list[Any]:
+    def update(
+        self,
+        principal: Any,
+        *,
+        display_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Principal:
+        """Update a principal's display name and/or metadata.
+
+        Args:
+            principal: The principal (object or ID).
+            display_name: New display name. ``None`` to leave unchanged.
+            metadata: Dict to merge into existing metadata. ``None`` to
+                      leave unchanged.
+
+        Returns:
+            The updated ``Principal`` object.
+        """
+        actor = _try_resolve_principal_id() or "system"
+        return self._svc.principals.update_principal(
+            _to_id(principal),
+            display_name=display_name,
+            metadata=metadata,
+            updated_by=actor,
+        )
+
+    def list(self, *, kind: str | None = None) -> list[Principal]:
         """List principals, optionally filtered by kind.
 
         Args:

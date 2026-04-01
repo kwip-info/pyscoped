@@ -283,6 +283,8 @@ CREATE TABLE IF NOT EXISTS scope_memberships (
 
 CREATE INDEX IF NOT EXISTS idx_memberships_scope ON scope_memberships(scope_id);
 CREATE INDEX IF NOT EXISTS idx_memberships_principal ON scope_memberships(principal_id);
+CREATE INDEX IF NOT EXISTS idx_memberships_scope_lifecycle ON scope_memberships(scope_id, lifecycle);
+CREATE INDEX IF NOT EXISTS idx_memberships_principal_lifecycle ON scope_memberships(principal_id, lifecycle);
 
 
 CREATE TABLE IF NOT EXISTS scope_projections (
@@ -300,6 +302,7 @@ CREATE TABLE IF NOT EXISTS scope_projections (
 
 CREATE INDEX IF NOT EXISTS idx_projections_scope ON scope_projections(scope_id);
 CREATE INDEX IF NOT EXISTS idx_projections_object ON scope_projections(object_id);
+CREATE INDEX IF NOT EXISTS idx_projections_scope_lifecycle ON scope_projections(scope_id, lifecycle);
 
 
 -- =====================================================================
@@ -383,6 +386,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_trail(actor_id);
 CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_trail(target_type, target_id);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_trail(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_trail(action);
+CREATE INDEX IF NOT EXISTS idx_audit_action_timestamp ON audit_trail(action, timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_scope ON audit_trail(scope_id);
 
 

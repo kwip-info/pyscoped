@@ -88,6 +88,28 @@ def instrument(target: Any) -> Any:
     _wrap(vault, "rotate", tracer, "scoped.secret.rotate", _attr_secret_rotate)
     _wrap(vault, "resolve", tracer, "scoped.secret.resolve", _attr_secret_resolve)
 
+    # -- Scope lifecycle -------------------------------------------------------
+    scopes = services.scopes
+    _wrap(scopes, "create_scope", tracer, "scoped.scope.create", _attr_scope_create)
+    _wrap(scopes, "rename_scope", tracer, "scoped.scope.rename", _attr_scope_rename)
+    _wrap(scopes, "update_scope", tracer, "scoped.scope.update", _attr_scope_update)
+    _wrap(scopes, "add_member", tracer, "scoped.scope.add_member", _attr_scope_member)
+    _wrap(scopes, "revoke_member", tracer, "scoped.scope.revoke_member", _attr_scope_member)
+    _wrap(scopes, "freeze_scope", tracer, "scoped.scope.freeze", _attr_scope_lifecycle)
+    _wrap(scopes, "archive_scope", tracer, "scoped.scope.archive", _attr_scope_lifecycle)
+    _wrap(scopes, "list_scopes", tracer, "scoped.scope.list", _attr_noop)
+
+    # -- Principal store -------------------------------------------------------
+    principals = services.principals
+    _wrap(principals, "create_principal", tracer, "scoped.principal.create", _attr_principal_create)
+    _wrap(principals, "get_principal", tracer, "scoped.principal.get", _attr_principal_get)
+    _wrap(principals, "update_principal", tracer, "scoped.principal.update", _attr_principal_update)
+    _wrap(principals, "list_principals", tracer, "scoped.principal.list", _attr_noop)
+
+    # -- Rule engine -----------------------------------------------------------
+    rule_engine = services.rule_engine
+    _wrap(rule_engine, "evaluate", tracer, "scoped.rule.evaluate", _attr_rule_evaluate)
+
     return target
 
 
@@ -212,3 +234,70 @@ def _attr_secret_rotate(span: Any, kwargs: dict) -> None:
 def _attr_secret_resolve(span: Any, kwargs: dict) -> None:
     if "accessor_id" in kwargs:
         span.set_attribute("scoped.accessor_id", kwargs["accessor_id"])
+
+
+# -- Scope lifecycle attrs ---------------------------------------------------
+
+def _attr_scope_create(span: Any, kwargs: dict) -> None:
+    if "name" in kwargs:
+        span.set_attribute("scoped.scope_name", kwargs["name"])
+    if "owner_id" in kwargs:
+        span.set_attribute("scoped.owner_id", kwargs["owner_id"])
+
+
+def _attr_scope_rename(span: Any, kwargs: dict) -> None:
+    if "new_name" in kwargs:
+        span.set_attribute("scoped.new_name", kwargs["new_name"])
+    if "renamed_by" in kwargs:
+        span.set_attribute("scoped.actor_id", kwargs["renamed_by"])
+
+
+def _attr_scope_update(span: Any, kwargs: dict) -> None:
+    if "updated_by" in kwargs:
+        span.set_attribute("scoped.actor_id", kwargs["updated_by"])
+
+
+def _attr_scope_member(span: Any, kwargs: dict) -> None:
+    if "principal_id" in kwargs:
+        span.set_attribute("scoped.principal_id", kwargs["principal_id"])
+    if "role" in kwargs:
+        span.set_attribute("scoped.role", str(kwargs["role"]))
+
+
+def _attr_scope_lifecycle(span: Any, kwargs: dict) -> None:
+    pass  # scope_id is positional; actor is in kwargs
+
+
+# -- Principal attrs ---------------------------------------------------------
+
+def _attr_principal_create(span: Any, kwargs: dict) -> None:
+    if "kind" in kwargs:
+        span.set_attribute("scoped.principal_kind", kwargs["kind"])
+    if "display_name" in kwargs:
+        span.set_attribute("scoped.display_name", kwargs["display_name"])
+
+
+def _attr_principal_get(span: Any, kwargs: dict) -> None:
+    pass  # principal_id is positional
+
+
+def _attr_principal_update(span: Any, kwargs: dict) -> None:
+    if "display_name" in kwargs and kwargs["display_name"] is not None:
+        span.set_attribute("scoped.display_name", kwargs["display_name"])
+
+
+# -- Rule engine attrs -------------------------------------------------------
+
+def _attr_rule_evaluate(span: Any, kwargs: dict) -> None:
+    if "action" in kwargs:
+        span.set_attribute("scoped.action", kwargs["action"])
+    if "principal_id" in kwargs and kwargs["principal_id"] is not None:
+        span.set_attribute("scoped.principal_id", kwargs["principal_id"])
+    if "object_type" in kwargs and kwargs["object_type"] is not None:
+        span.set_attribute("scoped.object_type", kwargs["object_type"])
+
+
+# -- No-op for list operations -----------------------------------------------
+
+def _attr_noop(span: Any, kwargs: dict) -> None:
+    pass

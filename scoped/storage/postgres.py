@@ -79,6 +79,10 @@ class PostgresBackend(StorageBackend):
         pool_min_size: Minimum connections kept open in the pool.
         pool_max_size: Maximum connections the pool will create.
         pool_timeout: Seconds to wait for a connection from the pool.
+        enable_rls: Enable row-level security. When ``True``, every
+                    connection sets ``app.current_principal_id`` from
+                    the active ``ScopedContext`` before executing queries.
+                    RLS policies must be applied via migration m0013.
         pool_kwargs: Extra keyword arguments forwarded to
                      ``psycopg_pool.ConnectionPool``.
     """
@@ -90,12 +94,14 @@ class PostgresBackend(StorageBackend):
         pool_min_size: int = 2,
         pool_max_size: int = 10,
         pool_timeout: float = 30.0,
+        enable_rls: bool = False,
         pool_kwargs: dict[str, Any] | None = None,
     ) -> None:
         self._dsn = dsn
         self._pool_min_size = pool_min_size
         self._pool_max_size = pool_max_size
         self._pool_timeout = pool_timeout
+        self._enable_rls = enable_rls
         self._pool_kwargs = pool_kwargs or {}
         self._pool: ConnectionPool | None = None
 
@@ -137,15 +143,62 @@ class PostgresBackend(StorageBackend):
             finally:
                 conn.autocommit = True
 
+    # -- RLS context injection ------------------------------------------------
+
+    def _get_rls_principal_id(self) -> str:
+        """Read the current principal ID from ScopedContext.
+
+        Returns empty string when no context is active, which causes
+        RLS policies to deny all rows (safe default).
+        """
+        from scoped.identity.context import ScopedContext
+
+        ctx = ScopedContext.current_or_none()
+        return ctx.principal_id if ctx else ""
+
+    def _set_rls_context(self, conn: psycopg.Connection, *, local: bool = False) -> None:
+        """Set the Postgres session variable for RLS.
+
+        Args:
+            local: If ``True``, use ``SET LOCAL`` (scoped to current
+                   transaction, auto-reset on commit/rollback). If ``False``,
+                   use ``SET`` (session-level, must be explicitly RESET).
+
+        Use ``local=True`` for explicit transactions and ``local=False``
+        for auto-commit operations (where ``SET LOCAL`` would be a no-op).
+        """
+        if not self._enable_rls:
+            return
+        principal_id = self._get_rls_principal_id()
+        cmd = "SET LOCAL" if local else "SET"
+        conn.execute(f"{cmd} app.current_principal_id = %s", (principal_id,))
+
+    def _reset_rls_context(self, conn: psycopg.Connection) -> None:
+        """Reset the RLS session variable before returning connection to pool."""
+        if not self._enable_rls:
+            return
+        conn.execute("RESET app.current_principal_id")
+
+    # -- StorageBackend interface ---------------------------------------------
+
     def transaction(self) -> PostgresTransaction:
         conn = self.pool.getconn()
         conn.autocommit = False
-        return _PoolReturningTransaction(conn, self.pool)
+        txn = _PoolReturningTransaction(conn, self.pool, backend=self)
+        # SET LOCAL is correct here — scoped to this transaction,
+        # auto-reset on commit/rollback
+        self._set_rls_context(conn, local=True)
+        return txn
 
     def execute(self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()) -> Any:
         sql = translate_placeholders(sql)
         with self.pool.connection() as conn:
-            conn.execute(sql, params)
+            # Session-level SET for autocommit (SET LOCAL is a no-op in autocommit)
+            self._set_rls_context(conn, local=False)
+            try:
+                conn.execute(sql, params)
+            finally:
+                self._reset_rls_context(conn)
         return None
 
     def fetch_one(
@@ -153,24 +206,32 @@ class PostgresBackend(StorageBackend):
     ) -> dict[str, Any] | None:
         sql = translate_placeholders(sql)
         with self.pool.connection() as conn:
-            cur = conn.execute(sql, params)
-            row = cur.fetchone()
-            if row is None:
-                return None
-            columns = [desc.name for desc in cur.description]
-            return dict(zip(columns, row))
+            self._set_rls_context(conn, local=False)
+            try:
+                cur = conn.execute(sql, params)
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                columns = [desc.name for desc in cur.description]
+                return dict(zip(columns, row))
+            finally:
+                self._reset_rls_context(conn)
 
     def fetch_all(
         self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()
     ) -> list[dict[str, Any]]:
         sql = translate_placeholders(sql)
         with self.pool.connection() as conn:
-            cur = conn.execute(sql, params)
-            rows = cur.fetchall()
-            if not rows:
-                return []
-            columns = [desc.name for desc in cur.description]
-            return [dict(zip(columns, row)) for row in rows]
+            self._set_rls_context(conn, local=False)
+            try:
+                cur = conn.execute(sql, params)
+                rows = cur.fetchall()
+                if not rows:
+                    return []
+                columns = [desc.name for desc in cur.description]
+                return [dict(zip(columns, row)) for row in rows]
+            finally:
+                self._reset_rls_context(conn)
 
     def close(self) -> None:
         if self._pool is not None:
@@ -189,14 +250,23 @@ class PostgresBackend(StorageBackend):
 class _PoolReturningTransaction(PostgresTransaction):
     """Transaction that returns its connection to the pool on commit/rollback."""
 
-    def __init__(self, conn: psycopg.Connection, pool: ConnectionPool) -> None:
+    def __init__(
+        self,
+        conn: psycopg.Connection,
+        pool: ConnectionPool,
+        *,
+        backend: PostgresBackend | None = None,
+    ) -> None:
         self._pool_ref = pool
+        self._backend_ref = backend
         super().__init__(conn)
 
     def commit(self) -> None:
         try:
             self._conn.commit()
         finally:
+            if self._backend_ref:
+                self._backend_ref._reset_rls_context(self._conn)
             self._conn.autocommit = True
             self._pool_ref.putconn(self._conn)
 
@@ -204,6 +274,11 @@ class _PoolReturningTransaction(PostgresTransaction):
         try:
             self._conn.rollback()
         finally:
+            if self._backend_ref:
+                try:
+                    self._backend_ref._reset_rls_context(self._conn)
+                except Exception:
+                    pass  # Connection may be in error state
             self._conn.autocommit = True
             self._pool_ref.putconn(self._conn)
 
@@ -364,6 +439,8 @@ CREATE TABLE IF NOT EXISTS scope_memberships (
 
 CREATE INDEX IF NOT EXISTS idx_memberships_scope ON scope_memberships(scope_id);
 CREATE INDEX IF NOT EXISTS idx_memberships_principal ON scope_memberships(principal_id);
+CREATE INDEX IF NOT EXISTS idx_memberships_scope_lifecycle ON scope_memberships(scope_id, lifecycle);
+CREATE INDEX IF NOT EXISTS idx_memberships_principal_lifecycle ON scope_memberships(principal_id, lifecycle);
 
 
 CREATE TABLE IF NOT EXISTS scope_projections (
@@ -381,6 +458,7 @@ CREATE TABLE IF NOT EXISTS scope_projections (
 
 CREATE INDEX IF NOT EXISTS idx_projections_scope ON scope_projections(scope_id);
 CREATE INDEX IF NOT EXISTS idx_projections_object ON scope_projections(object_id);
+CREATE INDEX IF NOT EXISTS idx_projections_scope_lifecycle ON scope_projections(scope_id, lifecycle);
 
 
 -- =====================================================================
@@ -464,6 +542,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_trail(actor_id);
 CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_trail(target_type, target_id);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_trail(timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_trail(action);
+CREATE INDEX IF NOT EXISTS idx_audit_action_timestamp ON audit_trail(action, timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_scope ON audit_trail(scope_id);
 
 

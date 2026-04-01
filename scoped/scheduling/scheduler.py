@@ -251,6 +251,78 @@ class Scheduler:
             (next_run_at.isoformat(), action_id),
         )
 
+    def process_due_actions(
+        self,
+        queue: Any,
+        *,
+        as_of: datetime | None = None,
+    ) -> list[Any]:
+        """Enqueue all due actions into a JobQueue and advance their schedules.
+
+        This is the primary bridge between the Scheduler and the JobQueue.
+        For each due action:
+        1. Enqueues a Job via ``queue.enqueue()``
+        2. If the action has a linked schedule with ``interval_seconds``,
+           advances ``next_run_at`` by the interval
+        3. If the action has no linked schedule (one-shot), archives it
+
+        Args:
+            queue: A ``JobQueue`` instance.
+            as_of: Evaluation timestamp. Defaults to now.
+
+        Returns:
+            List of enqueued ``Job`` objects.
+        """
+        due = self.get_due_actions(as_of=as_of)
+        jobs = []
+
+        for action in due:
+            job = queue.enqueue(
+                name=action.name,
+                action_type=action.action_type,
+                action_config=action.action_config,
+                owner_id=action.owner_id,
+                scheduled_action_id=action.id,
+                scope_id=action.scope_id,
+            )
+            jobs.append(job)
+
+            # Advance or archive
+            if action.schedule_id:
+                schedule = self.get_schedule(action.schedule_id)
+                if schedule and schedule.interval_seconds:
+                    next_run = action.next_run_at + timedelta(
+                        seconds=schedule.interval_seconds,
+                    )
+                    self.advance_action(action.id, next_run)
+                else:
+                    # Cron schedules need external cron parsing — advance
+                    # by a placeholder; real cron parsing is application-level
+                    self.advance_action(
+                        action.id,
+                        action.next_run_at + timedelta(hours=1),
+                    )
+            else:
+                # One-shot action — archive after enqueue
+                self.archive_action(action.id)
+
+            if self._audit is not None:
+                try:
+                    self._audit.record(
+                        actor_id="system",
+                        action=ActionType.JOB_ENQUEUE,
+                        target_type="job",
+                        target_id=job.id,
+                        after_state={
+                            "action_type": action.action_type,
+                            "scheduled_action_id": action.id,
+                        },
+                    )
+                except Exception:
+                    pass
+
+        return jobs
+
     def archive_action(self, action_id: str) -> None:
         self._backend.execute(
             "UPDATE scheduled_actions SET lifecycle = 'ARCHIVED' WHERE id = ?",

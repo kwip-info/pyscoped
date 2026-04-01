@@ -2,7 +2,8 @@
 
 Integrates pyscoped into FastAPI with a single middleware. After adding
 the middleware, the simplified SDK (``scoped.objects``,
-``scoped.principals``, etc.) works in every route handler.
+``scoped.principals``, etc.) works in every route handler — including
+WebSocket handlers.
 
 Usage::
 
@@ -22,6 +23,12 @@ Usage::
         doc, v1 = scoped.objects.create("invoice", data={"amount": 100})
         return {"id": doc.id}
 
+    @app.websocket("/ws")
+    async def ws_handler(websocket: WebSocket):
+        # ScopedContext is set from the initial connection headers
+        await websocket.accept()
+        ...
+
 Configuration:
     ``database_url``         Database URL (``sqlite:///``, ``postgresql://``)
     ``api_key``              Management plane API key (optional)
@@ -33,19 +40,25 @@ Configuration:
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Callable
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.websockets import WebSocket
 
 
 class ScopedContextMiddleware(BaseHTTPMiddleware):
-    """Wrap each request in a ``ScopedContext``.
+    """Wrap each HTTP request in a ``ScopedContext``.
 
     Initializes a ``ScopedClient`` on first use and sets it as the
     global default so ``scoped.objects``, ``scoped.principals``, etc.
     work in route handlers.
+
+    For WebSocket connections, the context is set from the initial
+    handshake headers and remains active for the connection lifetime.
 
     Args:
         app: The ASGI application.
@@ -59,7 +72,7 @@ class ScopedContextMiddleware(BaseHTTPMiddleware):
 
     def __init__(
         self,
-        app,
+        app: ASGIApp,
         *,
         database_url: str | None = None,
         api_key: str | None = None,
@@ -81,6 +94,17 @@ class ScopedContextMiddleware(BaseHTTPMiddleware):
             backend=backend,
         )
 
+    # -- ASGI entrypoint (handles both HTTP and WebSocket) ------------------
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "websocket":
+            await self._handle_websocket(scope, receive, send)
+        else:
+            # Delegate HTTP to BaseHTTPMiddleware's __call__
+            await super().__call__(scope, receive, send)
+
+    # -- HTTP dispatch (via BaseHTTPMiddleware) -----------------------------
+
     async def dispatch(self, request: Request, call_next) -> Response:
         if any(request.url.path.startswith(p) for p in self.exempt_paths):
             return await call_next(request)
@@ -101,10 +125,51 @@ class ScopedContextMiddleware(BaseHTTPMiddleware):
             ctx.__exit__(None, None, None)
         return response
 
+    # -- WebSocket dispatch ------------------------------------------------
+
+    async def _handle_websocket(
+        self, scope: Scope, receive: Receive, send: Send,
+    ) -> None:
+        """Set ScopedContext for WebSocket connections from handshake headers."""
+        ws = WebSocket(scope, receive, send)
+        path = scope.get("path", "")
+
+        if any(path.startswith(p) for p in self.exempt_paths):
+            await self.app(scope, receive, send)
+            return
+
+        principal = self._resolve_principal_from_scope(scope)
+        if principal is None:
+            await self.app(scope, receive, send)
+            return
+
+        from scoped.identity.context import ScopedContext
+
+        ctx = ScopedContext(principal=principal)
+        ctx.__enter__()
+        try:
+            scope["state"] = scope.get("state", {})
+            scope["state"]["scoped_context"] = ctx
+            await self.app(scope, receive, send)
+        finally:
+            ctx.__exit__(None, None, None)
+
+    def _resolve_principal_from_scope(self, scope: Scope):
+        """Resolve principal from ASGI scope headers (WebSocket handshake)."""
+        headers = dict(scope.get("headers", []))
+        # Headers are bytes in ASGI scope
+        header_key = self.principal_header.lower().encode()
+        pid = headers.get(header_key)
+        if pid:
+            return self._client.principals.find(pid.decode())
+        return None
+
+    # -- Shared resolution -------------------------------------------------
+
     async def _resolve_principal(self, request: Request):
         if self.principal_resolver:
             result = self.principal_resolver(request)
-            if hasattr(result, "__await__"):
+            if inspect.isawaitable(result):
                 return await result
             return result
 

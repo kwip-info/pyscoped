@@ -256,6 +256,61 @@ class PrincipalStore:
 
         return principal
 
+    def update_principal(
+        self,
+        principal_id: str,
+        *,
+        display_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        updated_by: str = "system",
+    ) -> Principal:
+        """Update a principal's display_name and/or metadata."""
+        principal = self.get_principal(principal_id)
+        before = {}
+        after = {}
+
+        sets: list[str] = []
+        params: list[Any] = []
+
+        if display_name is not None and display_name != principal.display_name:
+            sets.append("display_name = ?")
+            params.append(display_name)
+            before["display_name"] = principal.display_name
+            after["display_name"] = display_name
+
+        if metadata is not None:
+            merged = {**principal.metadata.snapshot(), **metadata}
+            sets.append("metadata_json = ?")
+            params.append(json.dumps(merged))
+            before["metadata"] = principal.metadata.snapshot()
+            after["metadata"] = merged
+
+        if not sets:
+            return principal
+
+        params.append(principal_id)
+        with self._backend.transaction() as txn:
+            txn.execute(
+                f"UPDATE principals SET {', '.join(sets)} WHERE id = ?",
+                tuple(params),
+            )
+            txn.commit()
+
+        if self._audit is not None:
+            try:
+                self._audit.record(
+                    actor_id=updated_by,
+                    action=ActionType.UPDATE,
+                    target_type="principal",
+                    target_id=principal_id,
+                    before_state=before,
+                    after_state=after,
+                )
+            except Exception:
+                pass
+
+        return self.get_principal(principal_id)
+
     # -- Relationship CRUD --------------------------------------------------
 
     def add_relationship(

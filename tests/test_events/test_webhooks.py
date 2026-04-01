@@ -162,9 +162,9 @@ class TestRetry:
         failing = WebhookDelivery(sqlite_backend, transport=lambda e, ev: (500, "fail"))
         failing.deliver_pending()
 
-        # Retry with working transport
+        # Retry with working transport (backoff_base=0 to retry immediately in tests)
         working = WebhookDelivery(sqlite_backend, transport=lambda e, ev: (200, "ok"))
-        retries = working.retry_failed()
+        retries = working.retry_failed(backoff_base=0)
 
         assert len(retries) == 1
         assert retries[0].status == DeliveryStatus.DELIVERED
@@ -185,10 +185,10 @@ class TestRetry:
             max_retries=2,
         )
         delivery.deliver_pending()   # attempt 1
-        delivery.retry_failed()      # attempt 2
+        delivery.retry_failed(backoff_base=0)      # attempt 2
 
         # No more retries — already at max
-        retries = delivery.retry_failed()
+        retries = delivery.retry_failed(backoff_base=0)
         assert len(retries) == 0
 
 

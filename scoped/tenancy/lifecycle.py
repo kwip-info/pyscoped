@@ -233,6 +233,61 @@ class ScopeLifecycle:
 
         return self.get_scope_or_raise(scope_id)
 
+    def update_scope(
+        self,
+        scope_id: str,
+        *,
+        description: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        updated_by: str,
+    ) -> Scope:
+        """Update a scope's description and/or metadata.
+
+        Raises ScopeFrozenError if scope is frozen/archived.
+        """
+        scope = self.get_scope_or_raise(scope_id)
+        self._require_mutable(scope)
+
+        before: dict[str, Any] = {}
+        after: dict[str, Any] = {}
+        sets: list[str] = []
+        params: list[Any] = []
+
+        if description is not None and description != scope.description:
+            sets.append("description = ?")
+            params.append(description)
+            before["description"] = scope.description
+            after["description"] = description
+
+        if metadata is not None:
+            merged = {**scope.metadata, **metadata}
+            sets.append("metadata_json = ?")
+            params.append(json.dumps(merged))
+            before["metadata"] = scope.metadata
+            after["metadata"] = merged
+
+        if not sets:
+            return scope
+
+        params.append(scope_id)
+        self._backend.execute(
+            f"UPDATE scopes SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+
+        if self._audit:
+            self._audit.record(
+                actor_id=updated_by,
+                action=ActionType.SCOPE_MODIFY,
+                target_type="Scope",
+                target_id=scope_id,
+                scope_id=scope_id,
+                before_state=before,
+                after_state=after,
+            )
+
+        return self.get_scope_or_raise(scope_id)
+
     # ------------------------------------------------------------------
     # Membership
     # ------------------------------------------------------------------
@@ -257,6 +312,35 @@ class ScopeLifecycle:
             granted_by=granted_by,
             expires_at=expires_at,
         )
+
+    def add_members(
+        self,
+        scope_id: str,
+        *,
+        members: list[dict[str, Any]],
+        granted_by: str,
+    ) -> list[ScopeMembership]:
+        """Add multiple members to a scope atomically.
+
+        Each dict in ``members`` must have ``principal_id`` and optionally
+        ``role`` (defaults to ``"viewer"``).
+
+        Returns list of ``ScopeMembership`` objects.
+        """
+        scope = self.get_scope_or_raise(scope_id)
+        self._require_mutable(scope)
+
+        results: list[ScopeMembership] = []
+        for m in members:
+            role = ScopeRole(m.get("role", "viewer"))
+            mem = self._add_membership(
+                scope_id=scope_id,
+                principal_id=m["principal_id"],
+                role=role,
+                granted_by=granted_by,
+            )
+            results.append(mem)
+        return results
 
     def _add_membership(
         self,

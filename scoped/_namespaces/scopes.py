@@ -32,9 +32,12 @@ the active ``ScopedContext`` when not passed explicitly.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from scoped._namespaces._base import _resolve_principal_id, _to_id
+
+if TYPE_CHECKING:
+    from scoped.tenancy.models import Scope, ScopeMembership, ScopeProjection
 
 
 class ScopesNamespace:
@@ -65,7 +68,7 @@ class ScopesNamespace:
         description: str = "",
         parent_scope_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> Any:
+    ) -> Scope:
         """Create a new scope (sharing container).
 
         Args:
@@ -92,7 +95,7 @@ class ScopesNamespace:
             metadata=metadata,
         )
 
-    def get(self, scope_id: str) -> Any:
+    def get(self, scope_id: str) -> Scope | None:
         """Get a scope by ID. Returns ``None`` if not found.
 
         Args:
@@ -109,7 +112,7 @@ class ScopesNamespace:
         new_name: str,
         *,
         renamed_by: str | None = None,
-    ) -> Any:
+    ) -> Scope:
         """Rename a scope.
 
         Args:
@@ -132,6 +135,34 @@ class ScopesNamespace:
             renamed_by=actor,
         )
 
+    def update(
+        self,
+        scope: Any,
+        *,
+        description: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        updated_by: str | None = None,
+    ) -> Scope:
+        """Update a scope's description and/or metadata.
+
+        Args:
+            scope: The scope (object or ID).
+            description: New description. ``None`` to leave unchanged.
+            metadata: Dict to merge into existing metadata. ``None`` to
+                      leave unchanged.
+            updated_by: Who is updating. If omitted, inferred from context.
+
+        Returns:
+            The updated ``Scope`` object.
+        """
+        actor = _resolve_principal_id(updated_by)
+        return self._svc.scopes.update_scope(
+            _to_id(scope),
+            description=description,
+            metadata=metadata,
+            updated_by=actor,
+        )
+
     def list(
         self,
         *,
@@ -140,7 +171,7 @@ class ScopesNamespace:
         order_by: str = "created_at",
         limit: int | None = None,
         offset: int = 0,
-    ) -> list[Any]:
+    ) -> list[Scope]:
         """List scopes, optionally filtered and paginated.
 
         Args:
@@ -191,7 +222,7 @@ class ScopesNamespace:
         *,
         role: str = "viewer",
         granted_by: str | None = None,
-    ) -> Any:
+    ) -> ScopeMembership:
         """Add a principal to a scope with a given role.
 
         Args:
@@ -220,6 +251,41 @@ class ScopesNamespace:
             granted_by=actor,
         )
 
+    def add_members(
+        self,
+        scope: Any,
+        members: list[dict[str, Any]],
+        *,
+        granted_by: str | None = None,
+    ) -> list[ScopeMembership]:
+        """Add multiple members to a scope at once.
+
+        Each dict must have ``principal_id`` (or a principal object as
+        ``principal``) and optionally ``role``.
+
+        Args:
+            scope: The scope (object or ID).
+            members: List of dicts, e.g.
+                     ``[{"principal_id": "...", "role": "editor"}, ...]``
+            granted_by: Who is granting. If omitted, inferred from context.
+
+        Returns:
+            List of ``ScopeMembership`` objects.
+        """
+        actor = _resolve_principal_id(granted_by)
+        normalized = [
+            {
+                "principal_id": _to_id(m.get("principal") or m["principal_id"]),
+                "role": m.get("role", "viewer"),
+            }
+            for m in members
+        ]
+        return self._svc.scopes.add_members(
+            _to_id(scope),
+            members=normalized,
+            granted_by=actor,
+        )
+
     def remove_member(
         self,
         scope: Any,
@@ -244,7 +310,7 @@ class ScopesNamespace:
             revoked_by=actor,
         )
 
-    def members(self, scope: Any) -> list[Any]:
+    def members(self, scope: Any) -> list[ScopeMembership]:
         """List active members of a scope.
 
         Args:
@@ -265,7 +331,7 @@ class ScopesNamespace:
         *,
         projected_by: str | None = None,
         access_level: str = "read",
-    ) -> Any:
+    ) -> ScopeProjection:
         """Share an object into a scope.
 
         Scope members will be able to see this object at the given
@@ -324,7 +390,7 @@ class ScopesNamespace:
             revoked_by=actor,
         )
 
-    def projections(self, scope: Any) -> list[Any]:
+    def projections(self, scope: Any) -> list[ScopeProjection]:
         """List all objects projected into a scope.
 
         Args:
@@ -337,7 +403,7 @@ class ScopesNamespace:
 
     # -- Lifecycle ---------------------------------------------------------
 
-    def freeze(self, scope: Any, *, frozen_by: str | None = None) -> Any:
+    def freeze(self, scope: Any, *, frozen_by: str | None = None) -> Scope:
         """Freeze a scope (no new members or projections allowed).
 
         Args:
@@ -350,7 +416,7 @@ class ScopesNamespace:
         actor = _resolve_principal_id(frozen_by)
         return self._svc.scopes.freeze_scope(_to_id(scope), frozen_by=actor)
 
-    def archive(self, scope: Any, *, archived_by: str | None = None) -> Any:
+    def archive(self, scope: Any, *, archived_by: str | None = None) -> Scope:
         """Archive a scope (soft-delete, all memberships revoked).
 
         Args:

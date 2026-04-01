@@ -38,9 +38,47 @@ class ScopedManager:
         backend: StorageBackend,
         *,
         audit_writer: Any | None = None,
+        rule_engine: Any | None = None,
     ) -> None:
         self._backend = backend
         self._audit = audit_writer
+        self._rule_engine = rule_engine
+
+    # ------------------------------------------------------------------
+    # Rule enforcement
+    # ------------------------------------------------------------------
+
+    def _check_rules(
+        self,
+        *,
+        action: str,
+        principal_id: str,
+        object_type: str | None = None,
+        object_id: str | None = None,
+    ) -> None:
+        """Evaluate rules and raise AccessDeniedError if denied.
+
+        No-op when no rule engine is configured or when no rules exist.
+        """
+        if self._rule_engine is None:
+            return
+        result = self._rule_engine.evaluate(
+            action=action,
+            principal_id=principal_id,
+            object_type=object_type,
+            object_id=object_id,
+        )
+        if not result.allowed and (result.deny_rules or result.matching_rules):
+            deny_names = [r.name for r in result.deny_rules]
+            raise AccessDeniedError(
+                f"Action '{action}' denied by rule(s): {deny_names}",
+                context={
+                    "action": action,
+                    "principal_id": principal_id,
+                    "object_type": object_type,
+                    "deny_rules": deny_names,
+                },
+            )
 
     # ------------------------------------------------------------------
     # Create
@@ -59,6 +97,9 @@ class ScopedManager:
 
         Returns (object, version_1).
         """
+        self._check_rules(
+            action="create", principal_id=owner_id, object_type=object_type,
+        )
         ts = now_utc()
         obj_id = generate_id()
         ver_id = generate_id()
@@ -97,6 +138,74 @@ class ScopedManager:
             )
 
         return obj, ver
+
+    def create_many(
+        self,
+        *,
+        items: list[dict[str, Any]],
+        owner_id: str,
+    ) -> list[tuple[ScopedObject, ObjectVersion]]:
+        """Create multiple objects atomically.
+
+        Each item dict must have ``object_type`` and ``data`` keys.
+        Optional: ``change_reason``.
+
+        Returns list of (object, version) tuples.
+        """
+        results: list[tuple[ScopedObject, ObjectVersion]] = []
+        ts = now_utc()
+
+        with self._backend.transaction() as txn:
+            for item in items:
+                obj_id = generate_id()
+                ver_id = generate_id()
+                object_type = item["object_type"]
+                data = item["data"]
+                checksum = compute_checksum(data)
+                reason = item.get("change_reason", "created")
+
+                obj = ScopedObject(
+                    id=obj_id, object_type=object_type, owner_id=owner_id,
+                    current_version=1, created_at=ts, lifecycle=Lifecycle.ACTIVE,
+                )
+                ver = ObjectVersion(
+                    id=ver_id, object_id=obj_id, version=1, data=data,
+                    created_at=ts, created_by=owner_id,
+                    change_reason=reason, checksum=checksum,
+                )
+
+                txn.execute(
+                    "INSERT INTO scoped_objects "
+                    "(id, object_type, owner_id, registry_entry_id, current_version, created_at, lifecycle) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (obj.id, obj.object_type, obj.owner_id, None, 1,
+                     obj.created_at.isoformat(), obj.lifecycle.name),
+                )
+                txn.execute(
+                    "INSERT INTO object_versions "
+                    "(id, object_id, version, data_json, created_at, created_by, change_reason, checksum) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (ver.id, ver.object_id, ver.version,
+                     json.dumps(ver.data, sort_keys=True, default=str),
+                     ver.created_at.isoformat(), ver.created_by,
+                     ver.change_reason, ver.checksum),
+                )
+                results.append((obj, ver))
+            txn.commit()
+
+        if self._audit:
+            self._audit.record_batch([
+                {
+                    "actor_id": owner_id,
+                    "action": ActionType.CREATE,
+                    "target_type": obj.object_type,
+                    "target_id": obj.id,
+                    "after_state": ver.data,
+                }
+                for obj, ver in results
+            ])
+
+        return results
 
     # ------------------------------------------------------------------
     # Read (isolation-enforced)
@@ -218,6 +327,10 @@ class ScopedManager:
         Raises IsolationViolationError if the object is tombstoned.
         """
         obj = self.get_or_raise(object_id, principal_id=principal_id)
+        self._check_rules(
+            action="update", principal_id=principal_id,
+            object_type=obj.object_type, object_id=object_id,
+        )
 
         if obj.is_tombstoned:
             raise IsolationViolationError(
@@ -291,6 +404,10 @@ class ScopedManager:
         Raises IsolationViolationError if already tombstoned.
         """
         obj = self.get_or_raise(object_id, principal_id=principal_id)
+        self._check_rules(
+            action="delete", principal_id=principal_id,
+            object_type=obj.object_type, object_id=object_id,
+        )
 
         if obj.is_tombstoned:
             raise IsolationViolationError(
@@ -372,16 +489,28 @@ class ScopedManager:
         return self.get_version(object_id, obj.current_version)
 
     def list_versions(
-        self, object_id: str, *, principal_id: str
+        self,
+        object_id: str,
+        *,
+        principal_id: str,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ObjectVersion]:
-        """List all versions of an object (isolation-enforced)."""
+        """List versions of an object (isolation-enforced).
+
+        Args:
+            limit: Maximum versions to return. ``None`` for all.
+            offset: Number of versions to skip.
+        """
         obj = self.get(object_id, principal_id=principal_id)
         if obj is None:
             return []
-        rows = self._backend.fetch_all(
-            "SELECT * FROM object_versions WHERE object_id = ? ORDER BY version ASC",
-            (object_id,),
-        )
+        sql = "SELECT * FROM object_versions WHERE object_id = ? ORDER BY version ASC"
+        params: list[Any] = [object_id]
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        rows = self._backend.fetch_all(sql, tuple(params))
         return [self._row_to_version(r) for r in rows]
 
     def diff(
