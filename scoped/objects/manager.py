@@ -126,16 +126,25 @@ class ScopedManager:
             )
         return obj
 
+    # Columns that are safe to ORDER BY
+    _OBJECT_ORDER_COLUMNS = {"created_at", "object_type"}
+
     def list_objects(
         self,
         *,
         principal_id: str,
         object_type: str | None = None,
         include_tombstoned: bool = False,
+        order_by: str = "created_at",
         limit: int = 100,
         offset: int = 0,
     ) -> list[ScopedObject]:
-        """List objects visible to a principal (owner-only at this layer)."""
+        """List objects visible to a principal (owner-only at this layer).
+
+        Args:
+            order_by: Column to sort by. Prefix with ``-`` for descending.
+                      Allowed: ``created_at``, ``object_type``. Default: ``created_at``.
+        """
         clauses = ["owner_id = ?"]
         params: list[Any] = [principal_id]
 
@@ -148,9 +157,16 @@ class ScopedManager:
             params.append(Lifecycle.ARCHIVED.name)
 
         where = " AND ".join(clauses)
+
+        desc = order_by.startswith("-")
+        col = order_by.lstrip("-")
+        if col not in self._OBJECT_ORDER_COLUMNS:
+            col = "created_at"
+        direction = "DESC" if desc else "ASC"
+
         sql = (
             f"SELECT * FROM scoped_objects WHERE {where} "
-            f"ORDER BY created_at ASC LIMIT ? OFFSET ?"
+            f"ORDER BY {col} {direction} LIMIT ? OFFSET ?"
         )
         params.extend([limit, offset])
 

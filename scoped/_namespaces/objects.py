@@ -172,6 +172,7 @@ class ObjectsNamespace:
         *,
         principal_id: str | None = None,
         object_type: str | None = None,
+        order_by: str = "created_at",
         limit: int = 100,
         offset: int = 0,
     ) -> list[Any]:
@@ -183,6 +184,8 @@ class ObjectsNamespace:
         Args:
             principal_id: Whose view. If omitted, inferred from context.
             object_type: Filter to this type (e.g. ``"invoice"``).
+            order_by: Sort column. Prefix with ``-`` for descending.
+                      Allowed: ``created_at``, ``object_type``. Default: ``created_at``.
             limit: Maximum results to return.
             offset: Number of results to skip (for pagination).
 
@@ -193,6 +196,7 @@ class ObjectsNamespace:
         return self._svc.manager.list_objects(
             principal_id=pid,
             object_type=object_type,
+            order_by=order_by,
             limit=limit,
             offset=offset,
         )

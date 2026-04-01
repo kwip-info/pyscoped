@@ -117,13 +117,27 @@ class ScopeLifecycle:
             )
         return scope
 
+    # Columns that are safe to ORDER BY
+    _SCOPE_ORDER_COLUMNS = {"created_at", "name"}
+
     def list_scopes(
         self,
         *,
         owner_id: str | None = None,
         parent_scope_id: str | None = None,
         include_archived: bool = False,
+        order_by: str = "created_at",
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[Scope]:
+        """List scopes with optional filtering, ordering, and pagination.
+
+        Args:
+            order_by: Column to sort by. Prefix with ``-`` for descending.
+                      Allowed: ``created_at``, ``name``. Default: ``created_at``.
+            limit: Maximum rows to return. ``None`` means no limit.
+            offset: Number of rows to skip.
+        """
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -138,11 +152,86 @@ class ScopeLifecycle:
             params.append(Lifecycle.ARCHIVED.name)
 
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM scopes{where} ORDER BY created_at ASC",
+
+        # Parse order_by: "-name" → name DESC, "created_at" → created_at ASC
+        desc = order_by.startswith("-")
+        col = order_by.lstrip("-")
+        if col not in self._SCOPE_ORDER_COLUMNS:
+            col = "created_at"
+        direction = "DESC" if desc else "ASC"
+
+        sql = f"SELECT * FROM scopes{where} ORDER BY {col} {direction}"
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+
+        rows = self._backend.fetch_all(sql, tuple(params))
+        return [scope_from_row(r) for r in rows]
+
+    def count_scopes(
+        self,
+        *,
+        owner_id: str | None = None,
+        parent_scope_id: str | None = None,
+        include_archived: bool = False,
+    ) -> int:
+        """Count scopes matching the given filters."""
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if owner_id is not None:
+            clauses.append("owner_id = ?")
+            params.append(owner_id)
+        if parent_scope_id is not None:
+            clauses.append("parent_scope_id = ?")
+            params.append(parent_scope_id)
+        if not include_archived:
+            clauses.append("lifecycle != ?")
+            params.append(Lifecycle.ARCHIVED.name)
+
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        row = self._backend.fetch_one(
+            f"SELECT COUNT(*) as cnt FROM scopes{where}",
             tuple(params),
         )
-        return [scope_from_row(r) for r in rows]
+        return row["cnt"] if row else 0
+
+    # ------------------------------------------------------------------
+    # Update
+    # ------------------------------------------------------------------
+
+    def rename_scope(
+        self,
+        scope_id: str,
+        *,
+        new_name: str,
+        renamed_by: str,
+    ) -> Scope:
+        """Rename a scope. Raises ScopeFrozenError if scope is frozen/archived."""
+        scope = self.get_scope_or_raise(scope_id)
+        self._require_mutable(scope)
+
+        old_name = scope.name
+        if old_name == new_name:
+            return scope
+
+        self._backend.execute(
+            "UPDATE scopes SET name = ? WHERE id = ?",
+            (new_name, scope_id),
+        )
+
+        if self._audit:
+            self._audit.record(
+                actor_id=renamed_by,
+                action=ActionType.SCOPE_MODIFY,
+                target_type="Scope",
+                target_id=scope_id,
+                scope_id=scope_id,
+                before_state={"name": old_name},
+                after_state={"name": new_name},
+            )
+
+        return self.get_scope_or_raise(scope_id)
 
     # ------------------------------------------------------------------
     # Membership

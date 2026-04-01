@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0 (2026-04-01)
+
+### Added
+- **Scope rename** — `ScopeLifecycle.rename_scope()` and `client.scopes.rename()` for renaming scopes with full audit trail (before/after state via `SCOPE_MODIFY`). Validates scope is mutable (not frozen/archived)
+- **Scope pagination** — `list_scopes()` now accepts `limit` and `offset` parameters for pagination. Previously returned all matching scopes with no limit
+- **Scope count** — `ScopeLifecycle.count_scopes()` and `client.scopes.count()` for efficient scope counting without loading full rows
+- **Order-by for scopes** — `list_scopes()` accepts `order_by` parameter with `-` prefix for descending (e.g. `"-name"`, `"created_at"`). Allowed columns: `created_at`, `name`
+- **Order-by for objects** — `list_objects()` accepts `order_by` parameter. Allowed columns: `created_at`, `object_type`
+- **Order-by for audit queries** — `AuditQuery.query()` accepts `order_by` parameter. Allowed columns: `sequence`, `timestamp`. Enables native descending queries (e.g. `"-sequence"` for most-recent-first) without client-side reversal
+
 ## 0.4.0 (2026-03-31)
 
 ### Added

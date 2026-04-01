@@ -103,22 +103,81 @@ class ScopesNamespace:
         """
         return self._svc.scopes.get_scope(scope_id)
 
+    def rename(
+        self,
+        scope: Any,
+        new_name: str,
+        *,
+        renamed_by: str | None = None,
+    ) -> Any:
+        """Rename a scope.
+
+        Args:
+            scope: The scope (``Scope`` object or string ID).
+            new_name: The new name for the scope.
+            renamed_by: Who is renaming. If omitted, inferred from context.
+
+        Returns:
+            The updated ``Scope`` object.
+
+        Example::
+
+            with client.as_principal(alice):
+                client.scopes.rename(team, "Platform Engineering")
+        """
+        actor = _resolve_principal_id(renamed_by)
+        return self._svc.scopes.rename_scope(
+            _to_id(scope),
+            new_name=new_name,
+            renamed_by=actor,
+        )
+
     def list(
         self,
         *,
         owner_id: str | None = None,
         parent_scope_id: str | None = None,
+        order_by: str = "created_at",
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[Any]:
-        """List scopes, optionally filtered.
+        """List scopes, optionally filtered and paginated.
+
+        Args:
+            owner_id: Filter to scopes owned by this principal.
+            parent_scope_id: Filter to children of this scope.
+            order_by: Sort column. Prefix with ``-`` for descending.
+                      Allowed: ``created_at``, ``name``. Default: ``created_at``.
+            limit: Maximum results. ``None`` for no limit.
+            offset: Number of results to skip (for pagination).
+
+        Returns:
+            List of ``Scope`` objects.
+        """
+        return self._svc.scopes.list_scopes(
+            owner_id=owner_id,
+            parent_scope_id=parent_scope_id,
+            order_by=order_by,
+            limit=limit,
+            offset=offset,
+        )
+
+    def count(
+        self,
+        *,
+        owner_id: str | None = None,
+        parent_scope_id: str | None = None,
+    ) -> int:
+        """Count scopes matching the given filters.
 
         Args:
             owner_id: Filter to scopes owned by this principal.
             parent_scope_id: Filter to children of this scope.
 
         Returns:
-            List of ``Scope`` objects.
+            Total count of matching scopes.
         """
-        return self._svc.scopes.list_scopes(
+        return self._svc.scopes.count_scopes(
             owner_id=owner_id,
             parent_scope_id=parent_scope_id,
         )

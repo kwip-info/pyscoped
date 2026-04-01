@@ -49,6 +49,9 @@ class AuditQuery:
         )
         return self._row_to_entry(row) if row else None
 
+    # Columns that are safe to ORDER BY
+    _AUDIT_ORDER_COLUMNS = {"sequence", "timestamp"}
+
     # -- Filtered queries ---------------------------------------------------
 
     def query(
@@ -62,13 +65,16 @@ class AuditQuery:
         parent_trace_id: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
+        order_by: str = "sequence",
         limit: int = 100,
         offset: int = 0,
     ) -> list[TraceEntry]:
         """
         Query the audit trail with optional filters.
 
-        Results are ordered by sequence (ascending).
+        Args:
+            order_by: Column to sort by. Prefix with ``-`` for descending.
+                      Allowed: ``sequence``, ``timestamp``. Default: ``sequence``.
         """
         clauses: list[str] = []
         params: list[Any] = []
@@ -99,9 +105,16 @@ class AuditQuery:
             params.append(until.isoformat())
 
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
+
+        desc = order_by.startswith("-")
+        col = order_by.lstrip("-")
+        if col not in self._AUDIT_ORDER_COLUMNS:
+            col = "sequence"
+        direction = "DESC" if desc else "ASC"
+
         sql = (
             f"SELECT * FROM audit_trail{where} "
-            f"ORDER BY sequence ASC LIMIT ? OFFSET ?"
+            f"ORDER BY {col} {direction} LIMIT ? OFFSET ?"
         )
         params.extend([limit, offset])
 
