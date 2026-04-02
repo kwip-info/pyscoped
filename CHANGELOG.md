@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 (2026-04-02)
+
+### Added
+- **Integration smoke test** — `scoped.testing.integration.PlatformSmokeTest` exercises the full SDK → Platform round-trip: object CRUD, audit chain, sync batch push, chain verification, usage reporting, and key listing. Runnable via `python -m scoped.testing.integration --base-url ... --api-key ...`
+
 ## 0.6.0 (2026-04-01)
 
 ### Added
