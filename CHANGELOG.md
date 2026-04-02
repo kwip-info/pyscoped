@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1 (2026-04-02)
+
+### Fixed
+- **Default API base URL** — `ManagementPlaneClient.DEFAULT_BASE_URL` updated from `api.pyscoped.dev` to `kwip.tech`
+
 ## 1.0.0 (2026-04-02)
 
 ### Security

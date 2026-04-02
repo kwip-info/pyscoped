@@ -54,7 +54,7 @@ class ManagementPlaneClient:
         timeout: Request timeout in seconds.
     """
 
-    DEFAULT_BASE_URL = "https://api.pyscoped.dev/v1"
+    DEFAULT_BASE_URL = "https://kwip.tech/v1"
 
     def __init__(
         self,
