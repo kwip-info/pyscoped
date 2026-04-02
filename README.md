@@ -282,19 +282,19 @@ pip install pyscoped[postgres]
 ```
 
 ```python
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend
 
 # In-memory (tests, prototyping)
-backend = SQLiteBackend(":memory:")
+backend = SASQLiteBackend(":memory:")
 backend.initialize()
 
 # File-based (production single-node)
-backend = SQLiteBackend("app.db")
+backend = SASQLiteBackend("app.db")
 backend.initialize()
 
 # PostgreSQL (production)
-from scoped.storage.postgres import PostgresBackend
-backend = PostgresBackend("postgresql://user:pass@localhost/mydb")
+from scoped.storage.sa_postgres import SAPostgresBackend
+backend = SAPostgresBackend("postgresql://user:pass@localhost/mydb")
 backend.initialize()
 
 # Django ORM backend

@@ -36,6 +36,8 @@ Who is in a scope and what role they have.
 | `expires_at` | Optional expiry — time-bombed access |
 | `lifecycle` | ACTIVE = access granted, ARCHIVED = revoked |
 
+**Expiration enforcement:** `expires_at` is checked in all 6 visibility query sites: `is_member()`, `can_see()`, `scope_member_ids()`, `get_memberships()`, `get_principal_scopes()`, `_projected_object_ids()`. Expired memberships are lazily archived on access (updated to ARCHIVED when encountered). Use `ScopeMembership.is_expired` property to check programmatically.
+
 Roles are advisory — the rule engine (Layer 5) determines actual permissions. But roles provide the default semantics: viewers can read, editors can write, admins can manage membership, owners can do everything including dissolve the scope.
 
 ### ScopeProjection

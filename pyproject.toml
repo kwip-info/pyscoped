@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyscoped"
-version = "0.9.6"
+version = "1.0.0"
 description = "Universal object-isolation and tenancy-scoping framework"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
 authors = [{name = "kwip-info"}]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",

@@ -7,6 +7,7 @@ Visibility filtering (rule-based) will be layered on once Layer 5
 
 from __future__ import annotations
 
+import hmac
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -251,7 +252,7 @@ class AuditQuery:
                     previous_hash=entry.previous_hash,
                     algorithm=self._algorithm,
                 )
-                if entry.hash != expected:
+                if not hmac.compare_digest(entry.hash, expected):
                     return ChainVerification(
                         valid=False,
                         entries_checked=total_checked + i + 1,
@@ -261,7 +262,7 @@ class AuditQuery:
                     )
 
                 # Check chain link against previous entry
-                if prev_hash is not None and entry.previous_hash != prev_hash:
+                if prev_hash is not None and not hmac.compare_digest(entry.previous_hash, prev_hash):
                     return ChainVerification(
                         valid=False,
                         entries_checked=total_checked + i + 1,

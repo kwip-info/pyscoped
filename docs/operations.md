@@ -60,19 +60,19 @@ applying further migrations.
 
 | ID | Description |
 |---|---|
-| `m0001` | Core schema -- scopes, objects, memberships |
-| `m0002` | Rules and access-control tables |
-| `m0003` | Audit log and trace chain |
-| `m0004` | Temporal versioning tables |
-| `m0005` | Environments, deployments, gates |
-| `m0006` | Secrets vault and rotation tracking |
-| `m0007` | Plugins and hooks |
-| `m0008` | Connectors, policies, traffic |
-| `m0009` | Marketplace listings |
-| `m0010` | Contracts and templates |
-| `m0011` | Events, subscriptions, webhooks, notifications |
-| `m0012` | Schedules, actions, jobs |
-| `m0013` | Sync state and federation |
+| `m0001` | Core schema — principals, scopes, objects, memberships, rules, audit, temporal, environments, flow, deployments, secrets, integrations, connectors |
+| `m0002` | Contracts and schema validation |
+| `m0003` | Blob / media storage |
+| `m0004` | Scope settings (configuration hierarchy) |
+| `m0005` | Full-text search index |
+| `m0006` | General templates |
+| `m0007` | Tiering and archival policies |
+| `m0008` | Events, subscriptions, webhooks |
+| `m0009` | Notifications and preferences |
+| `m0010` | Scheduling, actions, jobs |
+| `m0011` | Sync state and federation |
+| `m0012` | Composite indexes for query performance |
+| `m0013` | Row-level security (PostgreSQL) |
 | `m0014` | Audit sequence UNIQUE constraint (multi-process safety) |
 
 ## Sync agent

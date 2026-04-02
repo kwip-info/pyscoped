@@ -52,6 +52,8 @@ def decrypt_config(config: dict[str, Any], key: bytes) -> dict[str, Any]:
             try:
                 decrypted = f.decrypt(result[k].encode())
                 result[k] = json.loads(decrypted)
-            except (InvalidToken, Exception):
-                pass  # Not encrypted (legacy plaintext) -- leave as-is
+            except InvalidToken:
+                pass  # Not encrypted (legacy plaintext) — leave as-is
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass  # Decrypted but not valid JSON — leave as-is
     return result

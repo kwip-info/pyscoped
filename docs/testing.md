@@ -66,63 +66,57 @@ keyword arguments to override defaults.
 
 For pytest users, pyscoped provides ready-made fixtures in `scoped.testing.fixtures`.
 
-### sqlite_backend
+### scoped_backend
 
-An in-memory SQLite backend that is created and destroyed per test. Migrations
-are applied automatically.
-
-```python
-import pytest
-from scoped.testing.fixtures import sqlite_backend
-
-
-def test_scope_creation(sqlite_backend):
-    from scoped import Client
-
-    client = Client(backend=sqlite_backend)
-    scope = client.create_scope(name="demo", owner_id="user-1")
-    assert scope["name"] == "demo"
-```
-
-### storage_backend (parametrized)
-
-The `storage_backend` fixture runs every test against both SQLite and PostgreSQL
-(when available). PostgreSQL is activated by setting the `PYSCOPED_TEST_PG_DSN`
-environment variable.
+An in-memory SQLite backend that is created and destroyed per test. Full schema
+applied automatically.
 
 ```python
-from scoped.testing.fixtures import storage_backend
+from scoped.testing.fixtures import scoped_backend
 
 
-def test_cross_backend(storage_backend):
-    from scoped import Client
+def test_scope_creation(scoped_backend):
+    from scoped.manifest._services import build_services
 
-    client = Client(backend=storage_backend)
-    scope = client.create_scope(name="x-backend", owner_id="user-1")
-    assert scope["id"]
+    services = build_services(scoped_backend)
+    p = services.principals.create_principal(kind="user", display_name="Alice", principal_id="alice")
+    scope = services.scopes.create_scope(name="demo", owner_id=p.id)
+    assert scope.name == "demo"
 ```
 
-Run with PostgreSQL:
+### scoped_services
 
-```bash
-export PYSCOPED_TEST_PG_DSN="postgresql://test:test@localhost:5432/scoped_test"
-pytest tests/
-```
-
-When the env var is absent, the PostgreSQL parameter is skipped automatically.
-
-### registry
-
-A fresh `Registry` instance per test, ensuring no cross-test contamination of
-registered types or plugins.
+A fully-wired `ScopedServices` instance with all 16 layers ready to use.
+Depends on `scoped_backend`.
 
 ```python
-from scoped.testing.fixtures import registry
+from scoped.testing.fixtures import scoped_services
 
 
-def test_register_type(registry):
-    registry.register("Document", schema={"title": str})
-    assert registry.is_registered("Document")
+def test_with_services(scoped_services):
+    p = scoped_services.principals.create_principal(
+        kind="user", display_name="Alice", principal_id="alice",
+    )
+    obj, v1 = scoped_services.manager.create(
+        object_type="doc", owner_id=p.id, data={"title": "Test"},
+    )
+    assert v1.version == 1
+```
+
+### alice, bob
+
+Pre-built test principals for quick setup.
+
+```python
+from scoped.testing.fixtures import scoped_services, alice, bob
+
+
+def test_isolation(scoped_services, alice, bob):
+    obj, _ = scoped_services.manager.create(
+        object_type="doc", owner_id=alice.id, data={"x": 1},
+    )
+    assert scoped_services.manager.get(obj.id, principal_id=alice.id) is not None
+    assert scoped_services.manager.get(obj.id, principal_id=bob.id) is None
 ```
 
 ## Assertion helpers

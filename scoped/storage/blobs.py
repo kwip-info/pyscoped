@@ -125,8 +125,15 @@ class LocalBlobBackend(BlobBackend):
     """
 
     def __init__(self, root_dir: str | Path) -> None:
-        self._root = Path(root_dir)
+        self._root = Path(root_dir).resolve()
         self._root.mkdir(parents=True, exist_ok=True)
+
+    def _safe_path(self, storage_path: str) -> Path:
+        """Resolve a storage path and verify it stays within the root directory."""
+        full = (self._root / storage_path).resolve()
+        if not str(full).startswith(str(self._root)):
+            raise ValueError(f"Path traversal detected: {storage_path}")
+        return full
 
     def store(self, blob_id: str, data: bytes) -> str:
         path = self._blob_path(blob_id)
@@ -135,20 +142,20 @@ class LocalBlobBackend(BlobBackend):
         return str(path.relative_to(self._root))
 
     def retrieve(self, storage_path: str) -> bytes:
-        full_path = self._root / storage_path
+        full_path = self._safe_path(storage_path)
         if not full_path.exists():
             raise FileNotFoundError(f"Blob not found: {storage_path}")
         return full_path.read_bytes()
 
     def delete(self, storage_path: str) -> bool:
-        full_path = self._root / storage_path
+        full_path = self._safe_path(storage_path)
         if full_path.exists():
             full_path.unlink()
             return True
         return False
 
     def exists(self, storage_path: str) -> bool:
-        return (self._root / storage_path).exists()
+        return self._safe_path(storage_path).exists()
 
     def store_stream(self, blob_id: str, fp: BinaryIO) -> str:
         """Store from a file-like object using 64KB chunked writes."""
@@ -164,7 +171,7 @@ class LocalBlobBackend(BlobBackend):
 
     def retrieve_stream(self, storage_path: str) -> Iterator[bytes]:
         """Yield 64KB chunks from a stored blob."""
-        full_path = self._root / storage_path
+        full_path = self._safe_path(storage_path)
         if not full_path.exists():
             raise FileNotFoundError(f"Blob not found: {storage_path}")
         with open(full_path, "rb") as f:

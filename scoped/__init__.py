@@ -18,7 +18,7 @@ Quick start::
 See ``scoped.client`` for full documentation.
 """
 
-__version__ = "0.9.6"
+__version__ = "1.0.0"
 
 from scoped.client import ScopedClient, init  # noqa: F401
 

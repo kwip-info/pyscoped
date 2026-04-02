@@ -783,7 +783,6 @@ scoped/
     migrations/            # Schema migrations (m0001–m0014)
     tenant_router.py       # Database-per-tenant routing
   sync/                    # Management plane sync agent
-  compliance/              # Invariant validation
   contrib/                 # Framework adapters
     django/                # Middleware, DRF, ScopedModel, management commands
       models.py            # ScopedModel, ScopedQuerySet, ScopedDjangoManager

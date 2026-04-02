@@ -689,12 +689,16 @@ class ScopeLifecycle:
             current_id = scope.parent_scope_id
         return result
 
-    def descendants(self, scope_id: str, *, max_depth: int = 10) -> list[Scope]:
-        """Get all descendant scopes via BFS, bounded by max_depth."""
+    def descendants(
+        self, scope_id: str, *, max_depth: int = 10, max_total: int = 10000,
+    ) -> list[Scope]:
+        """Get all descendant scopes via BFS, bounded by max_depth and max_total."""
         result: list[Scope] = []
         queue: list[tuple[str, int]] = [(scope_id, 0)]
         seen: set[str] = {scope_id}
         while queue:
+            if len(result) >= max_total:
+                break
             current_id, depth = queue.pop(0)
             if depth >= max_depth:
                 continue
@@ -703,6 +707,8 @@ class ScopeLifecycle:
                 if child.id not in seen:
                     seen.add(child.id)
                     result.append(child)
+                    if len(result) >= max_total:
+                        break
                     queue.append((child.id, depth + 1))
         return result
 

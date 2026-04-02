@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.0 (2026-04-02)
+
+### Security
+- **Timing attack fix** — Audit hash chain verification now uses `hmac.compare_digest()` for constant-time comparison instead of `!=`. Prevents character-by-character timing attacks on audit entry hashes
+- **Path traversal fix** — `LocalBlobBackend` now validates all `storage_path` inputs via `resolve()` + root containment check. Prevents `../../` traversal in `retrieve()`, `delete()`, `exists()`, and `retrieve_stream()`
+- **Crypto exception handling** — `decrypt_config()` now catches `InvalidToken` and `JSONDecodeError` specifically instead of bare `Exception`. Prevents silent swallowing of unexpected errors
+
+### Changed
+- **`descendants()` bounded** — `ScopeLifecycle.descendants()` now accepts `max_total=10000` parameter capping total results, preventing memory exhaustion on deep hierarchies
+- **Classifier** — `Development Status :: 5 - Production/Stable`
+
+### Docs
+- Fixed `docs/testing.md` fixture names (`scoped_backend`, `scoped_services` instead of stale `sqlite_backend`, `storage_backend`)
+- Fixed `README.md` backend examples to use `SASQLiteBackend`/`SAPostgresBackend` instead of deprecated backends
+- Fixed `docs/operations.md` migration inventory to match actual migration files
+- Removed non-existent `compliance/` from project structure in `CLAUDE.md`
+- Documented membership expiration enforcement in `docs/layers/04-tenancy.md`
+
 ## 0.9.6 (2026-04-02)
 
 ### Added
