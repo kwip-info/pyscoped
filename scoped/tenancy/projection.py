@@ -205,6 +205,8 @@ class ProjectionManager:
         scope_id: str,
         *,
         active_only: bool = True,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ScopeProjection]:
         """Get all projections in a scope."""
         stmt = sa.select(scope_projections).where(
@@ -213,6 +215,9 @@ class ProjectionManager:
         if active_only:
             stmt = stmt.where(scope_projections.c.lifecycle == Lifecycle.ACTIVE.name)
         stmt = stmt.order_by(scope_projections.c.projected_at.asc())
+
+        if limit is not None:
+            stmt = stmt.limit(limit).offset(offset)
 
         sql, params = compile_for(stmt, self._backend.dialect)
         rows = self._backend.fetch_all(sql, params)

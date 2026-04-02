@@ -214,6 +214,8 @@ class PrincipalStore:
         *,
         kind: str | None = None,
         lifecycle: Lifecycle | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[Principal]:
         """List principals with optional filters."""
         stmt = sa.select(principals)
@@ -222,6 +224,9 @@ class PrincipalStore:
             stmt = stmt.where(principals.c.kind == kind)
         if lifecycle is not None:
             stmt = stmt.where(principals.c.lifecycle == lifecycle.name)
+
+        if limit is not None:
+            stmt = stmt.limit(limit).offset(offset)
 
         sql, params = compile_for(stmt, self._backend.dialect)
         rows = self._backend.fetch_all(sql, params)

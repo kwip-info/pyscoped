@@ -51,6 +51,30 @@ class RollbackResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class RollbackPreview:
+    """Preview of what a rollback would do (dry-run result).
+
+    Returned when ``dry_run=True`` is passed to any rollback method.
+    No database changes are made.
+    """
+
+    would_rollback: tuple[str, ...]
+    """Trace IDs that would be rolled back."""
+    would_skip: tuple[str, ...] = ()
+    """Trace IDs that would be skipped (already rolled back, etc.)."""
+    would_deny: tuple[str, ...] = ()
+    """Trace IDs whose rollback would be denied by constraints."""
+    entry_count: int = 0
+    """Total number of entries in scope."""
+
+    def __repr__(self) -> str:
+        return (
+            f"RollbackPreview(rollback={len(self.would_rollback)}, "
+            f"skip={len(self.would_skip)}, deny={len(self.would_deny)})"
+        )
+
+
 class RollbackExecutor:
     """Execute rollback operations with constraint checking and tracing.
 
@@ -84,13 +108,17 @@ class RollbackExecutor:
         actor_id: str,
         principal_kind: str | None = None,
         reason: str = "",
-    ) -> RollbackResult:
+        dry_run: bool = False,
+    ) -> RollbackResult | RollbackPreview:
         """Roll back a single traced action.
 
         Restores the ``before_state`` of the trace entry and records
         a rollback trace.  If the entry has no ``before_state`` (e.g.
         a create action), the target is marked as rolled back with
         a ``None`` state.
+
+        When ``dry_run=True``, returns a :class:`RollbackPreview`
+        without modifying any data.
 
         Raises :class:`RollbackFailedError` if the trace entry
         does not exist.  Raises :class:`RollbackDeniedError` if
@@ -105,6 +133,12 @@ class RollbackExecutor:
 
         # Check constraints
         self._check_constraints(entry, actor_id=actor_id, principal_kind=principal_kind)
+
+        if dry_run:
+            return RollbackPreview(
+                would_rollback=(entry.id,),
+                entry_count=1,
+            )
 
         # Execute
         rollback_entry = self._execute_single_rollback(
@@ -130,7 +164,8 @@ class RollbackExecutor:
         actor_id: str,
         principal_kind: str | None = None,
         reason: str = "",
-    ) -> RollbackResult:
+        dry_run: bool = False,
+    ) -> RollbackResult | RollbackPreview:
         """Restore a target to its state at timestamp *at*.
 
         Finds all trace entries for the target after *at* and rolls
@@ -180,6 +215,13 @@ class RollbackExecutor:
                 },
             )
 
+        if dry_run:
+            return RollbackPreview(
+                would_rollback=tuple(e.id for e in permitted),
+                would_deny=tuple(denied),
+                entry_count=len(entries),
+            )
+
         # Execute rollbacks
         rolled_back: list[str] = []
         rollback_traces: list[str] = []
@@ -208,7 +250,8 @@ class RollbackExecutor:
         actor_id: str,
         principal_kind: str | None = None,
         reason: str = "",
-    ) -> RollbackResult:
+        dry_run: bool = False,
+    ) -> RollbackResult | RollbackPreview:
         """Roll back an action and all actions that depend on it.
 
         Walks the ``parent_trace_id`` chain to find all downstream
@@ -245,13 +288,10 @@ class RollbackExecutor:
                 unique.append(entry)
         all_entries = unique
 
-        # Check constraints & execute
+        # Check constraints
         denied: list[str] = []
-        rolled_back: list[str] = []
-        rollback_traces: list[str] = []
-
+        permitted: list[TraceEntry] = []
         for entry in all_entries:
-            # Root was already checked; check descendants
             if entry.id != root.id and self._constraints is not None:
                 check = self._constraints.check(
                     entry, actor_id=actor_id, principal_kind=principal_kind,
@@ -259,7 +299,20 @@ class RollbackExecutor:
                 if not check.permitted:
                     denied.append(entry.id)
                     continue
+            permitted.append(entry)
 
+        if dry_run:
+            return RollbackPreview(
+                would_rollback=tuple(e.id for e in permitted),
+                would_deny=tuple(denied),
+                entry_count=len(all_entries),
+            )
+
+        # Execute
+        rolled_back: list[str] = []
+        rollback_traces: list[str] = []
+
+        for entry in permitted:
             rb_entry = self._execute_single_rollback(
                 entry,
                 actor_id=actor_id,

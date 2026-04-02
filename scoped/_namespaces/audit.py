@@ -124,6 +124,76 @@ class AuditNamespace:
         """
         return self._audit_query.query(**kwargs)
 
+    def count(self, **kwargs: Any) -> int:
+        """Count matching audit entries.
+
+        Supports the same keyword filters as ``AuditQuery.count()``:
+        ``actor_id``, ``action``, ``target_type``, ``target_id``.
+
+        Args:
+            **kwargs: Filter parameters passed through to ``AuditQuery.count()``.
+
+        Returns:
+            Total count of matching entries.
+        """
+        return self._audit_query.count(**kwargs)
+
+    def export(self, *, format: str = "json", **kwargs: Any) -> str:
+        """Export audit entries as JSON or CSV string.
+
+        Args:
+            format: Output format — ``"json"`` (default) or ``"csv"``.
+            **kwargs: Filter parameters passed through to ``AuditQuery.query()``.
+
+        Returns:
+            A string containing the exported entries.
+        """
+        import csv
+        import io
+        import json
+
+        entries = self._audit_query.query(**kwargs)
+
+        if format == "csv":
+            output = io.StringIO()
+            if entries:
+                fields = [
+                    "id", "sequence", "actor_id", "action", "target_type",
+                    "target_id", "timestamp", "scope_id",
+                ]
+                writer = csv.DictWriter(output, fieldnames=fields)
+                writer.writeheader()
+                for e in entries:
+                    writer.writerow({
+                        "id": e.id,
+                        "sequence": e.sequence,
+                        "actor_id": e.actor_id,
+                        "action": e.action.value,
+                        "target_type": e.target_type,
+                        "target_id": e.target_id,
+                        "timestamp": e.timestamp.isoformat(),
+                        "scope_id": e.scope_id or "",
+                    })
+            return output.getvalue()
+
+        # Default: JSON
+        return json.dumps(
+            [
+                {
+                    "id": e.id,
+                    "sequence": e.sequence,
+                    "actor_id": e.actor_id,
+                    "action": e.action.value,
+                    "target_type": e.target_type,
+                    "target_id": e.target_id,
+                    "timestamp": e.timestamp.isoformat(),
+                    "scope_id": e.scope_id,
+                }
+                for e in entries
+            ],
+            indent=2,
+        )
+
     def verify(
         self,
         *,

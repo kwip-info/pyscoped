@@ -100,7 +100,10 @@ create(display_name, *, kind="user", metadata=None, principal_id=None) -> Princi
 get(principal_id) -> Principal                    # Raises PrincipalNotFoundError
 find(principal_id) -> Principal | None
 update(principal, *, display_name=None, metadata=None) -> Principal
-list(*, kind=None) -> list[Principal]
+archive(principal) -> Principal                   # Lifecycle → ARCHIVED
+list(*, kind=None, limit=100, offset=0) -> list[Principal]
+add_relationship(parent, child, *, relationship="member_of") -> PrincipalRelationship
+relationships(principal, *, direction="both") -> list[PrincipalRelationship]
 ```
 
 ### scoped.objects
@@ -133,12 +136,18 @@ count(*, owner_id=None, parent_scope_id=None) -> int
 add_member(scope, principal, *, role="viewer", granted_by=None) -> ScopeMembership
 add_members(scope, members, *, granted_by=None) -> list[ScopeMembership]   # Batch
 remove_member(scope, principal, *, revoked_by=None) -> int
-members(scope) -> list[ScopeMembership]
+members(scope, *, limit=100, offset=0) -> list[ScopeMembership]
 
 # Projection (sharing)
 project(obj, scope, *, projected_by=None, access_level="read") -> ScopeProjection
 unproject(obj, scope, *, revoked_by=None) -> bool
-projections(scope) -> list[ScopeProjection]
+projections(scope, *, limit=100, offset=0) -> list[ScopeProjection]
+
+# Hierarchy
+children(scope, *, limit=100) -> list[Scope]
+ancestors(scope) -> list[Scope]                  # Immediate parent to root
+descendants(scope, *, max_depth=10) -> list[Scope]  # BFS with depth cap
+path(scope) -> list[Scope]                       # Root-to-scope path
 
 # Lifecycle
 freeze(scope, *, frozen_by=None) -> Scope       # No new members/projections
@@ -156,6 +165,8 @@ for_scope(scope_id, *, limit=100) -> list[TraceEntry]
 query(*, actor_id=None, action=None, target_type=None, target_id=None,
       scope_id=None, since=None, until=None, order_by="sequence",
       limit=100, offset=0) -> list[TraceEntry]
+count(*, actor_id=None, action=None, target_type=None, target_id=None) -> int
+export(*, format="json"|"csv", **query_kwargs) -> str
 verify(*, from_sequence=1, to_sequence=None) -> ChainVerification
 ```
 
@@ -243,6 +254,23 @@ router.list_tenants()                  # ["tenant_123"]
 router.teardown_tenant("tenant_123")   # Close + remove (doesn't drop DB)
 ```
 
+## Rollback Preview
+
+All three rollback modes support `dry_run=True` for previewing without modifying data:
+```python
+from scoped.temporal.rollback import RollbackExecutor, RollbackPreview
+
+executor = RollbackExecutor(backend, audit_writer=writer)
+preview = executor.rollback_action(trace_id, actor_id="alice", dry_run=True)
+# RollbackPreview(would_rollback=('trace-1',), would_deny=(), entry_count=1)
+
+preview = executor.rollback_cascade(root_id, actor_id="alice", dry_run=True)
+# Shows all descendants that would be rolled back
+
+# Then execute for real:
+result = executor.rollback_action(trace_id, actor_id="alice")
+```
+
 ## Rules Engine (Layer 5)
 
 Deny-overrides model: ANY DENY = denied, at least one ALLOW + no DENY = allowed, no rules = allowed (when no rules are bound).
@@ -262,6 +290,18 @@ client.services.rules.bind_rule(rule.id, target_type=BindingTargetType.OBJECT_TY
 
 # Now this raises AccessDeniedError:
 scoped.objects.create("invoice", data={...})
+```
+
+### Rule evaluation debugging
+```python
+explanation = engine.evaluate_with_explanation(
+    action="create", principal_id="alice", object_type="invoice",
+)
+print(explanation.summary)  # "Denied by rule 'block-invoices' (priority 100)"
+for exp in explanation.explanations:
+    print(f"  {exp.rule.name}: matched={exp.matched}, reason={exp.reason}")
+    for cm in exp.condition_matches:
+        print(f"    {cm.condition_key}: expected={cm.expected}, actual={cm.actual}, matched={cm.matched}")
 ```
 
 ## Storage Backends

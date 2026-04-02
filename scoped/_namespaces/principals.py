@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from scoped._namespaces._base import _to_id, _try_resolve_principal_id
+from scoped._namespaces._base import _resolve_principal_id, _to_id, _try_resolve_principal_id
 
 if TYPE_CHECKING:
     from scoped.identity.principal import Principal
@@ -131,14 +131,62 @@ class PrincipalsNamespace:
             updated_by=actor,
         )
 
-    def list(self, *, kind: str | None = None) -> list[Principal]:
+    def list(
+        self,
+        *,
+        kind: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Principal]:
         """List principals, optionally filtered by kind.
 
         Args:
             kind: Filter to principals of this kind (e.g. ``"user"``).
                   If omitted, returns all principals.
+            limit: Maximum number of principals to return.
+            offset: Number of principals to skip (for pagination).
 
         Returns:
             List of ``Principal`` objects.
         """
-        return self._svc.principals.list_principals(kind=kind)
+        return self._svc.principals.list_principals(
+            kind=kind, limit=limit, offset=offset,
+        )
+
+    def archive(self, principal: Any) -> Any:
+        """Archive (soft-delete) a principal."""
+        from scoped.types import Lifecycle
+
+        pid = _to_id(principal)
+        return self._svc.principals.update_lifecycle(pid, Lifecycle.ARCHIVED)
+
+    def add_relationship(
+        self,
+        parent: Any,
+        child: Any,
+        *,
+        relationship: str = "member_of",
+        created_by: str | None = None,
+    ) -> Any:
+        """Create a directed relationship between two principals."""
+        actor = _resolve_principal_id(created_by)
+        return self._svc.principals.add_relationship(
+            parent_id=_to_id(parent),
+            child_id=_to_id(child),
+            relationship=relationship,
+            created_by=actor,
+        )
+
+    def relationships(
+        self,
+        principal: Any,
+        *,
+        direction: str = "both",
+        relationship: str | None = None,
+    ) -> list:
+        """Get relationships for a principal."""
+        return self._svc.principals.get_relationships(
+            _to_id(principal),
+            direction=direction,
+            relationship=relationship,
+        )

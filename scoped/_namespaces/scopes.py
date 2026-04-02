@@ -310,17 +310,27 @@ class ScopesNamespace:
             revoked_by=actor,
         )
 
-    def members(self, scope: Any) -> list[ScopeMembership]:
+    def members(
+        self,
+        scope: Any,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ScopeMembership]:
         """List active members of a scope.
 
         Args:
             scope: The scope (object or ID).
+            limit: Maximum number of members to return.
+            offset: Number of members to skip (for pagination).
 
         Returns:
             List of ``ScopeMembership`` objects with ``.principal_id``
             and ``.role``.
         """
-        return self._svc.scopes.get_memberships(_to_id(scope))
+        return self._svc.scopes.get_memberships(
+            _to_id(scope), limit=limit, offset=offset,
+        )
 
     # -- Projection (sharing objects into scopes) --------------------------
 
@@ -390,16 +400,44 @@ class ScopesNamespace:
             revoked_by=actor,
         )
 
-    def projections(self, scope: Any) -> list[ScopeProjection]:
+    def projections(
+        self,
+        scope: Any,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ScopeProjection]:
         """List all objects projected into a scope.
 
         Args:
             scope: The scope (object or ID).
+            limit: Maximum number of projections to return.
+            offset: Number of projections to skip (for pagination).
 
         Returns:
             List of ``ScopeProjection`` objects.
         """
-        return self._svc.projections.get_projections(_to_id(scope))
+        return self._svc.projections.get_projections(
+            _to_id(scope), limit=limit, offset=offset,
+        )
+
+    # -- Hierarchy ---------------------------------------------------------
+
+    def children(self, scope: Any, *, limit: int = 100) -> list:
+        """Get direct child scopes."""
+        return self._svc.scopes.children(_to_id(scope), limit=limit)
+
+    def ancestors(self, scope: Any) -> list:
+        """Get all ancestor scopes from immediate parent to root."""
+        return self._svc.scopes.ancestors(_to_id(scope))
+
+    def descendants(self, scope: Any, *, max_depth: int = 10) -> list:
+        """Get all descendant scopes via BFS, bounded by max_depth."""
+        return self._svc.scopes.descendants(_to_id(scope), max_depth=max_depth)
+
+    def path(self, scope: Any) -> list:
+        """Get the root-to-scope path (ancestors in order, then self)."""
+        return self._svc.scopes.path(_to_id(scope))
 
     # -- Lifecycle ---------------------------------------------------------
 

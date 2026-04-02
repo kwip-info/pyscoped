@@ -180,6 +180,36 @@ class EvaluationResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ConditionMatch:
+    """Result of matching a single condition key against the request context."""
+    condition_key: str          # "action", "principal_kind", "object_type", "scope_id"
+    matched: bool
+    expected: Any               # what the condition requires (from rule)
+    actual: Any                 # what was provided (from request context)
+
+
+@dataclass(frozen=True, slots=True)
+class RuleExplanation:
+    """Detailed explanation of why a rule did or did not match."""
+    rule: Rule
+    matched: bool
+    effect: RuleEffect
+    priority: int
+    binding_target_type: str | None = None
+    binding_target_id: str | None = None
+    condition_matches: tuple[ConditionMatch, ...] = ()
+    reason: str = ""            # human-readable summary
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationExplanation:
+    """Full explanation of a rule evaluation, including per-rule details."""
+    result: EvaluationResult
+    explanations: tuple[RuleExplanation, ...]
+    summary: str                # e.g. "Denied by rule 'block-invoices' (priority 100)"
+
+
 # ---------------------------------------------------------------------------
 # Row mapping helpers
 # ---------------------------------------------------------------------------

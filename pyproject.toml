@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyscoped"
-version = "0.8.0"
+version = "0.8.1"
 description = "Universal object-isolation and tenancy-scoping framework"
 readme = "README.md"
 license = {text = "MIT"}

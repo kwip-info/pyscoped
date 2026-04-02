@@ -474,6 +474,8 @@ class ScopeLifecycle:
         scope_id: str,
         *,
         active_only: bool = True,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ScopeMembership]:
         stmt = sa.select(scope_memberships).where(
             scope_memberships.c.scope_id == scope_id,
@@ -481,6 +483,9 @@ class ScopeLifecycle:
         if active_only:
             stmt = stmt.where(scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name)
         stmt = stmt.order_by(scope_memberships.c.granted_at.asc())
+
+        if limit is not None:
+            stmt = stmt.limit(limit).offset(offset)
 
         sql, params = compile_for(stmt, self._backend.dialect)
         rows = self._backend.fetch_all(sql, params)
@@ -491,6 +496,8 @@ class ScopeLifecycle:
         principal_id: str,
         *,
         active_only: bool = True,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ScopeMembership]:
         """Get all scopes a principal is a member of."""
         stmt = sa.select(scope_memberships).where(
@@ -498,6 +505,9 @@ class ScopeLifecycle:
         )
         if active_only:
             stmt = stmt.where(scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name)
+
+        if limit is not None:
+            stmt = stmt.limit(limit).offset(offset)
 
         sql, params = compile_for(stmt, self._backend.dialect)
         rows = self._backend.fetch_all(sql, params)
@@ -611,6 +621,63 @@ class ScopeLifecycle:
             )
 
         return self.get_scope_or_raise(scope_id)
+
+    # ------------------------------------------------------------------
+    # Hierarchy
+    # ------------------------------------------------------------------
+
+    def children(self, scope_id: str, *, limit: int = 100) -> list[Scope]:
+        """Get direct child scopes."""
+        stmt = sa.select(scopes).where(
+            scopes.c.parent_scope_id == scope_id,
+            scopes.c.lifecycle != "ARCHIVED",
+        ).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
+        return [scope_from_row(r) for r in rows]
+
+    def ancestors(self, scope_id: str) -> list[Scope]:
+        """Get all ancestor scopes from immediate parent to root."""
+        result: list[Scope] = []
+        current_id: str | None = scope_id
+        seen: set[str] = set()
+        while current_id:
+            if current_id in seen:
+                break  # cycle protection
+            seen.add(current_id)
+            scope = self.get_scope(current_id)
+            if scope is None:
+                break
+            if current_id != scope_id:  # don't include self
+                result.append(scope)
+            current_id = scope.parent_scope_id
+        return result
+
+    def descendants(self, scope_id: str, *, max_depth: int = 10) -> list[Scope]:
+        """Get all descendant scopes via BFS, bounded by max_depth."""
+        result: list[Scope] = []
+        queue: list[tuple[str, int]] = [(scope_id, 0)]
+        seen: set[str] = {scope_id}
+        while queue:
+            current_id, depth = queue.pop(0)
+            if depth >= max_depth:
+                continue
+            kids = self.children(current_id, limit=1000)
+            for child in kids:
+                if child.id not in seen:
+                    seen.add(child.id)
+                    result.append(child)
+                    queue.append((child.id, depth + 1))
+        return result
+
+    def path(self, scope_id: str) -> list[Scope]:
+        """Get the root-to-scope path (ancestors in order, then self)."""
+        ancestors = self.ancestors(scope_id)
+        ancestors.reverse()  # root first
+        scope = self.get_scope(scope_id)
+        if scope:
+            ancestors.append(scope)
+        return ancestors
 
     # ------------------------------------------------------------------
     # Helpers

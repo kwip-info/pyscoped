@@ -13,10 +13,13 @@ import sqlalchemy as sa
 from scoped.rules.compiler import CompiledRuleSet, RuleCompiler
 from scoped.rules.models import (
     BindingTargetType,
+    ConditionMatch,
+    EvaluationExplanation,
     EvaluationResult,
     Rule,
     RuleBinding,
     RuleEffect,
+    RuleExplanation,
     RuleType,
     RuleVersion,
     binding_from_row,
@@ -28,6 +31,15 @@ from scoped.storage._schema import rule_bindings, rule_versions, rules
 from scoped.ids import BindingId, RuleId, VersionId
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+
+
+def _value_matches(expected: Any, actual: Any) -> bool:
+    """Check if actual matches expected (single value or list)."""
+    if actual is None:
+        return True  # no filter provided = match
+    if isinstance(expected, list):
+        return actual in expected
+    return actual == expected
 
 
 class RuleStore:
@@ -540,3 +552,155 @@ class RuleEngine:
                 return False
 
         return True
+
+    def _explain_match(
+        self,
+        rule: Rule,
+        *,
+        action: str,
+        principal_kind: str | None,
+        object_type: str | None,
+        scope_id: str | None,
+        binding_target_type: str | None = None,
+        binding_target_id: str | None = None,
+    ) -> RuleExplanation:
+        """Explain why a rule matches or doesn't match the request context."""
+        conds = rule.conditions
+        matches: list[ConditionMatch] = []
+        all_matched = True
+
+        # Check each condition key
+        for key, check_fn, actual_value in [
+            ("action", lambda expected, actual: _value_matches(expected, actual), action),
+            ("principal_kind", lambda expected, actual: _value_matches(expected, actual), principal_kind),
+            ("object_type", lambda expected, actual: _value_matches(expected, actual), object_type),
+            ("scope_id", lambda expected, actual: _value_matches(expected, actual), scope_id),
+        ]:
+            if key in conds:
+                expected = conds[key]
+                matched = check_fn(expected, actual_value)
+                matches.append(ConditionMatch(
+                    condition_key=key, matched=matched,
+                    expected=expected, actual=actual_value,
+                ))
+                if not matched:
+                    all_matched = False
+
+        # Empty conditions match everything
+        if not conds:
+            all_matched = True
+
+        reason = ""
+        if all_matched:
+            reason = f"Rule '{rule.name}' ({rule.effect.value}) matched — all conditions satisfied"
+        else:
+            failed = [m for m in matches if not m.matched]
+            reason = f"Rule '{rule.name}' did not match — failed on: {', '.join(m.condition_key for m in failed)}"
+
+        return RuleExplanation(
+            rule=rule,
+            matched=all_matched,
+            effect=rule.effect,
+            priority=rule.priority,
+            binding_target_type=binding_target_type,
+            binding_target_id=binding_target_id,
+            condition_matches=tuple(matches),
+            reason=reason,
+        )
+
+    def evaluate_with_explanation(
+        self,
+        *,
+        action: str,
+        principal_id: str | None = None,
+        principal_kind: str | None = None,
+        object_type: str | None = None,
+        object_id: str | None = None,
+        scope_id: str | None = None,
+    ) -> EvaluationExplanation:
+        """Evaluate rules and return a full explanation of the decision.
+
+        Same logic as ``evaluate()`` but calls ``_explain_match()`` for
+        every candidate rule so the caller can inspect why each rule did
+        or did not match.
+        """
+        # Collect candidate rules with their binding info
+        candidates: list[tuple[Rule, str, str]] = []  # (rule, target_type, target_id)
+
+        if scope_id:
+            for rule in self._rules_for_target(BindingTargetType.SCOPE, scope_id):
+                candidates.append((rule, BindingTargetType.SCOPE.value, scope_id))
+
+        if principal_id:
+            for rule in self._rules_for_target(BindingTargetType.PRINCIPAL, principal_id):
+                candidates.append((rule, BindingTargetType.PRINCIPAL.value, principal_id))
+
+        if object_type:
+            for rule in self._rules_for_target(BindingTargetType.OBJECT_TYPE, object_type):
+                candidates.append((rule, BindingTargetType.OBJECT_TYPE.value, object_type))
+
+        if object_id:
+            for rule in self._rules_for_target(BindingTargetType.OBJECT, object_id):
+                candidates.append((rule, BindingTargetType.OBJECT.value, object_id))
+
+        # Deduplicate by rule ID (keep first occurrence for binding info)
+        seen: set[str] = set()
+        unique: list[tuple[Rule, str, str]] = []
+        for rule, bt_type, bt_id in candidates:
+            if rule.id not in seen:
+                seen.add(rule.id)
+                unique.append((rule, bt_type, bt_id))
+
+        # Build explanations for ALL candidate rules
+        explanations: list[RuleExplanation] = []
+        matching: list[Rule] = []
+
+        for rule, bt_type, bt_id in unique:
+            explanation = self._explain_match(
+                rule,
+                action=action,
+                principal_kind=principal_kind,
+                object_type=object_type,
+                scope_id=scope_id,
+                binding_target_type=bt_type,
+                binding_target_id=bt_id,
+            )
+            explanations.append(explanation)
+            if explanation.matched:
+                matching.append(rule)
+
+        # Sort matching by priority (highest first)
+        matching.sort(key=lambda r: r.priority, reverse=True)
+
+        # Apply deny-overrides
+        deny_rules = tuple(r for r in matching if r.effect == RuleEffect.DENY)
+        allow_rules = tuple(r for r in matching if r.effect == RuleEffect.ALLOW)
+
+        if deny_rules:
+            allowed = False
+        elif allow_rules:
+            allowed = True
+        else:
+            allowed = False  # default-deny
+
+        result = EvaluationResult(
+            allowed=allowed,
+            matching_rules=tuple(matching),
+            deny_rules=deny_rules,
+            allow_rules=allow_rules,
+        )
+
+        # Build summary
+        if deny_rules:
+            top_deny = deny_rules[0]
+            summary = f"Denied by rule '{top_deny.name}' (priority {top_deny.priority})"
+        elif allow_rules:
+            summary = f"Allowed by {len(allow_rules)} rule(s), no DENY rules matched"
+        else:
+            summary = "Denied — no matching rules (default-deny)"
+
+        return EvaluationExplanation(
+            result=result,
+            explanations=tuple(explanations),
+            summary=summary,
+        )

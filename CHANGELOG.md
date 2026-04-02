@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1 (2026-04-02)
+
+### Added
+- **Rollback preview (dry-run)** — `rollback_action()`, `rollback_to_timestamp()`, and `rollback_cascade()` now accept `dry_run=True`, returning a `RollbackPreview` with `would_rollback`, `would_deny`, and `entry_count` without modifying any data
+- **Rule evaluation debugging** — `RuleEngine.evaluate_with_explanation()` returns `EvaluationExplanation` with per-rule `RuleExplanation` (condition matches, binding info, human-readable reason) and a summary string. New models: `ConditionMatch`, `RuleExplanation`, `EvaluationExplanation`
+- **Namespace API completeness** — `PrincipalsNamespace`: `archive()`, `add_relationship()`, `relationships()`, `list()` with `limit`/`offset`. `ScopesNamespace`: `children()`, `ancestors()`, `descendants()`, `path()` hierarchy traversal, `members()`/`projections()` with `limit`/`offset`. `AuditNamespace`: `count()`, `export(format="json"|"csv")`
+- **Service-layer pagination** — `PrincipalStore.list_principals()`, `ScopeLifecycle.get_memberships()`, `get_principal_scopes()`, `ProjectionManager.get_projections()` now accept `limit`/`offset`
+
 ## 0.8.0 (2026-04-02)
 
 ### Added

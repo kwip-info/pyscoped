@@ -9,10 +9,13 @@ from scoped.rules.engine import RuleEngine, RuleStore
 from scoped.rules.features import FeatureFlagConfig, FeatureFlagEngine, FeatureFlagResult
 from scoped.rules.models import (
     BindingTargetType,
+    ConditionMatch,
+    EvaluationExplanation,
     EvaluationResult,
     Rule,
     RuleBinding,
     RuleEffect,
+    RuleExplanation,
     RuleType,
     RuleVersion,
 )
@@ -28,6 +31,8 @@ from scoped.rules.redaction import (
 __all__ = [
     "BindingTargetType",
     "CompiledRuleSet",
+    "ConditionMatch",
+    "EvaluationExplanation",
     "EvaluationResult",
     "FeatureFlagConfig",
     "FeatureFlagEngine",
@@ -47,6 +52,7 @@ __all__ = [
     "RuleCompiler",
     "RuleEffect",
     "RuleEngine",
+    "RuleExplanation",
     "RuleStore",
     "RuleType",
     "RuleVersion",
