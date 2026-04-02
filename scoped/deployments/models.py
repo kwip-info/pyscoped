@@ -110,6 +110,18 @@ class DeploymentGate:
     checked_at: datetime
     details: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def typed_details(self) -> Any:
+        """Parse ``details`` into the typed model for this gate type.
+
+        Falls back to the raw dict if parsing fails.
+        """
+        try:
+            from scoped.deployments.gate_types import parse_gate_details
+            return parse_gate_details(self.details, self.gate_type)
+        except Exception:
+            return self.details
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "id": self.id,

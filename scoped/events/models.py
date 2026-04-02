@@ -142,6 +142,7 @@ class WebhookEndpoint:
 
     Endpoints are owned by a principal and optionally scoped.
     ``config`` stores URL, auth headers, timeout, retry policy, etc.
+    Access ``typed_config`` for a validated ``WebhookConfig`` model.
     """
 
     id: str
@@ -152,6 +153,18 @@ class WebhookEndpoint:
     scope_id: str | None
     created_at: datetime
     lifecycle: Lifecycle = Lifecycle.ACTIVE
+
+    @property
+    def typed_config(self) -> Any:
+        """Parse ``config`` into a ``WebhookConfig`` model.
+
+        Falls back to the raw dict if parsing fails.
+        """
+        try:
+            from scoped.events.config_types import parse_webhook_config
+            return parse_webhook_config(self.config)
+        except Exception:
+            return self.config
 
 
 # ---------------------------------------------------------------------------

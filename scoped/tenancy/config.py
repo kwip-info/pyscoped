@@ -130,16 +130,22 @@ class ConfigStore:
     ) -> ScopedSetting:
         """Set a configuration value. Creates or updates.
 
+        ``value`` can be any JSON-serializable value or a Pydantic model.
+        Pydantic models are serialized via ``model_dump()``.
+
         Only the scope owner can write settings.
         Raises ScopeNotFoundError if scope doesn't exist.
         Raises AccessDeniedError if principal is not the scope owner.
         Raises ScopeFrozenError if scope is frozen/archived.
         """
+        from scoped.tenancy.config_types import setting_value_to_dict
+
         scope = self._get_scope_or_raise(scope_id)
         self._require_mutable(scope)
         self._require_owner(scope, principal_id)
 
         ts = now_utc()
+        value = setting_value_to_dict(value)
         value_json = json.dumps(value)
 
         # Check if setting already exists

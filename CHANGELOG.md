@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.5 (2026-04-02)
+
+### Added
+- **Typed webhook config** — `WebhookConfig` Pydantic model with `RetryPolicy`. `WebhookEndpoint.typed_config` property with fallback. `parse_webhook_config()` / `webhook_config_to_dict()` helpers in `scoped.events.config_types`
+- **Typed gate details** — `StageCheckDetails`, `RuleCheckDetails`, `ApprovalDetails`, `CustomGateDetails` models. `DeploymentGate.typed_details` property. Discriminated by `GateType`. In `scoped.deployments.gate_types`
+- **Typed plugin manifest/metadata** — `PluginManifest` and `PluginMetadata` models with `PluginPermissionSpec`. `Plugin.typed_manifest` and `Plugin.typed_metadata` properties. In `scoped.integrations.plugin_types`
+- **Typed scope settings** — Setting type registry via `register_setting_type(key, model_cls)`. `ConfigStore.set()` accepts Pydantic models. `setting_value_to_dict()` serializer. In `scoped.tenancy.config_types`
+
 ## 0.9.4 (2026-04-02)
 
 ### Added

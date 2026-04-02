@@ -90,6 +90,30 @@ class Plugin:
     def is_uninstalled(self) -> bool:
         return self.state == PluginState.UNINSTALLED
 
+    @property
+    def typed_manifest(self) -> Any:
+        """Parse ``manifest`` into a ``PluginManifest`` model.
+
+        Falls back to the raw dict if parsing fails.
+        """
+        try:
+            from scoped.integrations.plugin_types import parse_plugin_manifest
+            return parse_plugin_manifest(self.manifest)
+        except Exception:
+            return self.manifest
+
+    @property
+    def typed_metadata(self) -> Any:
+        """Parse ``metadata`` into a ``PluginMetadata`` model.
+
+        Falls back to the raw dict if parsing fails.
+        """
+        try:
+            from scoped.integrations.plugin_types import parse_plugin_metadata
+            return parse_plugin_metadata(self.metadata)
+        except Exception:
+            return self.metadata
+
     def can_transition_to(self, target: PluginState) -> bool:
         return target in VALID_PLUGIN_TRANSITIONS.get(self.state, frozenset())
 
