@@ -11,8 +11,12 @@ import json
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.audit.models import TraceEntry, compute_hash
 from scoped.exceptions import TraceIntegrityError
+from scoped.storage._query import compile_for
+from scoped.storage._schema import audit_trail
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType
 
@@ -37,16 +41,16 @@ class AuditQuery:
 
     def get(self, entry_id: str) -> TraceEntry | None:
         """Fetch a single trace entry by ID."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM audit_trail WHERE id = ?", (entry_id,)
-        )
+        stmt = sa.select(audit_trail).where(audit_trail.c.id == entry_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return self._row_to_entry(row) if row else None
 
     def get_by_sequence(self, sequence: int) -> TraceEntry | None:
         """Fetch a single trace entry by sequence number."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM audit_trail WHERE sequence = ?", (sequence,)
-        )
+        stmt = sa.select(audit_trail).where(audit_trail.c.sequence == sequence)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return self._row_to_entry(row) if row else None
 
     # Columns that are safe to ORDER BY
@@ -76,49 +80,35 @@ class AuditQuery:
             order_by: Column to sort by. Prefix with ``-`` for descending.
                       Allowed: ``sequence``, ``timestamp``. Default: ``sequence``.
         """
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(audit_trail)
 
         if actor_id is not None:
-            clauses.append("actor_id = ?")
-            params.append(actor_id)
+            stmt = stmt.where(audit_trail.c.actor_id == actor_id)
         if action is not None:
-            clauses.append("action = ?")
-            params.append(action.value)
+            stmt = stmt.where(audit_trail.c.action == action.value)
         if target_type is not None:
-            clauses.append("target_type = ?")
-            params.append(target_type)
+            stmt = stmt.where(audit_trail.c.target_type == target_type)
         if target_id is not None:
-            clauses.append("target_id = ?")
-            params.append(target_id)
+            stmt = stmt.where(audit_trail.c.target_id == target_id)
         if scope_id is not None:
-            clauses.append("scope_id = ?")
-            params.append(scope_id)
+            stmt = stmt.where(audit_trail.c.scope_id == scope_id)
         if parent_trace_id is not None:
-            clauses.append("parent_trace_id = ?")
-            params.append(parent_trace_id)
+            stmt = stmt.where(audit_trail.c.parent_trace_id == parent_trace_id)
         if since is not None:
-            clauses.append("timestamp >= ?")
-            params.append(since.isoformat())
+            stmt = stmt.where(audit_trail.c.timestamp >= since.isoformat())
         if until is not None:
-            clauses.append("timestamp <= ?")
-            params.append(until.isoformat())
-
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            stmt = stmt.where(audit_trail.c.timestamp <= until.isoformat())
 
         desc = order_by.startswith("-")
         col = order_by.lstrip("-")
         if col not in self._AUDIT_ORDER_COLUMNS:
             col = "sequence"
-        direction = "DESC" if desc else "ASC"
+        col_ref = audit_trail.c[col]
+        stmt = stmt.order_by(col_ref.desc() if desc else col_ref.asc())
+        stmt = stmt.limit(limit).offset(offset)
 
-        sql = (
-            f"SELECT * FROM audit_trail{where} "
-            f"ORDER BY {col} {direction} LIMIT ? OFFSET ?"
-        )
-        params.extend([limit, offset])
-
-        rows = self._backend.fetch_all(sql, tuple(params))
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [self._row_to_entry(r) for r in rows]
 
     def count(
@@ -130,26 +120,19 @@ class AuditQuery:
         target_id: str | None = None,
     ) -> int:
         """Count matching entries."""
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(sa.func.count().label("cnt")).select_from(audit_trail)
 
         if actor_id is not None:
-            clauses.append("actor_id = ?")
-            params.append(actor_id)
+            stmt = stmt.where(audit_trail.c.actor_id == actor_id)
         if action is not None:
-            clauses.append("action = ?")
-            params.append(action.value)
+            stmt = stmt.where(audit_trail.c.action == action.value)
         if target_type is not None:
-            clauses.append("target_type = ?")
-            params.append(target_type)
+            stmt = stmt.where(audit_trail.c.target_type == target_type)
         if target_id is not None:
-            clauses.append("target_id = ?")
-            params.append(target_id)
+            stmt = stmt.where(audit_trail.c.target_id == target_id)
 
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        row = self._backend.fetch_one(
-            f"SELECT COUNT(*) as cnt FROM audit_trail{where}", tuple(params)
-        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row["cnt"] if row else 0
 
     def children(self, parent_trace_id: str) -> list[TraceEntry]:
@@ -198,17 +181,15 @@ class AuditQuery:
         current_from = from_sequence
 
         while True:
-            clauses = ["sequence >= ?"]
-            params: list[Any] = [current_from]
-            if to_sequence is not None:
-                clauses.append("sequence <= ?")
-                params.append(to_sequence)
-
-            rows = self._backend.fetch_all(
-                f"SELECT * FROM audit_trail WHERE {' AND '.join(clauses)} "
-                f"ORDER BY sequence ASC LIMIT ?",
-                tuple(params) + (chunk_size,),
+            stmt = sa.select(audit_trail).where(
+                audit_trail.c.sequence >= current_from,
             )
+            if to_sequence is not None:
+                stmt = stmt.where(audit_trail.c.sequence <= to_sequence)
+            stmt = stmt.order_by(audit_trail.c.sequence.asc()).limit(chunk_size)
+
+            sql, params = compile_for(stmt, self._backend.dialect)
+            rows = self._backend.fetch_all(sql, params)
 
             if not rows:
                 break

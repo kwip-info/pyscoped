@@ -5,15 +5,21 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.notifications.models import (
     NotificationChannel,
     NotificationPreference,
     preference_from_row,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import notification_preferences
 from scoped.storage.interface import StorageBackend
 from scoped.types import Lifecycle, generate_id, now_utc
+from scoped._stability import experimental
 
 
+@experimental()
 class PreferenceManager:
     """Manage per-principal notification channel preferences.
 
@@ -37,16 +43,21 @@ class PreferenceManager:
         enabled: bool,
     ) -> NotificationPreference:
         """Set or update a notification preference for a principal/channel pair."""
-        existing = self._backend.fetch_one(
-            "SELECT * FROM notification_preferences "
-            "WHERE principal_id = ? AND channel = ? AND lifecycle = 'ACTIVE'",
-            (principal_id, channel.value),
+        stmt = sa.select(notification_preferences).where(
+            notification_preferences.c.principal_id == principal_id,
+            notification_preferences.c.channel == channel.value,
+            notification_preferences.c.lifecycle == "ACTIVE",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        existing = self._backend.fetch_one(sql, params)
         if existing:
-            self._backend.execute(
-                "UPDATE notification_preferences SET enabled = ? WHERE id = ?",
-                (int(enabled), existing["id"]),
+            update_stmt = (
+                sa.update(notification_preferences)
+                .where(notification_preferences.c.id == existing["id"])
+                .values(enabled=int(enabled))
             )
+            sql_u, params_u = compile_for(update_stmt, self._backend.dialect)
+            self._backend.execute(sql_u, params_u)
             return NotificationPreference(
                 id=existing["id"],
                 principal_id=principal_id,
@@ -62,25 +73,26 @@ class PreferenceManager:
             enabled=enabled,
             created_at=now_utc(),
         )
-        self._backend.execute(
-            "INSERT INTO notification_preferences "
-            "(id, principal_id, channel, enabled, created_at, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                pref.id, pref.principal_id, pref.channel.value,
-                int(pref.enabled), pref.created_at.isoformat(),
-                pref.lifecycle.name,
-            ),
+        insert_stmt = sa.insert(notification_preferences).values(
+            id=pref.id,
+            principal_id=pref.principal_id,
+            channel=pref.channel.value,
+            enabled=int(pref.enabled),
+            created_at=pref.created_at.isoformat(),
+            lifecycle=pref.lifecycle.name,
         )
+        sql_i, params_i = compile_for(insert_stmt, self._backend.dialect)
+        self._backend.execute(sql_i, params_i)
         return pref
 
     def get_preferences(self, principal_id: str) -> list[NotificationPreference]:
         """Get all active preferences for a principal."""
-        rows = self._backend.fetch_all(
-            "SELECT * FROM notification_preferences "
-            "WHERE principal_id = ? AND lifecycle = 'ACTIVE'",
-            (principal_id,),
+        stmt = sa.select(notification_preferences).where(
+            notification_preferences.c.principal_id == principal_id,
+            notification_preferences.c.lifecycle == "ACTIVE",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [preference_from_row(r) for r in rows]
 
     def is_channel_enabled(
@@ -92,11 +104,13 @@ class PreferenceManager:
 
         Returns True if no preference exists (default = enabled).
         """
-        row = self._backend.fetch_one(
-            "SELECT * FROM notification_preferences "
-            "WHERE principal_id = ? AND channel = ? AND lifecycle = 'ACTIVE'",
-            (principal_id, channel.value),
+        stmt = sa.select(notification_preferences).where(
+            notification_preferences.c.principal_id == principal_id,
+            notification_preferences.c.channel == channel.value,
+            notification_preferences.c.lifecycle == "ACTIVE",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return True  # default enabled
         return bool(row["enabled"])
@@ -107,8 +121,14 @@ class PreferenceManager:
         channel: NotificationChannel,
     ) -> None:
         """Remove a preference (reverts to default=enabled)."""
-        self._backend.execute(
-            "UPDATE notification_preferences SET lifecycle = 'ARCHIVED' "
-            "WHERE principal_id = ? AND channel = ? AND lifecycle = 'ACTIVE'",
-            (principal_id, channel.value),
+        stmt = (
+            sa.update(notification_preferences)
+            .where(
+                notification_preferences.c.principal_id == principal_id,
+                notification_preferences.c.channel == channel.value,
+                notification_preferences.c.lifecycle == "ACTIVE",
+            )
+            .values(lifecycle="ARCHIVED")
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)

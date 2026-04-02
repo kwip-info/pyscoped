@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.rules.compiler import CompiledRuleSet, RuleCompiler
 from scoped.rules.models import (
     BindingTargetType,
@@ -21,6 +23,8 @@ from scoped.rules.models import (
     rule_from_row,
     rule_version_from_row,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import rule_bindings, rule_versions, rules
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
 
@@ -69,19 +73,17 @@ class RuleStore:
             created_by=created_by,
         )
 
-        self._backend.execute(
-            "INSERT INTO rules "
-            "(id, name, description, rule_type, effect, priority, conditions_json, "
-            "registry_entry_id, created_at, created_by, lifecycle, current_version) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                rule.id, rule.name, rule.description,
-                rule.rule_type.value, rule.effect.value,
-                rule.priority, json.dumps(conds),
-                rule.registry_entry_id, rule.created_at.isoformat(),
-                rule.created_by, rule.lifecycle.name, rule.current_version,
-            ),
+        stmt = sa.insert(rules).values(
+            id=rule.id, name=rule.name, description=rule.description,
+            rule_type=rule.rule_type.value, effect=rule.effect.value,
+            priority=rule.priority, conditions_json=json.dumps(conds),
+            registry_entry_id=rule.registry_entry_id,
+            created_at=rule.created_at.isoformat(),
+            created_by=rule.created_by, lifecycle=rule.lifecycle.name,
+            current_version=rule.current_version,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Create version 1
         self._create_version(rule, change_reason="created")
@@ -98,9 +100,9 @@ class RuleStore:
         return rule
 
     def get_rule(self, rule_id: str) -> Rule | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM rules WHERE id = ?", (rule_id,),
-        )
+        stmt = sa.select(rules).where(rules.c.id == rule_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return None
         return rule_from_row(row)
@@ -112,24 +114,16 @@ class RuleStore:
         effect: RuleEffect | None = None,
         active_only: bool = True,
     ) -> list[Rule]:
-        clauses: list[str] = []
-        params: list[Any] = []
-
+        stmt = sa.select(rules)
         if rule_type is not None:
-            clauses.append("rule_type = ?")
-            params.append(rule_type.value)
+            stmt = stmt.where(rules.c.rule_type == rule_type.value)
         if effect is not None:
-            clauses.append("effect = ?")
-            params.append(effect.value)
+            stmt = stmt.where(rules.c.effect == effect.value)
         if active_only:
-            clauses.append("lifecycle = ?")
-            params.append(Lifecycle.ACTIVE.name)
-
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM rules{where} ORDER BY priority DESC",
-            tuple(params),
-        )
+            stmt = stmt.where(rules.c.lifecycle == Lifecycle.ACTIVE.name)
+        stmt = stmt.order_by(rules.c.priority.desc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [rule_from_row(r) for r in rows]
 
     def update_rule(
@@ -158,14 +152,14 @@ class RuleStore:
 
         rule.current_version += 1
 
-        self._backend.execute(
-            "UPDATE rules SET conditions_json = ?, effect = ?, priority = ?, "
-            "current_version = ? WHERE id = ?",
-            (
-                json.dumps(rule.conditions), rule.effect.value,
-                rule.priority, rule.current_version, rule_id,
-            ),
+        stmt = sa.update(rules).where(rules.c.id == rule_id).values(
+            conditions_json=json.dumps(rule.conditions),
+            effect=rule.effect.value,
+            priority=rule.priority,
+            current_version=rule.current_version,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         self._create_version(rule, change_reason=change_reason, created_by=updated_by)
 
@@ -187,14 +181,18 @@ class RuleStore:
         if rule is None:
             raise ValueError(f"Rule {rule_id} not found")
 
-        self._backend.execute(
-            "UPDATE rules SET lifecycle = ? WHERE id = ?",
-            (Lifecycle.ARCHIVED.name, rule_id),
+        stmt1 = sa.update(rules).where(rules.c.id == rule_id).values(
+            lifecycle=Lifecycle.ARCHIVED.name,
         )
-        self._backend.execute(
-            "UPDATE rule_bindings SET lifecycle = ? WHERE rule_id = ? AND lifecycle = ?",
-            (Lifecycle.ARCHIVED.name, rule_id, Lifecycle.ACTIVE.name),
-        )
+        sql, params = compile_for(stmt1, self._backend.dialect)
+        self._backend.execute(sql, params)
+
+        stmt2 = sa.update(rule_bindings).where(
+            rule_bindings.c.rule_id == rule_id,
+            rule_bindings.c.lifecycle == Lifecycle.ACTIVE.name,
+        ).values(lifecycle=Lifecycle.ARCHIVED.name)
+        sql, params = compile_for(stmt2, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         rule.lifecycle = Lifecycle.ARCHIVED
 
@@ -214,10 +212,11 @@ class RuleStore:
     # ------------------------------------------------------------------
 
     def get_versions(self, rule_id: str) -> list[RuleVersion]:
-        rows = self._backend.fetch_all(
-            "SELECT * FROM rule_versions WHERE rule_id = ? ORDER BY version ASC",
-            (rule_id,),
-        )
+        stmt = sa.select(rule_versions).where(
+            rule_versions.c.rule_id == rule_id,
+        ).order_by(rule_versions.c.version.asc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [rule_version_from_row(r) for r in rows]
 
     def _create_version(
@@ -240,17 +239,15 @@ class RuleStore:
             created_by=created_by or rule.created_by,
             change_reason=change_reason,
         )
-        self._backend.execute(
-            "INSERT INTO rule_versions "
-            "(id, rule_id, version, conditions_json, effect, priority, "
-            "created_at, created_by, change_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                ver.id, ver.rule_id, ver.version,
-                json.dumps(ver.conditions), ver.effect.value, ver.priority,
-                ver.created_at.isoformat(), ver.created_by, ver.change_reason,
-            ),
+        stmt = sa.insert(rule_versions).values(
+            id=ver.id, rule_id=ver.rule_id, version=ver.version,
+            conditions_json=json.dumps(ver.conditions),
+            effect=ver.effect.value, priority=ver.priority,
+            created_at=ver.created_at.isoformat(),
+            created_by=ver.created_by, change_reason=ver.change_reason,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         return ver
 
     # ------------------------------------------------------------------
@@ -277,16 +274,15 @@ class RuleStore:
             bound_by=bound_by,
         )
 
-        self._backend.execute(
-            "INSERT INTO rule_bindings "
-            "(id, rule_id, target_type, target_id, bound_at, bound_by, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                binding.id, binding.rule_id, binding.target_type.value,
-                binding.target_id, binding.bound_at.isoformat(),
-                binding.bound_by, binding.lifecycle.name,
-            ),
+        stmt = sa.insert(rule_bindings).values(
+            id=binding.id, rule_id=binding.rule_id,
+            target_type=binding.target_type.value,
+            target_id=binding.target_id,
+            bound_at=binding.bound_at.isoformat(),
+            bound_by=binding.bound_by, lifecycle=binding.lifecycle.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         return binding
 
@@ -298,18 +294,25 @@ class RuleStore:
         target_id: str,
     ) -> bool:
         """Remove a rule binding. Returns True if removed."""
-        row = self._backend.fetch_one(
-            "SELECT 1 FROM rule_bindings "
-            "WHERE rule_id = ? AND target_type = ? AND target_id = ? AND lifecycle = ?",
-            (rule_id, target_type.value, target_id, Lifecycle.ACTIVE.name),
+        stmt = sa.select(sa.literal(1)).select_from(rule_bindings).where(
+            rule_bindings.c.rule_id == rule_id,
+            rule_bindings.c.target_type == target_type.value,
+            rule_bindings.c.target_id == target_id,
+            rule_bindings.c.lifecycle == Lifecycle.ACTIVE.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return False
-        self._backend.execute(
-            "UPDATE rule_bindings SET lifecycle = ? "
-            "WHERE rule_id = ? AND target_type = ? AND target_id = ? AND lifecycle = ?",
-            (Lifecycle.ARCHIVED.name, rule_id, target_type.value, target_id, Lifecycle.ACTIVE.name),
-        )
+
+        stmt2 = sa.update(rule_bindings).where(
+            rule_bindings.c.rule_id == rule_id,
+            rule_bindings.c.target_type == target_type.value,
+            rule_bindings.c.target_id == target_id,
+            rule_bindings.c.lifecycle == Lifecycle.ACTIVE.name,
+        ).values(lifecycle=Lifecycle.ARCHIVED.name)
+        sql, params = compile_for(stmt2, self._backend.dialect)
+        self._backend.execute(sql, params)
         return True
 
     def get_bindings(
@@ -318,16 +321,11 @@ class RuleStore:
         *,
         active_only: bool = True,
     ) -> list[RuleBinding]:
-        clauses = ["rule_id = ?"]
-        params: list[Any] = [rule_id]
+        stmt = sa.select(rule_bindings).where(rule_bindings.c.rule_id == rule_id)
         if active_only:
-            clauses.append("lifecycle = ?")
-            params.append(Lifecycle.ACTIVE.name)
-        where = " AND ".join(clauses)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM rule_bindings WHERE {where}",
-            tuple(params),
-        )
+            stmt = stmt.where(rule_bindings.c.lifecycle == Lifecycle.ACTIVE.name)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [binding_from_row(r) for r in rows]
 
     def get_target_bindings(
@@ -338,16 +336,14 @@ class RuleStore:
         active_only: bool = True,
     ) -> list[RuleBinding]:
         """Get all bindings for a specific target."""
-        clauses = ["target_type = ?", "target_id = ?"]
-        params: list[Any] = [target_type.value, target_id]
-        if active_only:
-            clauses.append("lifecycle = ?")
-            params.append(Lifecycle.ACTIVE.name)
-        where = " AND ".join(clauses)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM rule_bindings WHERE {where}",
-            tuple(params),
+        stmt = sa.select(rule_bindings).where(
+            rule_bindings.c.target_type == target_type.value,
+            rule_bindings.c.target_id == target_id,
         )
+        if active_only:
+            stmt = stmt.where(rule_bindings.c.lifecycle == Lifecycle.ACTIVE.name)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [binding_from_row(r) for r in rows]
 
 
@@ -469,13 +465,16 @@ class RuleEngine:
         target_id: str,
     ) -> list[Rule]:
         """Load active rules bound to a target."""
-        rows = self._backend.fetch_all(
-            "SELECT r.* FROM rules r "
-            "JOIN rule_bindings rb ON r.id = rb.rule_id "
-            "WHERE rb.target_type = ? AND rb.target_id = ? "
-            "AND rb.lifecycle = ? AND r.lifecycle = ?",
-            (target_type.value, target_id, Lifecycle.ACTIVE.name, Lifecycle.ACTIVE.name),
+        stmt = sa.select(rules).select_from(
+            rules.join(rule_bindings, rules.c.id == rule_bindings.c.rule_id)
+        ).where(
+            rule_bindings.c.target_type == target_type.value,
+            rule_bindings.c.target_id == target_id,
+            rule_bindings.c.lifecycle == Lifecycle.ACTIVE.name,
+            rules.c.lifecycle == Lifecycle.ACTIVE.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [rule_from_row(r) for r in rows]
 
     @staticmethod

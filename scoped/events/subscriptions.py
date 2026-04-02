@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.events.models import (
     EventSubscription,
     WebhookEndpoint,
@@ -15,10 +17,14 @@ from scoped.exceptions import AccessDeniedError
 from scoped.registry.base import get_registry
 from scoped.registry.kinds import RegistryKind
 from scoped.registry.sqlite_store import SQLiteRegistryStore
+from scoped.storage._query import compile_for
+from scoped.storage._schema import event_subscriptions, webhook_endpoints
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+from scoped._stability import experimental
 
 
+@experimental()
 class SubscriptionManager:
     """Manage event subscriptions and webhook endpoints.
 
@@ -52,16 +58,18 @@ class SubscriptionManager:
             scope_id=scope_id,
             created_at=now_utc(),
         )
-        self._backend.execute(
-            "INSERT INTO webhook_endpoints "
-            "(id, name, owner_id, url, config_json, scope_id, created_at, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                wh.id, wh.name, wh.owner_id, wh.url,
-                json.dumps(wh.config), wh.scope_id,
-                wh.created_at.isoformat(), wh.lifecycle.name,
-            ),
+        stmt = sa.insert(webhook_endpoints).values(
+            id=wh.id,
+            name=wh.name,
+            owner_id=wh.owner_id,
+            url=wh.url,
+            config_json=json.dumps(wh.config),
+            scope_id=wh.scope_id,
+            created_at=wh.created_at.isoformat(),
+            lifecycle=wh.lifecycle.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Auto-register (Invariant #1)
         try:
@@ -92,9 +100,9 @@ class SubscriptionManager:
 
     def get_webhook(self, webhook_id: str) -> WebhookEndpoint | None:
         """Fetch a webhook endpoint by ID."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM webhook_endpoints WHERE id = ?", (webhook_id,),
-        )
+        stmt = sa.select(webhook_endpoints).where(webhook_endpoints.c.id == webhook_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return webhook_from_row(row) if row else None
 
     def list_webhooks(
@@ -104,21 +112,18 @@ class SubscriptionManager:
         scope_id: str | None = None,
     ) -> list[WebhookEndpoint]:
         """List webhook endpoints with optional filters."""
-        clauses: list[str] = ["lifecycle = 'ACTIVE'"]
-        params: list[Any] = []
+        stmt = sa.select(webhook_endpoints).where(
+            webhook_endpoints.c.lifecycle == "ACTIVE"
+        )
 
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
+            stmt = stmt.where(webhook_endpoints.c.owner_id == owner_id)
         if scope_id is not None:
-            clauses.append("scope_id = ?")
-            params.append(scope_id)
+            stmt = stmt.where(webhook_endpoints.c.scope_id == scope_id)
 
-        where = " AND ".join(clauses)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM webhook_endpoints WHERE {where} ORDER BY created_at DESC",
-            tuple(params),
-        )
+        stmt = stmt.order_by(webhook_endpoints.c.created_at.desc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [webhook_from_row(r) for r in rows]
 
     def delete_webhook(self, webhook_id: str, *, principal_id: str) -> None:
@@ -131,10 +136,13 @@ class SubscriptionManager:
                 "Only the webhook owner can delete it",
                 context={"webhook_id": webhook_id, "principal_id": principal_id},
             )
-        self._backend.execute(
-            "UPDATE webhook_endpoints SET lifecycle = 'ARCHIVED' WHERE id = ?",
-            (webhook_id,),
+        stmt = (
+            sa.update(webhook_endpoints)
+            .where(webhook_endpoints.c.id == webhook_id)
+            .values(lifecycle="ARCHIVED")
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     # ------------------------------------------------------------------
     # Subscriptions
@@ -161,19 +169,19 @@ class SubscriptionManager:
             webhook_endpoint_id=webhook_endpoint_id,
             created_at=now_utc(),
         )
-        self._backend.execute(
-            "INSERT INTO event_subscriptions "
-            "(id, name, owner_id, event_types_json, target_types_json, "
-            "scope_id, webhook_endpoint_id, created_at, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                sub.id, sub.name, sub.owner_id,
-                json.dumps(sub.event_types),
-                json.dumps(sub.target_types),
-                sub.scope_id, sub.webhook_endpoint_id,
-                sub.created_at.isoformat(), sub.lifecycle.name,
-            ),
+        stmt = sa.insert(event_subscriptions).values(
+            id=sub.id,
+            name=sub.name,
+            owner_id=sub.owner_id,
+            event_types_json=json.dumps(sub.event_types),
+            target_types_json=json.dumps(sub.target_types),
+            scope_id=sub.scope_id,
+            webhook_endpoint_id=sub.webhook_endpoint_id,
+            created_at=sub.created_at.isoformat(),
+            lifecycle=sub.lifecycle.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Auto-register (Invariant #1)
         try:
@@ -204,9 +212,11 @@ class SubscriptionManager:
 
     def get_subscription(self, subscription_id: str) -> EventSubscription | None:
         """Fetch a subscription by ID."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM event_subscriptions WHERE id = ?", (subscription_id,),
+        stmt = sa.select(event_subscriptions).where(
+            event_subscriptions.c.id == subscription_id
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return subscription_from_row(row) if row else None
 
     def list_subscriptions(
@@ -217,23 +227,18 @@ class SubscriptionManager:
         active_only: bool = True,
     ) -> list[EventSubscription]:
         """List subscriptions with optional filters."""
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(event_subscriptions)
 
         if active_only:
-            clauses.append("lifecycle = 'ACTIVE'")
+            stmt = stmt.where(event_subscriptions.c.lifecycle == "ACTIVE")
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
+            stmt = stmt.where(event_subscriptions.c.owner_id == owner_id)
         if scope_id is not None:
-            clauses.append("scope_id = ?")
-            params.append(scope_id)
+            stmt = stmt.where(event_subscriptions.c.scope_id == scope_id)
 
-        where = " AND ".join(clauses) if clauses else "1=1"
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM event_subscriptions WHERE {where} ORDER BY created_at DESC",
-            tuple(params),
-        )
+        stmt = stmt.order_by(event_subscriptions.c.created_at.desc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [subscription_from_row(r) for r in rows]
 
     def delete_subscription(self, subscription_id: str, *, principal_id: str) -> None:
@@ -246,7 +251,10 @@ class SubscriptionManager:
                 "Only the subscription owner can delete it",
                 context={"subscription_id": subscription_id, "principal_id": principal_id},
             )
-        self._backend.execute(
-            "UPDATE event_subscriptions SET lifecycle = 'ARCHIVED' WHERE id = ?",
-            (subscription_id,),
+        stmt = (
+            sa.update(event_subscriptions)
+            .where(event_subscriptions.c.id == subscription_id)
+            .values(lifecycle="ARCHIVED")
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)

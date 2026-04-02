@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import (
     AccessDeniedError,
     ScopeFrozenError,
     ScopeNotFoundError,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import scope_projections, scoped_objects, scopes
 from scoped.storage.interface import StorageBackend
 from scoped.tenancy.models import (
     AccessLevel,
@@ -51,9 +55,9 @@ class ProjectionManager:
         Raises ScopeFrozenError if scope is frozen/archived.
         """
         # Verify scope exists and is mutable
-        scope_row = self._backend.fetch_one(
-            "SELECT * FROM scopes WHERE id = ?", (scope_id,),
-        )
+        stmt = sa.select(scopes).where(scopes.c.id == scope_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        scope_row = self._backend.fetch_one(sql, params)
         if scope_row is None:
             raise ScopeNotFoundError(
                 f"Scope {scope_id} not found",
@@ -67,9 +71,9 @@ class ProjectionManager:
             )
 
         # Verify object exists and caller is owner
-        obj_row = self._backend.fetch_one(
-            "SELECT * FROM scoped_objects WHERE id = ?", (object_id,),
-        )
+        stmt = sa.select(scoped_objects).where(scoped_objects.c.id == object_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        obj_row = self._backend.fetch_one(sql, params)
         if obj_row is None:
             raise AccessDeniedError(
                 f"Object {object_id} not found",
@@ -88,11 +92,14 @@ class ProjectionManager:
         ts = now_utc()
 
         # Check for a previously revoked projection (UNIQUE constraint on scope_id, object_id)
-        existing = self._backend.fetch_one(
-            "SELECT * FROM scope_projections "
-            "WHERE scope_id = ? AND object_id = ?",
-            (scope_id, object_id),
+        stmt = sa.select(scope_projections).where(
+            sa.and_(
+                scope_projections.c.scope_id == scope_id,
+                scope_projections.c.object_id == object_id,
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        existing = self._backend.fetch_one(sql, params)
 
         if existing and existing["lifecycle"] == Lifecycle.ACTIVE.name:
             # Already active — return existing projection
@@ -100,16 +107,19 @@ class ProjectionManager:
 
         if existing:
             # Reactivate the archived projection
-            self._backend.execute(
-                "UPDATE scope_projections "
-                "SET lifecycle = ?, access_level = ?, projected_at = ?, projected_by = ? "
-                "WHERE scope_id = ? AND object_id = ?",
-                (
-                    Lifecycle.ACTIVE.name, access_level.value,
-                    ts.isoformat(), projected_by,
-                    scope_id, object_id,
-                ),
+            update_stmt = sa.update(scope_projections).where(
+                sa.and_(
+                    scope_projections.c.scope_id == scope_id,
+                    scope_projections.c.object_id == object_id,
+                )
+            ).values(
+                lifecycle=Lifecycle.ACTIVE.name,
+                access_level=access_level.value,
+                projected_at=ts.isoformat(),
+                projected_by=projected_by,
             )
+            sql, params = compile_for(update_stmt, self._backend.dialect)
+            self._backend.execute(sql, params)
             proj = ScopeProjection(
                 id=existing["id"],
                 scope_id=scope_id,
@@ -129,16 +139,17 @@ class ProjectionManager:
                 projected_by=projected_by,
                 access_level=access_level,
             )
-            self._backend.execute(
-                "INSERT INTO scope_projections "
-                "(id, scope_id, object_id, projected_at, projected_by, access_level, lifecycle) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    proj.id, proj.scope_id, proj.object_id,
-                    proj.projected_at.isoformat(), proj.projected_by,
-                    proj.access_level.value, proj.lifecycle.name,
-                ),
+            insert_stmt = sa.insert(scope_projections).values(
+                id=proj.id,
+                scope_id=proj.scope_id,
+                object_id=proj.object_id,
+                projected_at=proj.projected_at.isoformat(),
+                projected_by=proj.projected_by,
+                access_level=proj.access_level.value,
+                lifecycle=proj.lifecycle.name,
             )
+            sql, params = compile_for(insert_stmt, self._backend.dialect)
+            self._backend.execute(sql, params)
 
         if self._audit:
             self._audit.record(
@@ -160,19 +171,22 @@ class ProjectionManager:
         revoked_by: str,
     ) -> bool:
         """Revoke an object's projection from a scope. Returns True if revoked."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM scope_projections "
-            "WHERE scope_id = ? AND object_id = ? AND lifecycle = ?",
-            (scope_id, object_id, Lifecycle.ACTIVE.name),
+        active_condition = sa.and_(
+            scope_projections.c.scope_id == scope_id,
+            scope_projections.c.object_id == object_id,
+            scope_projections.c.lifecycle == Lifecycle.ACTIVE.name,
         )
+        select_stmt = sa.select(scope_projections).where(active_condition)
+        sql, params = compile_for(select_stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return False
 
-        self._backend.execute(
-            "UPDATE scope_projections SET lifecycle = ? "
-            "WHERE scope_id = ? AND object_id = ? AND lifecycle = ?",
-            (Lifecycle.ARCHIVED.name, scope_id, object_id, Lifecycle.ACTIVE.name),
+        update_stmt = sa.update(scope_projections).where(active_condition).values(
+            lifecycle=Lifecycle.ARCHIVED.name,
         )
+        sql, params = compile_for(update_stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit:
             self._audit.record(
@@ -193,17 +207,15 @@ class ProjectionManager:
         active_only: bool = True,
     ) -> list[ScopeProjection]:
         """Get all projections in a scope."""
-        clauses = ["scope_id = ?"]
-        params: list[Any] = [scope_id]
-        if active_only:
-            clauses.append("lifecycle = ?")
-            params.append(Lifecycle.ACTIVE.name)
-
-        where = " AND ".join(clauses)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM scope_projections WHERE {where} ORDER BY projected_at ASC",
-            tuple(params),
+        stmt = sa.select(scope_projections).where(
+            scope_projections.c.scope_id == scope_id,
         )
+        if active_only:
+            stmt = stmt.where(scope_projections.c.lifecycle == Lifecycle.ACTIVE.name)
+        stmt = stmt.order_by(scope_projections.c.projected_at.asc())
+
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [projection_from_row(r) for r in rows]
 
     def get_object_projections(
@@ -213,24 +225,25 @@ class ProjectionManager:
         active_only: bool = True,
     ) -> list[ScopeProjection]:
         """Get all scopes an object is projected into."""
-        clauses = ["object_id = ?"]
-        params: list[Any] = [object_id]
-        if active_only:
-            clauses.append("lifecycle = ?")
-            params.append(Lifecycle.ACTIVE.name)
-
-        where = " AND ".join(clauses)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM scope_projections WHERE {where}",
-            tuple(params),
+        stmt = sa.select(scope_projections).where(
+            scope_projections.c.object_id == object_id,
         )
+        if active_only:
+            stmt = stmt.where(scope_projections.c.lifecycle == Lifecycle.ACTIVE.name)
+
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [projection_from_row(r) for r in rows]
 
     def is_projected(self, scope_id: str, object_id: str) -> bool:
         """Check if an object has an active projection into a scope."""
-        row = self._backend.fetch_one(
-            "SELECT 1 FROM scope_projections "
-            "WHERE scope_id = ? AND object_id = ? AND lifecycle = ?",
-            (scope_id, object_id, Lifecycle.ACTIVE.name),
+        stmt = sa.select(sa.literal(1)).select_from(scope_projections).where(
+            sa.and_(
+                scope_projections.c.scope_id == scope_id,
+                scope_projections.c.object_id == object_id,
+                scope_projections.c.lifecycle == Lifecycle.ACTIVE.name,
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row is not None

@@ -11,7 +11,11 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import FlowBlockedError
+from scoped.storage._query import compile_for
+from scoped.storage._schema import flow_channels
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
 
@@ -20,6 +24,7 @@ from scoped.flow.models import (
     FlowPointType,
     channel_from_row,
 )
+from scoped._stability import experimental
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +39,7 @@ class FlowResolution:
         return self.allowed
 
 
+@experimental()
 class FlowEngine:
     """Manages flow channels and resolves flow permissions."""
 
@@ -74,17 +80,15 @@ class FlowEngine:
             created_at=ts,
         )
 
-        self._backend.execute(
-            """INSERT INTO flow_channels
-               (id, name, source_type, source_id, target_type, target_id,
-                allowed_types, owner_id, created_at, lifecycle)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                cid, name, source_type.value, source_id,
-                target_type.value, target_id,
-                json.dumps(types), owner_id, ts.isoformat(), "ACTIVE",
-            ),
+        stmt = sa.insert(flow_channels).values(
+            id=cid, name=name, source_type=source_type.value,
+            source_id=source_id, target_type=target_type.value,
+            target_id=target_id, allowed_types=json.dumps(types),
+            owner_id=owner_id, created_at=ts.isoformat(),
+            lifecycle="ACTIVE",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             self._audit.record(
@@ -98,9 +102,9 @@ class FlowEngine:
         return channel
 
     def get_channel(self, channel_id: str) -> FlowChannel | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM flow_channels WHERE id = ?", (channel_id,),
-        )
+        stmt = sa.select(flow_channels).where(flow_channels.c.id == channel_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return channel_from_row(row) if row else None
 
     def list_channels(
@@ -113,38 +117,30 @@ class FlowEngine:
         active_only: bool = True,
         limit: int = 100,
     ) -> list[FlowChannel]:
-        clauses: list[str] = []
-        params: list[Any] = []
-
+        stmt = sa.select(flow_channels)
         if source_type is not None:
-            clauses.append("source_type = ?")
-            params.append(source_type.value)
+            stmt = stmt.where(flow_channels.c.source_type == source_type.value)
         if source_id is not None:
-            clauses.append("source_id = ?")
-            params.append(source_id)
+            stmt = stmt.where(flow_channels.c.source_id == source_id)
         if target_type is not None:
-            clauses.append("target_type = ?")
-            params.append(target_type.value)
+            stmt = stmt.where(flow_channels.c.target_type == target_type.value)
         if target_id is not None:
-            clauses.append("target_id = ?")
-            params.append(target_id)
+            stmt = stmt.where(flow_channels.c.target_id == target_id)
         if active_only:
-            clauses.append("lifecycle = 'ACTIVE'")
-
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        params.append(limit)
-
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM flow_channels{where} ORDER BY created_at DESC LIMIT ?",
-            tuple(params),
-        )
+            stmt = stmt.where(flow_channels.c.lifecycle == "ACTIVE")
+        stmt = stmt.order_by(flow_channels.c.created_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [channel_from_row(r) for r in rows]
 
     def archive_channel(self, channel_id: str, *, archived_by: str | None = None) -> None:
-        self._backend.execute(
-            "UPDATE flow_channels SET lifecycle = 'ARCHIVED' WHERE id = ?",
-            (channel_id,),
+        stmt = (
+            sa.update(flow_channels)
+            .where(flow_channels.c.id == channel_id)
+            .values(lifecycle="ARCHIVED")
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None and archived_by is not None:
             self._audit.record(

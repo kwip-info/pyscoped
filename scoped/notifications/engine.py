@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.events.models import Event
 from scoped.registry.base import get_registry
 from scoped.registry.kinds import RegistryKind
@@ -17,10 +19,14 @@ from scoped.notifications.models import (
     notification_from_row,
     rule_from_row,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import notification_rules, notifications
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+from scoped._stability import experimental
 
 
+@experimental()
 class NotificationEngine:
     """Evaluate notification rules against events, generate notifications.
 
@@ -71,25 +77,22 @@ class NotificationEngine:
             body_template=body_template,
             created_at=now_utc(),
         )
-        self._backend.execute(
-            "INSERT INTO notification_rules "
-            "(id, name, owner_id, event_types_json, target_types_json, "
-            "scope_id, recipient_ids_json, channel, title_template, "
-            "body_template, created_at, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                rule.id, rule.name, rule.owner_id,
-                json.dumps(rule.event_types),
-                json.dumps(rule.target_types),
-                rule.scope_id,
-                json.dumps(rule.recipient_ids),
-                rule.channel.value,
-                rule.title_template,
-                rule.body_template,
-                rule.created_at.isoformat(),
-                rule.lifecycle.name,
-            ),
+        stmt = sa.insert(notification_rules).values(
+            id=rule.id,
+            name=rule.name,
+            owner_id=rule.owner_id,
+            event_types_json=json.dumps(rule.event_types),
+            target_types_json=json.dumps(rule.target_types),
+            scope_id=rule.scope_id,
+            recipient_ids_json=json.dumps(rule.recipient_ids),
+            channel=rule.channel.value,
+            title_template=rule.title_template,
+            body_template=rule.body_template,
+            created_at=rule.created_at.isoformat(),
+            lifecycle=rule.lifecycle.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Auto-register (Invariant #1)
         try:
@@ -119,9 +122,9 @@ class NotificationEngine:
         return rule
 
     def get_rule(self, rule_id: str) -> NotificationRule | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM notification_rules WHERE id = ?", (rule_id,),
-        )
+        stmt = sa.select(notification_rules).where(notification_rules.c.id == rule_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return rule_from_row(row) if row else None
 
     def list_rules(
@@ -130,25 +133,24 @@ class NotificationEngine:
         owner_id: str | None = None,
         active_only: bool = True,
     ) -> list[NotificationRule]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(notification_rules)
         if active_only:
-            clauses.append("lifecycle = 'ACTIVE'")
+            stmt = stmt.where(notification_rules.c.lifecycle == "ACTIVE")
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
-        where = " AND ".join(clauses) if clauses else "1=1"
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM notification_rules WHERE {where} ORDER BY created_at DESC",
-            tuple(params),
-        )
+            stmt = stmt.where(notification_rules.c.owner_id == owner_id)
+        stmt = stmt.order_by(notification_rules.c.created_at.desc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [rule_from_row(r) for r in rows]
 
     def archive_rule(self, rule_id: str) -> None:
-        self._backend.execute(
-            "UPDATE notification_rules SET lifecycle = 'ARCHIVED' WHERE id = ?",
-            (rule_id,),
+        stmt = (
+            sa.update(notification_rules)
+            .where(notification_rules.c.id == rule_id)
+            .values(lifecycle="ARCHIVED")
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             try:
@@ -173,7 +175,7 @@ class NotificationEngine:
         Returns the list of newly created notifications.
         """
         rules = self._match_rules(event)
-        notifications: list[Notification] = []
+        notifications_list: list[Notification] = []
 
         for rule in rules:
             for recipient_id in rule.recipient_ids:
@@ -199,18 +201,18 @@ class NotificationEngine:
                     scope_id=event.scope_id,
                     data=event.data,
                 )
-                notifications.append(notification)
+                notifications_list.append(notification)
 
-        return notifications
+        return notifications_list
 
     # ------------------------------------------------------------------
     # Notification CRUD
     # ------------------------------------------------------------------
 
     def get_notification(self, notification_id: str) -> Notification | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM notifications WHERE id = ?", (notification_id,),
-        )
+        stmt = sa.select(notifications).where(notifications.c.id == notification_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return notification_from_row(row) if row else None
 
     def list_notifications(
@@ -220,36 +222,47 @@ class NotificationEngine:
         status: NotificationStatus | None = None,
         limit: int = 100,
     ) -> list[Notification]:
-        clauses = ["recipient_id = ?", "lifecycle = 'ACTIVE'"]
-        params: list[Any] = [recipient_id]
-        if status is not None:
-            clauses.append("status = ?")
-            params.append(status.value)
-        where = " AND ".join(clauses)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM notifications WHERE {where} ORDER BY created_at DESC LIMIT ?",
-            tuple(params) + (limit,),
+        stmt = sa.select(notifications).where(
+            notifications.c.recipient_id == recipient_id,
+            notifications.c.lifecycle == "ACTIVE",
         )
+        if status is not None:
+            stmt = stmt.where(notifications.c.status == status.value)
+        stmt = stmt.order_by(notifications.c.created_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [notification_from_row(r) for r in rows]
 
     def mark_read(self, notification_id: str) -> None:
-        self._backend.execute(
-            "UPDATE notifications SET status = 'read', read_at = ? WHERE id = ?",
-            (now_utc().isoformat(), notification_id),
+        stmt = (
+            sa.update(notifications)
+            .where(notifications.c.id == notification_id)
+            .values(status="read", read_at=now_utc().isoformat())
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def mark_dismissed(self, notification_id: str) -> None:
-        self._backend.execute(
-            "UPDATE notifications SET status = 'dismissed', dismissed_at = ? WHERE id = ?",
-            (now_utc().isoformat(), notification_id),
+        stmt = (
+            sa.update(notifications)
+            .where(notifications.c.id == notification_id)
+            .values(status="dismissed", dismissed_at=now_utc().isoformat())
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def count_unread(self, recipient_id: str) -> int:
-        row = self._backend.fetch_one(
-            "SELECT COUNT(*) as cnt FROM notifications "
-            "WHERE recipient_id = ? AND status = 'unread' AND lifecycle = 'ACTIVE'",
-            (recipient_id,),
+        stmt = (
+            sa.select(sa.func.count().label("cnt"))
+            .select_from(notifications)
+            .where(
+                notifications.c.recipient_id == recipient_id,
+                notifications.c.status == "unread",
+                notifications.c.lifecycle == "ACTIVE",
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row["cnt"] if row else 0
 
     # ------------------------------------------------------------------
@@ -257,9 +270,11 @@ class NotificationEngine:
     # ------------------------------------------------------------------
 
     def _match_rules(self, event: Event) -> list[NotificationRule]:
-        rows = self._backend.fetch_all(
-            "SELECT * FROM notification_rules WHERE lifecycle = 'ACTIVE'",
+        stmt = sa.select(notification_rules).where(
+            notification_rules.c.lifecycle == "ACTIVE"
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         matched = []
         for row in rows:
             rule = rule_from_row(row)
@@ -303,19 +318,20 @@ class NotificationEngine:
             scope_id=scope_id,
             data=data or {},
         )
-        self._backend.execute(
-            "INSERT INTO notifications "
-            "(id, recipient_id, title, body, channel, status, created_at, "
-            "source_event_id, source_rule_id, scope_id, data_json, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                notification.id, notification.recipient_id,
-                notification.title, notification.body,
-                notification.channel.value, notification.status.value,
-                notification.created_at.isoformat(),
-                notification.source_event_id, notification.source_rule_id,
-                notification.scope_id, json.dumps(notification.data),
-                notification.lifecycle.name,
-            ),
+        stmt = sa.insert(notifications).values(
+            id=notification.id,
+            recipient_id=notification.recipient_id,
+            title=notification.title,
+            body=notification.body,
+            channel=notification.channel.value,
+            status=notification.status.value,
+            created_at=notification.created_at.isoformat(),
+            source_event_id=notification.source_event_id,
+            source_rule_id=notification.source_rule_id,
+            scope_id=notification.scope_id,
+            data_json=json.dumps(notification.data),
+            lifecycle=notification.lifecycle.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         return notification

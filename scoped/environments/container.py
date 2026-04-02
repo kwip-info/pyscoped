@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import EnvironmentStateError
+from scoped.storage._query import compile_for
+from scoped.storage._schema import environment_objects, environments
 from scoped.storage.interface import StorageBackend
 from scoped.types import generate_id, now_utc
 
@@ -20,8 +24,10 @@ from scoped.environments.models import (
     env_object_from_row,
     environment_from_row,
 )
+from scoped._stability import experimental
 
 
+@experimental()
 class EnvironmentContainer:
     """Manages the set of objects within an environment."""
 
@@ -56,12 +62,13 @@ class EnvironmentContainer:
             added_at=ts,
         )
 
-        self._backend.execute(
-            """INSERT INTO environment_objects
-               (id, environment_id, object_id, origin, added_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (eo.id, eo.environment_id, eo.object_id, eo.origin.value, eo.added_at.isoformat()),
+        stmt = sa.insert(environment_objects).values(
+            id=eo.id, environment_id=eo.environment_id,
+            object_id=eo.object_id, origin=eo.origin.value,
+            added_at=eo.added_at.isoformat(),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         return eo
 
     def project_in(self, env_id: str, object_id: str) -> EnvironmentObject:
@@ -78,16 +85,26 @@ class EnvironmentContainer:
         Returns ``True`` if the object was removed, ``False`` if it
         was not in the environment.
         """
-        row = self._backend.fetch_one(
-            "SELECT id FROM environment_objects WHERE environment_id = ? AND object_id = ?",
-            (env_id, object_id),
+        stmt = (
+            sa.select(environment_objects.c.id)
+            .where(
+                environment_objects.c.environment_id == env_id,
+                environment_objects.c.object_id == object_id,
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return False
-        self._backend.execute(
-            "DELETE FROM environment_objects WHERE environment_id = ? AND object_id = ?",
-            (env_id, object_id),
+        stmt = (
+            sa.delete(environment_objects)
+            .where(
+                environment_objects.c.environment_id == env_id,
+                environment_objects.c.object_id == object_id,
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         return True
 
     # ------------------------------------------------------------------
@@ -102,53 +119,66 @@ class EnvironmentContainer:
         limit: int = 1000,
     ) -> list[EnvironmentObject]:
         """List objects in an environment, optionally filtered by origin."""
+        stmt = (
+            sa.select(environment_objects)
+            .where(environment_objects.c.environment_id == env_id)
+        )
         if origin is not None:
-            rows = self._backend.fetch_all(
-                "SELECT * FROM environment_objects "
-                "WHERE environment_id = ? AND origin = ? "
-                "ORDER BY added_at ASC LIMIT ?",
-                (env_id, origin.value, limit),
-            )
-        else:
-            rows = self._backend.fetch_all(
-                "SELECT * FROM environment_objects "
-                "WHERE environment_id = ? ORDER BY added_at ASC LIMIT ?",
-                (env_id, limit),
-            )
+            stmt = stmt.where(environment_objects.c.origin == origin.value)
+        stmt = stmt.order_by(environment_objects.c.added_at.asc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [env_object_from_row(r) for r in rows]
 
     def get_created_object_ids(self, env_id: str) -> list[str]:
         """Get IDs of objects created within the environment (promotion candidates)."""
-        rows = self._backend.fetch_all(
-            "SELECT object_id FROM environment_objects "
-            "WHERE environment_id = ? AND origin = 'created'",
-            (env_id,),
+        stmt = (
+            sa.select(environment_objects.c.object_id)
+            .where(
+                environment_objects.c.environment_id == env_id,
+                environment_objects.c.origin == "created",
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [r["object_id"] for r in rows]
 
     def get_projected_object_ids(self, env_id: str) -> list[str]:
         """Get IDs of objects projected into the environment."""
-        rows = self._backend.fetch_all(
-            "SELECT object_id FROM environment_objects "
-            "WHERE environment_id = ? AND origin = 'projected'",
-            (env_id,),
+        stmt = (
+            sa.select(environment_objects.c.object_id)
+            .where(
+                environment_objects.c.environment_id == env_id,
+                environment_objects.c.origin == "projected",
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [r["object_id"] for r in rows]
 
     def contains(self, env_id: str, object_id: str) -> bool:
         """Check whether an object is in the environment."""
-        row = self._backend.fetch_one(
-            "SELECT 1 FROM environment_objects WHERE environment_id = ? AND object_id = ?",
-            (env_id, object_id),
+        stmt = (
+            sa.select(sa.literal(1))
+            .select_from(environment_objects)
+            .where(
+                environment_objects.c.environment_id == env_id,
+                environment_objects.c.object_id == object_id,
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row is not None
 
     def count(self, env_id: str) -> int:
         """Count objects in the environment."""
-        row = self._backend.fetch_one(
-            "SELECT COUNT(*) as cnt FROM environment_objects WHERE environment_id = ?",
-            (env_id,),
+        stmt = (
+            sa.select(sa.func.count().label("cnt"))
+            .select_from(environment_objects)
+            .where(environment_objects.c.environment_id == env_id)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row["cnt"] if row else 0
 
     # ------------------------------------------------------------------
@@ -157,9 +187,9 @@ class EnvironmentContainer:
 
     def _require_active(self, env_id: str) -> None:
         """Raise if environment is not active."""
-        row = self._backend.fetch_one(
-            "SELECT state FROM environments WHERE id = ?", (env_id,),
-        )
+        stmt = sa.select(environments.c.state).where(environments.c.id == env_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             from scoped.exceptions import EnvironmentNotFoundError
             raise EnvironmentNotFoundError(

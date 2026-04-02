@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import (
     ConnectorError,
     ConnectorNotApprovedError,
@@ -26,10 +28,14 @@ from scoped.connector.models import (
 from scoped.registry.base import get_registry
 from scoped.registry.kinds import RegistryKind
 from scoped.registry.sqlite_store import SQLiteRegistryStore
+from scoped.storage._query import compile_for
+from scoped.storage._schema import connector_policies, connector_traffic, connectors
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, generate_id, now_utc
+from scoped._stability import preview
 
 
+@preview()
 class ConnectorManager:
     """Manage cross-organization connectors, policies, and traffic.
 
@@ -90,16 +96,24 @@ class ConnectorManager:
             metadata=meta,
         )
 
-        self._backend.execute(
-            """INSERT INTO connectors
-               (id, name, description, local_org_id, remote_org_id, remote_endpoint,
-                state, direction, local_scope_id, created_at, created_by,
-                approved_at, approved_by, metadata_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (cid, name, description, local_org_id, remote_org_id, remote_endpoint,
-             "proposed", direction.value, None, ts.isoformat(), created_by,
-             None, None, json.dumps(meta)),
+        stmt = sa.insert(connectors).values(
+            id=cid,
+            name=name,
+            description=description,
+            local_org_id=local_org_id,
+            remote_org_id=remote_org_id,
+            remote_endpoint=remote_endpoint,
+            state="proposed",
+            direction=direction.value,
+            local_scope_id=None,
+            created_at=ts.isoformat(),
+            created_by=created_by,
+            approved_at=None,
+            approved_by=None,
+            metadata_json=json.dumps(meta),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Auto-register in registry (Invariant #1)
         try:
@@ -127,9 +141,9 @@ class ConnectorManager:
         return connector
 
     def get_connector(self, connector_id: str) -> Connector | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM connectors WHERE id = ?", (connector_id,),
-        )
+        stmt = sa.select(connectors).where(connectors.c.id == connector_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return connector_from_row(row) if row else None
 
     def get_connector_or_raise(self, connector_id: str) -> Connector:
@@ -148,20 +162,14 @@ class ConnectorManager:
         state: ConnectorState | None = None,
         limit: int = 100,
     ) -> list[Connector]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(connectors)
         if local_org_id is not None:
-            clauses.append("local_org_id = ?")
-            params.append(local_org_id)
+            stmt = stmt.where(connectors.c.local_org_id == local_org_id)
         if state is not None:
-            clauses.append("state = ?")
-            params.append(state.value)
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        params.append(limit)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM connectors{where} ORDER BY created_at DESC LIMIT ?",
-            tuple(params),
-        )
+            stmt = stmt.where(connectors.c.state == state.value)
+        stmt = stmt.order_by(connectors.c.created_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [connector_from_row(r) for r in rows]
 
     # -- State transitions -------------------------------------------------
@@ -187,19 +195,15 @@ class ConnectorManager:
             )
 
         ts = now_utc()
-        updates = ["state = ?"]
-        params: list[Any] = [target_state.value]
+        values: dict[str, Any] = {"state": target_state.value}
 
         if target_state == ConnectorState.ACTIVE and connector.approved_at is None:
-            updates.append("approved_at = ?")
-            updates.append("approved_by = ?")
-            params.extend([ts.isoformat(), actor_id])
+            values["approved_at"] = ts.isoformat()
+            values["approved_by"] = actor_id
 
-        params.append(connector_id)
-        self._backend.execute(
-            f"UPDATE connectors SET {', '.join(updates)} WHERE id = ?",
-            tuple(params),
-        )
+        stmt = sa.update(connectors).where(connectors.c.id == connector_id).values(**values)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         connector.state = target_state
         if target_state == ConnectorState.ACTIVE and connector.approved_at is None:
@@ -283,21 +287,25 @@ class ConnectorManager:
             created_by=created_by,
         )
 
-        self._backend.execute(
-            """INSERT INTO connector_policies
-               (id, connector_id, policy_type, config_json, created_at, created_by)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (pid, connector_id, policy_type.value, json.dumps(config),
-             ts.isoformat(), created_by),
+        stmt = sa.insert(connector_policies).values(
+            id=pid,
+            connector_id=connector_id,
+            policy_type=policy_type.value,
+            config_json=json.dumps(config),
+            created_at=ts.isoformat(),
+            created_by=created_by,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         return policy
 
     def get_policies(self, connector_id: str) -> list[ConnectorPolicy]:
-        rows = self._backend.fetch_all(
-            "SELECT * FROM connector_policies WHERE connector_id = ?",
-            (connector_id,),
+        stmt = sa.select(connector_policies).where(
+            connector_policies.c.connector_id == connector_id,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [policy_from_row(r) for r in rows]
 
     def check_policy(
@@ -367,15 +375,20 @@ class ConnectorManager:
             metadata=meta,
         )
 
-        self._backend.execute(
-            """INSERT INTO connector_traffic
-               (id, connector_id, direction, object_type, object_id,
-                action, timestamp, status, size_bytes, metadata_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (tid, connector_id, direction, object_type, object_id,
-             action, ts.isoformat(), status.value, size_bytes,
-             json.dumps(meta)),
+        stmt = sa.insert(connector_traffic).values(
+            id=tid,
+            connector_id=connector_id,
+            direction=direction,
+            object_type=object_type,
+            object_id=object_id,
+            action=action,
+            timestamp=ts.isoformat(),
+            status=status.value,
+            size_bytes=size_bytes,
+            metadata_json=json.dumps(meta),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             self._audit.record(
@@ -394,20 +407,14 @@ class ConnectorManager:
         direction: str | None = None,
         limit: int = 100,
     ) -> list[ConnectorTraffic]:
+        stmt = sa.select(connector_traffic).where(
+            connector_traffic.c.connector_id == connector_id,
+        )
         if direction is not None:
-            rows = self._backend.fetch_all(
-                """SELECT * FROM connector_traffic
-                   WHERE connector_id = ? AND direction = ?
-                   ORDER BY timestamp DESC LIMIT ?""",
-                (connector_id, direction, limit),
-            )
-        else:
-            rows = self._backend.fetch_all(
-                """SELECT * FROM connector_traffic
-                   WHERE connector_id = ?
-                   ORDER BY timestamp DESC LIMIT ?""",
-                (connector_id, limit),
-            )
+            stmt = stmt.where(connector_traffic.c.direction == direction)
+        stmt = stmt.order_by(connector_traffic.c.timestamp.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [traffic_from_row(r) for r in rows]
 
     # -- Sync (high-level operation) ---------------------------------------

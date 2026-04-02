@@ -200,6 +200,37 @@ class Owned(Protocol):
     def owner_id(self) -> str: ...
 
 
+@runtime_checkable
+class ScopedSerializable(Protocol):
+    """Any type that can be used as object data in pyscoped.
+
+    Implement this protocol to use custom classes (not Pydantic or
+    dataclasses) as typed object data.  The type registry auto-detects
+    this protocol when ``scoped.register_type()`` is called.
+
+    Example::
+
+        class Invoice:
+            def __init__(self, amount: float, currency: str):
+                self.amount = amount
+                self.currency = currency
+
+            def to_scoped_dict(self) -> dict:
+                return {"amount": self.amount, "currency": self.currency}
+
+            @classmethod
+            def from_scoped_dict(cls, data: dict) -> "Invoice":
+                return cls(amount=data["amount"], currency=data["currency"])
+
+        scoped.register_type("invoice", Invoice)
+    """
+
+    def to_scoped_dict(self) -> dict[str, Any]: ...
+
+    @classmethod
+    def from_scoped_dict(cls, data: dict[str, Any]) -> ScopedSerializable: ...
+
+
 # ---------------------------------------------------------------------------
 # Generic metadata bag
 # ---------------------------------------------------------------------------

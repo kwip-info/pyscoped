@@ -17,10 +17,14 @@ window before allowing an action.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.rules.models import Rule, RuleType
+from scoped.storage._query import compile_for
+from scoped.storage._schema import audit_trail
 from scoped.storage.interface import StorageBackend
 from scoped.types import now_utc
 
@@ -172,19 +176,15 @@ class RateLimitChecker:
         cutoff = now_utc() - timedelta(seconds=window_seconds)
         cutoff_iso = cutoff.isoformat()
 
-        clauses = ["action = ?", "timestamp >= ?"]
-        params: list[Any] = [action, cutoff_iso]
-
-        if principal_id is not None:
-            clauses.append("actor_id = ?")
-            params.append(principal_id)
-        if scope_id is not None:
-            clauses.append("scope_id = ?")
-            params.append(scope_id)
-
-        where = " AND ".join(clauses)
-        row = self._backend.fetch_one(
-            f"SELECT COUNT(*) AS cnt FROM audit_trail WHERE {where}",
-            tuple(params),
+        stmt = sa.select(sa.func.count().label("cnt")).select_from(audit_trail).where(
+            audit_trail.c.action == action,
+            audit_trail.c.timestamp >= cutoff_iso,
         )
+        if principal_id is not None:
+            stmt = stmt.where(audit_trail.c.actor_id == principal_id)
+        if scope_id is not None:
+            stmt = stmt.where(audit_trail.c.scope_id == scope_id)
+
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row["cnt"] if row else 0

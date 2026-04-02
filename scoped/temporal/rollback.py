@@ -12,10 +12,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.audit.models import TraceEntry
 from scoped.audit.query import AuditQuery
 from scoped.audit.writer import AuditWriter
 from scoped.exceptions import RollbackDeniedError, RollbackFailedError
+from scoped.storage._query import compile_for
+from scoped.storage._schema import scoped_objects
 from scoped.storage.interface import StorageBackend
 from scoped.temporal.constraints import RollbackConstraintChecker
 from scoped.types import ActionType
@@ -320,16 +324,22 @@ class RollbackExecutor:
             # Restore object's current_version to the version before the change
             before_version = entry.before_state.get("current_version")
             if before_version is not None:
-                self._backend.execute(
-                    "UPDATE scoped_objects SET current_version = ? WHERE id = ?",
-                    (before_version, entry.target_id),
+                stmt = (
+                    sa.update(scoped_objects)
+                    .where(scoped_objects.c.id == entry.target_id)
+                    .values(current_version=before_version)
                 )
+                sql, params = compile_for(stmt, self._backend.dialect)
+                self._backend.execute(sql, params)
         elif entry.target_type == "object" and entry.before_state is None:
             # Rolling back a create — tombstone the object
-            self._backend.execute(
-                "UPDATE scoped_objects SET lifecycle = ? WHERE id = ?",
-                ("ARCHIVED", entry.target_id),
+            stmt = (
+                sa.update(scoped_objects)
+                .where(scoped_objects.c.id == entry.target_id)
+                .values(lifecycle="ARCHIVED")
             )
+            sql, params = compile_for(stmt, self._backend.dialect)
+            self._backend.execute(sql, params)
 
     def _collect_descendants(self, parent_id: str) -> list[TraceEntry]:
         """BFS to collect all descendant trace entries."""

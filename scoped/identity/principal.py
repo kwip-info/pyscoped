@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import (
     IdentityError,
     PrincipalNotFoundError,
@@ -18,6 +20,8 @@ from scoped.exceptions import (
 from scoped.registry.base import Registry, RegistryEntry, get_registry
 from scoped.registry.kinds import RegistryKind
 from scoped.registry.sqlite_store import SQLiteRegistryStore
+from scoped.storage._query import compile_for
+from scoped.storage._schema import principal_relationships, principals
 from scoped.types import ActionType, Lifecycle, Metadata, generate_id, now_utc
 
 
@@ -155,22 +159,20 @@ class PrincipalStore:
             metadata=Metadata(data=metadata or {}),
         )
 
+        stmt = sa.insert(principals).values(
+            id=principal.id,
+            kind=principal.kind,
+            display_name=principal.display_name,
+            registry_entry_id=principal.registry_entry_id,
+            created_at=principal.created_at.isoformat(),
+            created_by=principal.created_by,
+            lifecycle=principal.lifecycle.name,
+            metadata_json=json.dumps(principal.metadata.snapshot()),
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+
         with self._backend.transaction() as txn:
-            txn.execute(
-                """INSERT INTO principals
-                   (id, kind, display_name, registry_entry_id, created_at, created_by, lifecycle, metadata_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    principal.id,
-                    principal.kind,
-                    principal.display_name,
-                    principal.registry_entry_id,
-                    principal.created_at.isoformat(),
-                    principal.created_by,
-                    principal.lifecycle.name,
-                    json.dumps(principal.metadata.snapshot()),
-                ),
-            )
+            txn.execute(sql, params)
             txn.commit()
 
         if self._audit is not None:
@@ -189,9 +191,9 @@ class PrincipalStore:
 
     def get_principal(self, principal_id: str) -> Principal:
         """Fetch a principal by ID.  Raises PrincipalNotFoundError if missing."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM principals WHERE id = ?", (principal_id,)
-        )
+        stmt = sa.select(principals).where(principals.c.id == principal_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             raise PrincipalNotFoundError(
                 f"Principal not found: {principal_id}",
@@ -201,9 +203,9 @@ class PrincipalStore:
 
     def find_principal(self, principal_id: str) -> Principal | None:
         """Like get_principal but returns None instead of raising."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM principals WHERE id = ?", (principal_id,)
-        )
+        stmt = sa.select(principals).where(principals.c.id == principal_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return self._row_to_principal(row) if row else None
 
     def list_principals(
@@ -213,31 +215,29 @@ class PrincipalStore:
         lifecycle: Lifecycle | None = None,
     ) -> list[Principal]:
         """List principals with optional filters."""
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(principals)
 
         if kind is not None:
-            clauses.append("kind = ?")
-            params.append(kind)
+            stmt = stmt.where(principals.c.kind == kind)
         if lifecycle is not None:
-            clauses.append("lifecycle = ?")
-            params.append(lifecycle.name)
+            stmt = stmt.where(principals.c.lifecycle == lifecycle.name)
 
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM principals{where}", tuple(params)
-        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [self._row_to_principal(r) for r in rows]
 
     def update_lifecycle(self, principal_id: str, new_lifecycle: Lifecycle) -> Principal:
         """Transition a principal's lifecycle state."""
         principal = self.get_principal(principal_id)
         old_lifecycle = principal.lifecycle.name
+
+        stmt = sa.update(principals).where(principals.c.id == principal_id).values(
+            lifecycle=new_lifecycle.name,
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+
         with self._backend.transaction() as txn:
-            txn.execute(
-                "UPDATE principals SET lifecycle = ? WHERE id = ?",
-                (new_lifecycle.name, principal_id),
-            )
+            txn.execute(sql, params)
             txn.commit()
         principal.lifecycle = new_lifecycle
 
@@ -269,31 +269,27 @@ class PrincipalStore:
         before = {}
         after = {}
 
-        sets: list[str] = []
-        params: list[Any] = []
+        values: dict[str, Any] = {}
 
         if display_name is not None and display_name != principal.display_name:
-            sets.append("display_name = ?")
-            params.append(display_name)
+            values["display_name"] = display_name
             before["display_name"] = principal.display_name
             after["display_name"] = display_name
 
         if metadata is not None:
             merged = {**principal.metadata.snapshot(), **metadata}
-            sets.append("metadata_json = ?")
-            params.append(json.dumps(merged))
+            values["metadata_json"] = json.dumps(merged)
             before["metadata"] = principal.metadata.snapshot()
             after["metadata"] = merged
 
-        if not sets:
+        if not values:
             return principal
 
-        params.append(principal_id)
+        stmt = sa.update(principals).where(principals.c.id == principal_id).values(**values)
+        sql, params = compile_for(stmt, self._backend.dialect)
+
         with self._backend.transaction() as txn:
-            txn.execute(
-                f"UPDATE principals SET {', '.join(sets)} WHERE id = ?",
-                tuple(params),
-            )
+            txn.execute(sql, params)
             txn.commit()
 
         if self._audit is not None:
@@ -337,32 +333,32 @@ class PrincipalStore:
             metadata=Metadata(data=metadata or {}),
         )
 
+        stmt = sa.insert(principal_relationships).values(
+            id=rel.id,
+            parent_id=rel.parent_id,
+            child_id=rel.child_id,
+            relationship=rel.relationship,
+            created_at=rel.created_at.isoformat(),
+            created_by=rel.created_by,
+            metadata_json=json.dumps(rel.metadata.snapshot()),
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+
         with self._backend.transaction() as txn:
-            txn.execute(
-                """INSERT INTO principal_relationships
-                   (id, parent_id, child_id, relationship, created_at, created_by, metadata_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    rel.id,
-                    rel.parent_id,
-                    rel.child_id,
-                    rel.relationship,
-                    rel.created_at.isoformat(),
-                    rel.created_by,
-                    json.dumps(rel.metadata.snapshot()),
-                ),
-            )
+            txn.execute(sql, params)
             txn.commit()
 
         return rel
 
     def remove_relationship(self, relationship_id: str) -> None:
         """Remove a relationship by ID."""
+        stmt = sa.delete(principal_relationships).where(
+            principal_relationships.c.id == relationship_id
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+
         with self._backend.transaction() as txn:
-            txn.execute(
-                "DELETE FROM principal_relationships WHERE id = ?",
-                (relationship_id,),
-            )
+            txn.execute(sql, params)
             txn.commit()
 
     def get_relationships(
@@ -381,29 +377,23 @@ class PrincipalStore:
         results: list[PrincipalRelationship] = []
 
         if direction in ("parent", "both"):
-            clauses = ["child_id = ?"]
-            params: list[Any] = [principal_id]
-            if relationship:
-                clauses.append("relationship = ?")
-                params.append(relationship)
-            where = " AND ".join(clauses)
-            rows = self._backend.fetch_all(
-                f"SELECT * FROM principal_relationships WHERE {where}",
-                tuple(params),
+            stmt = sa.select(principal_relationships).where(
+                principal_relationships.c.child_id == principal_id
             )
+            if relationship:
+                stmt = stmt.where(principal_relationships.c.relationship == relationship)
+            sql, params = compile_for(stmt, self._backend.dialect)
+            rows = self._backend.fetch_all(sql, params)
             results.extend(self._row_to_relationship(r) for r in rows)
 
         if direction in ("child", "both"):
-            clauses = ["parent_id = ?"]
-            params = [principal_id]
-            if relationship:
-                clauses.append("relationship = ?")
-                params.append(relationship)
-            where = " AND ".join(clauses)
-            rows = self._backend.fetch_all(
-                f"SELECT * FROM principal_relationships WHERE {where}",
-                tuple(params),
+            stmt = sa.select(principal_relationships).where(
+                principal_relationships.c.parent_id == principal_id
             )
+            if relationship:
+                stmt = stmt.where(principal_relationships.c.relationship == relationship)
+            sql, params = compile_for(stmt, self._backend.dialect)
+            rows = self._backend.fetch_all(sql, params)
             results.extend(self._row_to_relationship(r) for r in rows)
 
         return results

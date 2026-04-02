@@ -70,3 +70,17 @@ def _initialize_backend():
     backend = get_backend()
     backend.initialize()
     get_client()
+
+
+# Lazy imports for convenience — avoids circular import at module load time.
+def __getattr__(name: str):
+    if name == "ScopedModel":
+        from scoped.contrib.django.models import ScopedModel
+        return ScopedModel
+    if name == "ScopedDjangoManager":
+        from scoped.contrib.django.models import ScopedDjangoManager
+        return ScopedDjangoManager
+    if name == "scoped_context_for":
+        from scoped.contrib.django.models import scoped_context_for
+        return scoped_context_for
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

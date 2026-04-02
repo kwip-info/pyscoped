@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyscoped"
-version = "0.6.2"
+version = "0.7.0"
 description = "Universal object-isolation and tenancy-scoping framework"
 readme = "README.md"
 license = {text = "MIT"}
@@ -20,7 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
-dependencies = ["pydantic>=2.0"]
+dependencies = ["pydantic>=2.0", "sqlalchemy>=2.0"]
 
 [project.urls]
 Homepage = "https://github.com/kwip-info/pyscoped"

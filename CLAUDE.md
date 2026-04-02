@@ -117,6 +117,8 @@ versions(object_id, *, principal_id=None, limit=None, offset=0) -> list[ObjectVe
 
 `order_by` supports `-` prefix for descending: `"-created_at"`, `"object_type"`.
 
+`data` accepts either `dict[str, Any]` or a registered typed instance (Pydantic model, dataclass, or `ScopedSerializable`). Typed instances are auto-serialized. `ObjectVersion.typed_data` deserializes back to the registered type.
+
 ### scoped.scopes
 
 ```python
@@ -276,6 +278,16 @@ scoped.init(database_url="postgresql://user:pass@host/db")
 ```
 Features: connection pooling (psycopg v3 + psycopg_pool), tsvector full-text search, RLS support.
 
+### SQLAlchemy Core backends (new in 0.7.0)
+Drop-in replacements that use SQLAlchemy Core for connection management and schema creation:
+```python
+from scoped.storage.sa_sqlite import SASQLiteBackend
+from scoped.storage.sa_postgres import SAPostgresBackend
+
+backend = SASQLiteBackend(":memory:")           # or SASQLiteBackend("/path/to/db.sqlite3")
+backend = SAPostgresBackend("postgresql://user:pass@host/db", pool_size=5, enable_rls=True)
+```
+
 ### StorageBackend interface
 ```python
 class StorageBackend(ABC):
@@ -289,6 +301,18 @@ class StorageBackend(ABC):
     table_exists(table_name) -> bool
 ```
 
+### SQLAlchemy Core query building
+All 16 layers build queries using SQLAlchemy Core constructs compiled to raw SQL via `compile_for()`:
+```python
+from scoped.storage._schema import principals
+from scoped.storage._query import compile_for
+
+stmt = sa.select(principals).where(principals.c.id == principal_id)
+sql, params = compile_for(stmt, backend.dialect)
+row = backend.fetch_one(sql, params)
+```
+Tables defined in `scoped.storage._schema` (63 `sa.Table` objects). `compile_for(stmt, dialect)` returns `(sql_string, params_tuple)`. `dialect_insert(table, dialect)` returns dialect-aware INSERT with `on_conflict_do_update()` support.
+
 ## Framework Integrations
 
 ### Django
@@ -300,6 +324,24 @@ SCOPED_PRINCIPAL_RESOLVER = "myapp.resolvers.resolve_principal"
 SCOPED_EXEMPT_PATHS = ["/admin/", "/health/"]
 ```
 Supports sync and async views (Django 4.1+).
+
+### Django ScopedModel (new in 0.7.0)
+Abstract base model that auto-syncs with pyscoped's object layer:
+```python
+from scoped.contrib.django.models import ScopedModel
+
+class Invoice(ScopedModel):
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    currency = models.CharField(max_length=3)
+
+    class ScopedMeta:
+        object_type = "invoice"
+        scoped_fields = ["amount", "currency"]  # None = all fields
+```
+- `save()` atomically persists to Django + creates/updates ScopedObject
+- `delete()` atomically tombstones + deletes Django row
+- `Invoice.scoped_objects.for_principal(pid)` filters by pyscoped visibility
+- `scoped_context_for(principal_id)` context manager for management commands/Celery
 
 ### Django REST Framework
 ```python
@@ -463,7 +505,50 @@ class MyTest(ScopedTestCase):
             doc, _ = self.create_object("invoice", data={...})
 ```
 
-pytest fixtures via conftest: `sqlite_backend`, `storage_backend` (parametrized SQLite + Postgres), `registry`.
+pytest fixtures via conftest: `sqlite_backend`, `sa_sqlite_backend`, `storage_backend` (parametrized SQLite + SA SQLite + Postgres), `registry`.
+
+## Typed Object Protocol
+
+Register types for auto-serialization/deserialization of versioned object data:
+```python
+from pydantic import BaseModel
+import scoped
+
+class Invoice(BaseModel):
+    amount: float
+    currency: str
+    status: str = "draft"
+
+scoped.register_type("invoice", Invoice)
+
+# Create with typed data (auto-serializes)
+doc, v1 = scoped.objects.create("invoice", data=Invoice(amount=500, currency="USD"))
+
+# Read with typed access
+versions = scoped.objects.versions(doc.id)
+invoice = versions[0].typed_data  # Invoice(amount=500, ...)
+
+# Dict path still works (backward compatible)
+doc, v2 = scoped.objects.create("invoice", data={"amount": 500, "currency": "USD"})
+```
+
+Supported types: Pydantic `BaseModel`, `@dataclass`, `ScopedSerializable` protocol. Type registry is thread-safe.
+
+## Stability Markers
+
+APIs decorated with `@experimental` or `@preview` emit a one-time warning on first use:
+```python
+from scoped._stability import experimental, preview, stable, get_stability_level
+
+@experimental(reason="API surface may change")
+class MyService: ...
+
+@preview(reason="Nearing stable, feedback welcome")
+class MyConnector: ...
+```
+- `ExperimentalAPIWarning(FutureWarning)` — Layers 8-16 (environments, flow, deployments, secrets, integrations, events, notifications, scheduling)
+- `PreviewAPIWarning(FutureWarning)` — Layer 13 connector/marketplace
+- Suppress via `warnings.filterwarnings("ignore", category=ExperimentalAPIWarning)`
 
 ## Project Structure
 
@@ -471,9 +556,12 @@ pytest fixtures via conftest: `sqlite_backend`, `storage_backend` (parametrized 
 scoped/
   __init__.py              # Module-level proxy after scoped.init()
   client.py                # ScopedClient + init() + URL parsing
-  types.py                 # Lifecycle, ActionType, URN, protocols
+  types.py                 # Lifecycle, ActionType, URN, ScopedSerializable protocol
   exceptions.py            # Exception hierarchy (40+ classes)
   logging.py               # Structured JSON logging
+  _stability.py            # @experimental, @preview, @stable decorators
+  _type_registry.py        # Typed Object Protocol — register_type, serialize, deserialize
+  _type_adapters.py        # Pydantic, dataclass, ScopedSerializable adapters
   _namespaces/             # Simplified API (principals, objects, scopes, audit, secrets)
   identity/                # Layer 2: Principals + ScopedContext
   registry/                # Layer 1: URN registration
@@ -482,22 +570,27 @@ scoped/
   rules/                   # Layer 5: Policy engine + rate limiting
   audit/                   # Layer 6: Hash-chained trail (writer + query)
   temporal/                # Layer 7: Rollback + reconstruction
-  environments/            # Layer 8: Ephemeral workspaces
-  flow/                    # Layer 9: Pipelines + promotions
-  deployments/             # Layer 10: External graduation
-  secrets/                 # Layer 11: Encrypted vault
-  integrations/            # Layer 12: Plugin lifecycle
-  connector/               # Layer 13: Federation + marketplace
-  events/                  # Layer 14: Event bus + webhooks
-  notifications/           # Layer 15: Notification engine
-  scheduling/              # Layer 16: Scheduler + job queue
+  environments/            # Layer 8: Ephemeral workspaces (@experimental)
+  flow/                    # Layer 9: Pipelines + promotions (@experimental)
+  deployments/             # Layer 10: External graduation (@experimental)
+  secrets/                 # Layer 11: Encrypted vault (@experimental)
+  integrations/            # Layer 12: Plugin lifecycle (@experimental)
+  connector/               # Layer 13: Federation + marketplace (@preview)
+  events/                  # Layer 14: Event bus + webhooks (@experimental)
+  notifications/           # Layer 15: Notification engine (@experimental)
+  scheduling/              # Layer 16: Scheduler + job queue (@experimental)
   storage/                 # Backend abstraction (SQLite, Postgres, TenantRouter)
-    migrations/            # Schema migrations (m0001–m0013)
+    _schema.py             # 63 SQLAlchemy Core Table definitions for query building
+    _query.py              # compile_for(), dialect_insert() — SA Core → raw SQL bridge
+    sa_sqlite.py           # SASQLiteBackend (SQLAlchemy Core-backed)
+    sa_postgres.py         # SAPostgresBackend (SQLAlchemy Core-backed)
+    migrations/            # Schema migrations (m0001–m0014)
     tenant_router.py       # Database-per-tenant routing
   sync/                    # Management plane sync agent
   compliance/              # Invariant validation
   contrib/                 # Framework adapters
-    django/                # Middleware, DRF integration, management commands
+    django/                # Middleware, DRF, ScopedModel, management commands
+      models.py            # ScopedModel, ScopedQuerySet, ScopedDjangoManager
     fastapi/               # Middleware, dependencies, router
     flask/                 # Extension, admin blueprint
     mcp/                   # MCP server tools + resources

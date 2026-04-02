@@ -213,6 +213,98 @@ urlpatterns = [
 ]
 ```
 
+## ScopedModel — Django ORM Integration
+
+`ScopedModel` is an abstract Django model base class that automatically syncs with
+pyscoped's object layer. Every `save()` and `delete()` creates/updates/tombstones the
+corresponding `ScopedObject` with full versioning and audit trail.
+
+### Define a Model
+
+```python
+from django.db import models
+from scoped.contrib.django.models import ScopedModel
+
+class Invoice(ScopedModel):
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    currency = models.CharField(max_length=3)
+    status = models.CharField(max_length=20, default="draft")
+
+    class ScopedMeta:
+        object_type = "invoice"               # Required
+        scoped_fields = ["amount", "currency", "status"]  # None = all fields
+```
+
+The model inherits two extra fields:
+- `scoped_object_id` — links to the pyscoped `ScopedObject`
+- `scoped_owner_id` — the owning principal's ID
+
+### How save() works
+
+```python
+with scoped.as_principal(alice):
+    inv = Invoice(amount=500, currency="USD")
+    inv.save()
+    # 1. Django persists the row (INSERT)
+    # 2. pyscoped creates a ScopedObject + ObjectVersion
+    # 3. scoped_object_id and scoped_owner_id are populated
+
+    inv.amount = 600
+    inv.save()
+    # 1. Django updates the row
+    # 2. pyscoped creates a new ObjectVersion (version 2)
+```
+
+Both operations run inside `transaction.atomic()` — if the pyscoped write fails,
+the Django write rolls back too.
+
+### How delete() works
+
+```python
+inv.delete()
+# 1. pyscoped tombstones the ScopedObject
+# 2. Django deletes the row
+```
+
+### Querying with visibility
+
+```python
+# Standard Django manager (no scoped filtering)
+Invoice.objects.all()
+
+# Scoped manager — filters to objects visible to the principal
+Invoice.scoped_objects.for_principal(alice.id)
+```
+
+`for_principal()` queries pyscoped's visibility engine (owner + scope projections).
+Falls back to `scoped_owner_id` filtering when no pyscoped client is configured.
+
+### Field Serialization
+
+`_to_scoped_dict()` auto-serializes Django field types:
+
+| Field Type | Serialized As |
+|---|---|
+| `DecimalField` | `str` (e.g. `"99.95"`) |
+| `DateTimeField` | ISO 8601 string |
+| `UUIDField` | `str` |
+| `ForeignKey` | `str(pk)` |
+| All others | Value as-is |
+
+Fields excluded: `pk`, `id`, `scoped_object_id`, `scoped_owner_id`.
+
+### Context Helper for Non-HTTP Code
+
+```python
+from scoped.contrib.django.models import scoped_context_for
+
+# In management commands, Celery tasks, etc.
+with scoped_context_for("user-123"):
+    Invoice(amount=100, currency="USD").save()
+```
+
+---
+
 ## Management Commands
 
 The Django contrib app registers three management commands.

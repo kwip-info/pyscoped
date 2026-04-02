@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.connector.marketplace.models import (
     ListingType,
     MarketplaceInstall,
@@ -14,10 +16,14 @@ from scoped.connector.marketplace.models import (
     listing_from_row,
 )
 from scoped.exceptions import ListingNotFoundError, MarketplaceError
+from scoped.storage._query import compile_for
+from scoped.storage._schema import marketplace_installs, marketplace_listings
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, generate_id, now_utc
+from scoped._stability import preview
 
 
+@preview()
 class MarketplaceDiscovery:
     """Search, filter, browse, and install marketplace listings."""
 
@@ -39,21 +45,19 @@ class MarketplaceDiscovery:
         limit: int = 50,
     ) -> list[MarketplaceListing]:
         """Browse marketplace listings."""
-        clauses: list[str] = ["visibility = ?"]
-        params: list[Any] = [visibility.value]
-
-        if listing_type is not None:
-            clauses.append("listing_type = ?")
-            params.append(listing_type.value)
-        if active_only:
-            clauses.append("lifecycle = 'ACTIVE'")
-
-        where = " WHERE " + " AND ".join(clauses)
-        params.append(limit)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM marketplace_listings{where} ORDER BY download_count DESC, published_at DESC LIMIT ?",
-            tuple(params),
+        stmt = sa.select(marketplace_listings).where(
+            marketplace_listings.c.visibility == visibility.value,
         )
+        if listing_type is not None:
+            stmt = stmt.where(marketplace_listings.c.listing_type == listing_type.value)
+        if active_only:
+            stmt = stmt.where(marketplace_listings.c.lifecycle == "ACTIVE")
+        stmt = stmt.order_by(
+            marketplace_listings.c.download_count.desc(),
+            marketplace_listings.c.published_at.desc(),
+        ).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [listing_from_row(r) for r in rows]
 
     def search(
@@ -65,25 +69,20 @@ class MarketplaceDiscovery:
         limit: int = 50,
     ) -> list[MarketplaceListing]:
         """Search listings by name or description."""
-        clauses = ["(name LIKE ? OR description LIKE ?)"]
         pattern = f"%{query}%"
-        params: list[Any] = [pattern, pattern]
-
-        if listing_type is not None:
-            clauses.append("listing_type = ?")
-            params.append(listing_type.value)
-        if active_only:
-            clauses.append("lifecycle = 'ACTIVE'")
-
-        # Public and unlisted are searchable; private are not
-        clauses.append("visibility != 'private'")
-
-        where = " WHERE " + " AND ".join(clauses)
-        params.append(limit)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM marketplace_listings{where} ORDER BY download_count DESC LIMIT ?",
-            tuple(params),
+        stmt = sa.select(marketplace_listings).where(
+            (marketplace_listings.c.name.like(pattern))
+            | (marketplace_listings.c.description.like(pattern)),
         )
+        if listing_type is not None:
+            stmt = stmt.where(marketplace_listings.c.listing_type == listing_type.value)
+        if active_only:
+            stmt = stmt.where(marketplace_listings.c.lifecycle == "ACTIVE")
+        # Public and unlisted are searchable; private are not
+        stmt = stmt.where(marketplace_listings.c.visibility != "private")
+        stmt = stmt.order_by(marketplace_listings.c.download_count.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [listing_from_row(r) for r in rows]
 
     def get_by_publisher(
@@ -93,10 +92,11 @@ class MarketplaceDiscovery:
         limit: int = 100,
     ) -> list[MarketplaceListing]:
         """Get all listings by a specific publisher."""
-        rows = self._backend.fetch_all(
-            "SELECT * FROM marketplace_listings WHERE publisher_id = ? ORDER BY published_at DESC LIMIT ?",
-            (publisher_id, limit),
-        )
+        stmt = sa.select(marketplace_listings).where(
+            marketplace_listings.c.publisher_id == publisher_id,
+        ).order_by(marketplace_listings.c.published_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [listing_from_row(r) for r in rows]
 
     def install(
@@ -114,9 +114,11 @@ class MarketplaceDiscovery:
         Increments the listing's download count.
         """
         # Verify listing exists and is active
-        row = self._backend.fetch_one(
-            "SELECT * FROM marketplace_listings WHERE id = ?", (listing_id,),
+        stmt = sa.select(marketplace_listings).where(
+            marketplace_listings.c.id == listing_id,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             raise ListingNotFoundError(
                 f"Listing {listing_id} not found",
@@ -144,20 +146,27 @@ class MarketplaceDiscovery:
             result_type=result_type,
         )
 
-        self._backend.execute(
-            """INSERT INTO marketplace_installs
-               (id, listing_id, installer_id, installed_at, version,
-                config_json, result_ref, result_type)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (iid, listing_id, installer_id, ts.isoformat(), listing.version,
-             json.dumps(cfg), result_ref, result_type),
+        stmt = sa.insert(marketplace_installs).values(
+            id=iid,
+            listing_id=listing_id,
+            installer_id=installer_id,
+            installed_at=ts.isoformat(),
+            version=listing.version,
+            config_json=json.dumps(cfg),
+            result_ref=result_ref,
+            result_type=result_type,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Increment download count
-        self._backend.execute(
-            "UPDATE marketplace_listings SET download_count = download_count + 1 WHERE id = ?",
-            (listing_id,),
+        stmt = sa.update(marketplace_listings).where(
+            marketplace_listings.c.id == listing_id,
+        ).values(
+            download_count=marketplace_listings.c.download_count + 1,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             self._audit.record(
@@ -176,10 +185,11 @@ class MarketplaceDiscovery:
         limit: int = 100,
     ) -> list[MarketplaceInstall]:
         """Get all installs for a listing."""
-        rows = self._backend.fetch_all(
-            "SELECT * FROM marketplace_installs WHERE listing_id = ? ORDER BY installed_at DESC LIMIT ?",
-            (listing_id, limit),
-        )
+        stmt = sa.select(marketplace_installs).where(
+            marketplace_installs.c.listing_id == listing_id,
+        ).order_by(marketplace_installs.c.installed_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [install_from_row(r) for r in rows]
 
     def get_installs_by_user(
@@ -189,8 +199,9 @@ class MarketplaceDiscovery:
         limit: int = 100,
     ) -> list[MarketplaceInstall]:
         """Get all installs by a specific user."""
-        rows = self._backend.fetch_all(
-            "SELECT * FROM marketplace_installs WHERE installer_id = ? ORDER BY installed_at DESC LIMIT ?",
-            (installer_id, limit),
-        )
+        stmt = sa.select(marketplace_installs).where(
+            marketplace_installs.c.installer_id == installer_id,
+        ).order_by(marketplace_installs.c.installed_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [install_from_row(r) for r in rows]

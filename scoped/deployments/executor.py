@@ -11,7 +11,11 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+import sqlalchemy as sa
+
 from scoped.exceptions import DeploymentError, DeploymentGateFailedError
+from scoped.storage._query import compile_for
+from scoped.storage._schema import deployment_gates, deployment_targets, deployments
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, generate_id, now_utc
 
@@ -22,8 +26,10 @@ from scoped.deployments.models import (
     deployment_from_row,
     target_from_row,
 )
+from scoped._stability import experimental
 
 
+@experimental()
 class DeploymentExecutor:
     """Create and manage deployments and their targets."""
 
@@ -56,13 +62,14 @@ class DeploymentExecutor:
             owner_id=owner_id,
             created_at=ts,
         )
-        self._backend.execute(
-            """INSERT INTO deployment_targets
-               (id, name, target_type, config_json, owner_id, created_at, lifecycle)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (tid, name, target_type, json.dumps(target.config),
-             owner_id, ts.isoformat(), "ACTIVE"),
+        stmt = sa.insert(deployment_targets).values(
+            id=tid, name=name, target_type=target_type,
+            config_json=json.dumps(target.config),
+            owner_id=owner_id, created_at=ts.isoformat(),
+            lifecycle="ACTIVE",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             self._audit.record(
@@ -76,9 +83,9 @@ class DeploymentExecutor:
         return target
 
     def get_target(self, target_id: str) -> DeploymentTarget | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM deployment_targets WHERE id = ?", (target_id,),
-        )
+        stmt = sa.select(deployment_targets).where(deployment_targets.c.id == target_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return target_from_row(row) if row else None
 
     def list_targets(
@@ -88,26 +95,24 @@ class DeploymentExecutor:
         active_only: bool = True,
         limit: int = 100,
     ) -> list[DeploymentTarget]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(deployment_targets)
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
+            stmt = stmt.where(deployment_targets.c.owner_id == owner_id)
         if active_only:
-            clauses.append("lifecycle = 'ACTIVE'")
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        params.append(limit)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM deployment_targets{where} ORDER BY created_at DESC LIMIT ?",
-            tuple(params),
-        )
+            stmt = stmt.where(deployment_targets.c.lifecycle == "ACTIVE")
+        stmt = stmt.order_by(deployment_targets.c.created_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [target_from_row(r) for r in rows]
 
     def archive_target(self, target_id: str, *, archived_by: str | None = None) -> None:
-        self._backend.execute(
-            "UPDATE deployment_targets SET lifecycle = 'ARCHIVED' WHERE id = ?",
-            (target_id,),
+        stmt = (
+            sa.update(deployment_targets)
+            .where(deployment_targets.c.id == target_id)
+            .values(lifecycle="ARCHIVED")
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None and archived_by is not None:
             self._audit.record(
@@ -133,10 +138,12 @@ class DeploymentExecutor:
     ) -> Deployment:
         """Create a new deployment in PENDING state."""
         # Compute version number for this target
-        row = self._backend.fetch_one(
-            "SELECT COALESCE(MAX(version), 0) as max_v FROM deployments WHERE target_id = ?",
-            (target_id,),
+        stmt = (
+            sa.select(sa.func.coalesce(sa.func.max(deployments.c.version), 0).label("max_v"))
+            .where(deployments.c.target_id == target_id)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         next_version = (row["max_v"] if row else 0) + 1
 
         ts = now_utc()
@@ -152,15 +159,15 @@ class DeploymentExecutor:
             rollback_of=rollback_of,
             metadata=metadata or {},
         )
-        self._backend.execute(
-            """INSERT INTO deployments
-               (id, target_id, object_id, scope_id, version, state,
-                deployed_by, rollback_of, metadata_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (did, target_id, object_id, scope_id, next_version,
-             DeploymentState.PENDING.value, deployed_by, rollback_of,
-             json.dumps(dep.metadata)),
+        stmt = sa.insert(deployments).values(
+            id=did, target_id=target_id, object_id=object_id,
+            scope_id=scope_id, version=next_version,
+            state=DeploymentState.PENDING.value,
+            deployed_by=deployed_by, rollback_of=rollback_of,
+            metadata_json=json.dumps(dep.metadata),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             self._audit.record(
@@ -174,9 +181,9 @@ class DeploymentExecutor:
         return dep
 
     def get_deployment(self, deployment_id: str) -> Deployment | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM deployments WHERE id = ?", (deployment_id,),
-        )
+        stmt = sa.select(deployments).where(deployments.c.id == deployment_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return deployment_from_row(row) if row else None
 
     def list_deployments(
@@ -186,20 +193,14 @@ class DeploymentExecutor:
         state: DeploymentState | None = None,
         limit: int = 100,
     ) -> list[Deployment]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(deployments)
         if target_id is not None:
-            clauses.append("target_id = ?")
-            params.append(target_id)
+            stmt = stmt.where(deployments.c.target_id == target_id)
         if state is not None:
-            clauses.append("state = ?")
-            params.append(state.value)
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        params.append(limit)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM deployments{where} ORDER BY version DESC LIMIT ?",
-            tuple(params),
-        )
+            stmt = stmt.where(deployments.c.state == state.value)
+        stmt = stmt.order_by(deployments.c.version.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [deployment_from_row(r) for r in rows]
 
     def transition_state(
@@ -226,20 +227,20 @@ class DeploymentExecutor:
 
         before = dep.snapshot()
         dep.state = new_state
-        updates = ["state = ?"]
-        params: list[Any] = [new_state.value]
+        values: dict[str, Any] = {"state": new_state.value}
 
         if new_state == DeploymentState.DEPLOYED:
             ts = now_utc()
             dep.deployed_at = ts
-            updates.append("deployed_at = ?")
-            params.append(ts.isoformat())
+            values["deployed_at"] = ts.isoformat()
 
-        params.append(deployment_id)
-        self._backend.execute(
-            f"UPDATE deployments SET {', '.join(updates)} WHERE id = ?",
-            tuple(params),
+        stmt = (
+            sa.update(deployments)
+            .where(deployments.c.id == deployment_id)
+            .values(**values)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None and actor_id is not None:
             self._audit.record(
@@ -280,10 +281,12 @@ class DeploymentExecutor:
             )
 
         # Check gates
-        gates = self._backend.fetch_all(
-            "SELECT * FROM deployment_gates WHERE deployment_id = ?",
-            (deployment_id,),
+        stmt = (
+            sa.select(deployment_gates)
+            .where(deployment_gates.c.deployment_id == deployment_id)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        gates = self._backend.fetch_all(sql, params)
         if gates:
             failed = [g for g in gates if not g["passed"]]
             if failed:

@@ -351,6 +351,124 @@ client = ScopedClient(backend=backend)
 
 ---
 
+## SASQLiteBackend
+
+```python
+from scoped.storage.sa_sqlite import SASQLiteBackend
+```
+
+SQLAlchemy Core-backed SQLite storage. Drop-in replacement for `SQLiteBackend` that
+uses SQLAlchemy for connection management, schema creation, and parameter binding.
+
+### Constructor
+
+```python
+SASQLiteBackend(path: str = ":memory:")
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `path` | `str` | `":memory:"` | File path for the SQLite database. Use `":memory:"` for in-memory. |
+
+### Key Differences from SQLiteBackend
+
+- Schema created via `metadata.create_all(engine)` instead of inline DDL
+- Uses `StaticPool` for in-memory databases (shared connection)
+- Parameters rewritten from `?` to `:name` style via `_rewrite_sql_params()`
+- Accepts both `?`-style and `dict`-style parameters
+
+### Example
+
+```python
+backend = SASQLiteBackend(":memory:")
+backend.initialize()
+
+backend.execute(
+    "INSERT INTO principals (id, kind, display_name) VALUES (?, ?, ?)",
+    ("p-1", "user", "Alice"),
+)
+```
+
+---
+
+## SAPostgresBackend
+
+```python
+from scoped.storage.sa_postgres import SAPostgresBackend
+```
+
+SQLAlchemy Core-backed PostgreSQL storage with connection pooling and optional
+row-level security. Drop-in replacement for `PostgresBackend`.
+
+### Constructor
+
+```python
+SAPostgresBackend(
+    dsn: str,
+    *,
+    pool_size: int = 5,
+    max_overflow: int = 10,
+    pool_timeout: float = 30.0,
+    enable_rls: bool = False,
+)
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `dsn` | `str` | *required* | PostgreSQL connection string. Automatically converts `postgresql://` to `postgresql+psycopg://`. |
+| `pool_size` | `int` | `5` | Number of connections kept in the pool. |
+| `max_overflow` | `int` | `10` | Extra connections beyond `pool_size` allowed. |
+| `pool_timeout` | `float` | `30.0` | Seconds to wait for a connection. |
+| `enable_rls` | `bool` | `False` | Enable row-level security context injection. |
+
+### Example
+
+```python
+backend = SAPostgresBackend(
+    "postgresql://user:pass@host/db",
+    pool_size=10,
+    enable_rls=True,
+)
+backend.initialize()
+```
+
+---
+
+## SQLAlchemy Core Query Building
+
+All 16 layers build queries using SQLAlchemy Core constructs instead of raw SQL
+strings. The `compile_for()` bridge compiles them to the `(sql, params)` format
+that `StorageBackend` accepts.
+
+```python
+import sqlalchemy as sa
+from scoped.storage._schema import principals
+from scoped.storage._query import compile_for
+
+stmt = sa.select(principals).where(principals.c.id == "alice")
+sql, params = compile_for(stmt, dialect="sqlite")
+row = backend.fetch_one(sql, params)
+```
+
+For UPSERT (INSERT ... ON CONFLICT DO UPDATE):
+
+```python
+from scoped.storage._query import dialect_insert
+
+stmt = dialect_insert(principals, "sqlite").values(id="p1", kind="user")
+stmt = stmt.on_conflict_do_update(
+    index_elements=["id"],
+    set_={"kind": stmt.excluded.kind},
+)
+sql, params = compile_for(stmt, "sqlite")
+backend.execute(sql, params)
+```
+
+Table definitions are in `scoped.storage._schema` (63 tables). The `dialect`
+parameter should match `backend.dialect` (`"sqlite"`, `"postgres"`, or `"generic"`).
+
+---
+
 ## TenantRouter
 
 ```python

@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import PluginPermissionError, PluginSandboxError
 from scoped.integrations.models import PluginState, plugin_from_row
+from scoped.storage._query import compile_for
+from scoped.storage._schema import plugin_permissions, plugins
 from scoped.storage.interface import StorageBackend
+from scoped._stability import experimental
 
 
+@experimental()
 class PluginSandbox:
     """Enforce plugin isolation and permission boundaries.
 
@@ -30,12 +36,14 @@ class PluginSandbox:
         target_ref: str,
     ) -> bool:
         """Check if a plugin has a specific active permission."""
-        row = self._backend.fetch_one(
-            """SELECT id FROM plugin_permissions
-               WHERE plugin_id = ? AND permission_type = ? AND target_ref = ?
-               AND lifecycle = 'ACTIVE'""",
-            (plugin_id, permission_type, target_ref),
+        stmt = sa.select(plugin_permissions.c.id).where(
+            (plugin_permissions.c.plugin_id == plugin_id)
+            & (plugin_permissions.c.permission_type == permission_type)
+            & (plugin_permissions.c.target_ref == target_ref)
+            & (plugin_permissions.c.lifecycle == "ACTIVE"),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row is not None
 
     def require_permission(
@@ -57,9 +65,9 @@ class PluginSandbox:
 
     def require_active(self, plugin_id: str) -> None:
         """Require that a plugin is active — raises PluginSandboxError if not."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM plugins WHERE id = ?", (plugin_id,),
-        )
+        stmt = sa.select(plugins).where(plugins.c.id == plugin_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             raise PluginSandboxError(
                 f"Plugin {plugin_id} not found",
@@ -122,20 +130,22 @@ class PluginSandbox:
 
     def get_allowed_scopes(self, plugin_id: str) -> list[str]:
         """Get all scope IDs a plugin has access to."""
-        rows = self._backend.fetch_all(
-            """SELECT target_ref FROM plugin_permissions
-               WHERE plugin_id = ? AND permission_type = 'scope_access'
-               AND lifecycle = 'ACTIVE'""",
-            (plugin_id,),
+        stmt = sa.select(plugin_permissions.c.target_ref).where(
+            (plugin_permissions.c.plugin_id == plugin_id)
+            & (plugin_permissions.c.permission_type == "scope_access")
+            & (plugin_permissions.c.lifecycle == "ACTIVE"),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [r["target_ref"] for r in rows]
 
     def get_allowed_object_types(self, plugin_id: str) -> list[str]:
         """Get all object types a plugin can access."""
-        rows = self._backend.fetch_all(
-            """SELECT target_ref FROM plugin_permissions
-               WHERE plugin_id = ? AND permission_type = 'object_type'
-               AND lifecycle = 'ACTIVE'""",
-            (plugin_id,),
+        stmt = sa.select(plugin_permissions.c.target_ref).where(
+            (plugin_permissions.c.plugin_id == plugin_id)
+            & (plugin_permissions.c.permission_type == "object_type")
+            & (plugin_permissions.c.lifecycle == "ACTIVE"),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [r["target_ref"] for r in rows]

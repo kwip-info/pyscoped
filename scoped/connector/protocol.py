@@ -16,6 +16,7 @@ from typing import Any
 
 from scoped.exceptions import FederationError
 from scoped.types import generate_id, now_utc
+from scoped._stability import preview
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +81,7 @@ class NegotiationResult:
     incompatibilities: tuple[str, ...] = ()
 
 
+@preview()
 class FederationProtocol:
     """Handles message construction, signing, and schema negotiation.
 

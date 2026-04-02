@@ -13,9 +13,13 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.scheduling.queue import JobExecutor
 from scoped.secrets.policy import SecretPolicyManager
 from scoped.secrets.vault import SecretVault
+from scoped.storage._query import compile_for
+from scoped.storage._schema import scheduled_actions, secret_policies, secrets
 from scoped.storage.interface import StorageBackend
 from scoped.types import now_utc
 
@@ -87,18 +91,19 @@ def schedule_auto_rotations(
     """
     from scoped.secrets.models import secret_from_row
 
-    rows = backend.fetch_all(
-        "SELECT * FROM secret_policies WHERE auto_rotate = 1", ()
-    )
+    stmt = sa.select(secret_policies).where(secret_policies.c.auto_rotate == 1)
+    sql, params = compile_for(stmt, backend.dialect)
+    rows = backend.fetch_all(sql, params)
     if not rows:
         return []
 
     # Collect existing auto-rotation actions so we don't duplicate
-    existing_actions = backend.fetch_all(
-        "SELECT action_config_json FROM scheduled_actions "
-        "WHERE action_type = ? AND lifecycle = 'ACTIVE'",
-        (ROTATION_ACTION_TYPE,),
+    stmt = sa.select(scheduled_actions.c.action_config_json).where(
+        (scheduled_actions.c.action_type == ROTATION_ACTION_TYPE)
+        & (scheduled_actions.c.lifecycle == "ACTIVE"),
     )
+    sql, params = compile_for(stmt, backend.dialect)
+    existing_actions = backend.fetch_all(sql, params)
     already_scheduled: set[str] = set()
     for action_row in existing_actions:
         cfg = json.loads(action_row["action_config_json"])
@@ -117,9 +122,9 @@ def schedule_auto_rotations(
             continue
 
         # Compute next rotation time
-        secret_row = backend.fetch_one(
-            "SELECT * FROM secrets WHERE id = ?", (secret_id,)
-        )
+        stmt = sa.select(secrets).where(secrets.c.id == secret_id)
+        sql, params = compile_for(stmt, backend.dialect)
+        secret_row = backend.fetch_one(sql, params)
         if secret_row is None:
             continue
 

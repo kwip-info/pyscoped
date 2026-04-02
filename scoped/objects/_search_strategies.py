@@ -9,6 +9,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+import sqlalchemy as sa
+
+from scoped.storage._query import compile_for
+from scoped.storage._schema import search_index
 from scoped.storage.interface import StorageBackend
 
 
@@ -55,9 +59,12 @@ class SQLiteFTS5Strategy(SearchStrategy):
     def index_entry(
         self, backend: StorageBackend, entry_id: str, content: str
     ) -> None:
-        row = backend.fetch_one(
-            "SELECT rowid FROM search_index WHERE id = ?", (entry_id,)
-        )
+        # rowid lookup uses SA Core; FTS INSERT stays raw (virtual table)
+        stmt = sa.select(sa.literal_column("rowid")).select_from(
+            search_index,
+        ).where(search_index.c.id == entry_id)
+        sql, params = compile_for(stmt, backend.dialect)
+        row = backend.fetch_one(sql, params)
         rowid = row["rowid"]
         backend.execute(
             "INSERT INTO search_index_fts (rowid, content) VALUES (?, ?)",
@@ -65,17 +72,22 @@ class SQLiteFTS5Strategy(SearchStrategy):
         )
 
     def remove_entries(self, backend: StorageBackend, object_id: str) -> None:
-        entries = backend.fetch_all(
-            "SELECT rowid FROM search_index WHERE object_id = ?", (object_id,)
-        )
+        sel_stmt = sa.select(sa.literal_column("rowid")).select_from(
+            search_index,
+        ).where(search_index.c.object_id == object_id)
+        sql, params = compile_for(sel_stmt, backend.dialect)
+        entries = backend.fetch_all(sql, params)
         for entry in entries:
+            # FTS virtual table delete stays raw
             backend.execute(
                 "DELETE FROM search_index_fts WHERE rowid = ?",
                 (entry["rowid"],),
             )
-        backend.execute(
-            "DELETE FROM search_index WHERE object_id = ?", (object_id,)
+        del_stmt = sa.delete(search_index).where(
+            search_index.c.object_id == object_id,
         )
+        sql, params = compile_for(del_stmt, backend.dialect)
+        backend.execute(sql, params)
 
     def build_search_sql(
         self,
@@ -123,9 +135,11 @@ class PostgresFTSStrategy(SearchStrategy):
         )
 
     def remove_entries(self, backend: StorageBackend, object_id: str) -> None:
-        backend.execute(
-            "DELETE FROM search_index WHERE object_id = ?", (object_id,)
+        stmt = sa.delete(search_index).where(
+            search_index.c.object_id == object_id,
         )
+        sql, params = compile_for(stmt, backend.dialect)
+        backend.execute(sql, params)
 
     def build_search_sql(
         self,

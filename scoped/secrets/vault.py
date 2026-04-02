@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import (
     SecretAccessDeniedError,
     SecretNotFoundError,
@@ -26,6 +28,13 @@ from scoped.secrets.models import (
     ref_from_row,
     secret_from_row,
     version_from_row,
+)
+from scoped.storage._query import compile_for
+from scoped.storage._schema import (
+    secret_access_log,
+    secret_refs,
+    secret_versions,
+    secrets,
 )
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
@@ -96,15 +105,20 @@ class SecretVault:
             expires_at=expires_at,
         )
 
-        self._backend.execute(
-            """INSERT INTO secrets
-               (id, name, description, owner_id, object_id, current_version,
-                classification, created_at, expires_at, lifecycle)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (sid, name, description, owner_id, object_id, 1,
-             classification, ts.isoformat(),
-             expires_at.isoformat() if expires_at else None, "ACTIVE"),
+        stmt = sa.insert(secrets).values(
+            id=sid,
+            name=name,
+            description=description,
+            owner_id=owner_id,
+            object_id=object_id,
+            current_version=1,
+            classification=classification,
+            created_at=ts.isoformat(),
+            expires_at=expires_at.isoformat() if expires_at else None,
+            lifecycle="ACTIVE",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Create first version
         vid = generate_id()
@@ -119,14 +133,19 @@ class SecretVault:
             created_by=owner_id,
             reason="initial",
         )
-        self._backend.execute(
-            """INSERT INTO secret_versions
-               (id, secret_id, version, encrypted_value, encryption_algo,
-                key_id, created_at, created_by, reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (vid, sid, 1, encrypted, self._encryption.algorithm,
-             use_key, ts.isoformat(), owner_id, "initial"),
+        stmt = sa.insert(secret_versions).values(
+            id=vid,
+            secret_id=sid,
+            version=1,
+            encrypted_value=encrypted,
+            encryption_algo=self._encryption.algorithm,
+            key_id=use_key,
+            created_at=ts.isoformat(),
+            created_by=owner_id,
+            reason="initial",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             self._audit.record(
@@ -140,9 +159,9 @@ class SecretVault:
         return secret, version
 
     def get_secret(self, secret_id: str) -> Secret | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM secrets WHERE id = ?", (secret_id,),
-        )
+        stmt = sa.select(secrets).where(secrets.c.id == secret_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return secret_from_row(row) if row else None
 
     def get_secret_or_raise(self, secret_id: str) -> Secret:
@@ -162,34 +181,32 @@ class SecretVault:
         active_only: bool = True,
         limit: int = 100,
     ) -> list[Secret]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(secrets)
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
+            stmt = stmt.where(secrets.c.owner_id == owner_id)
         if classification is not None:
-            clauses.append("classification = ?")
-            params.append(classification)
+            stmt = stmt.where(secrets.c.classification == classification)
         if active_only:
-            clauses.append("lifecycle = 'ACTIVE'")
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        params.append(limit)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM secrets{where} ORDER BY created_at DESC LIMIT ?",
-            tuple(params),
-        )
+            stmt = stmt.where(secrets.c.lifecycle == "ACTIVE")
+        stmt = stmt.order_by(secrets.c.created_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [secret_from_row(r) for r in rows]
 
     def archive_secret(self, secret_id: str, *, actor_id: str) -> None:
         """Archive a secret and revoke all its refs."""
-        self._backend.execute(
-            "UPDATE secrets SET lifecycle = 'ARCHIVED' WHERE id = ?",
-            (secret_id,),
+        stmt = sa.update(secrets).where(secrets.c.id == secret_id).values(
+            lifecycle="ARCHIVED",
         )
-        self._backend.execute(
-            "UPDATE secret_refs SET lifecycle = 'REVOKED' WHERE secret_id = ?",
-            (secret_id,),
-        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
+
+        stmt = sa.update(secret_refs).where(
+            secret_refs.c.secret_id == secret_id,
+        ).values(lifecycle="REVOKED")
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
+
         if self._audit is not None:
             self._audit.record(
                 actor_id=actor_id,
@@ -229,18 +246,26 @@ class SecretVault:
             created_by=rotated_by,
             reason=reason,
         )
-        self._backend.execute(
-            """INSERT INTO secret_versions
-               (id, secret_id, version, encrypted_value, encryption_algo,
-                key_id, created_at, created_by, reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (vid, secret_id, new_version, encrypted, self._encryption.algorithm,
-             use_key, ts.isoformat(), rotated_by, reason),
+        stmt = sa.insert(secret_versions).values(
+            id=vid,
+            secret_id=secret_id,
+            version=new_version,
+            encrypted_value=encrypted,
+            encryption_algo=self._encryption.algorithm,
+            key_id=use_key,
+            created_at=ts.isoformat(),
+            created_by=rotated_by,
+            reason=reason,
         )
-        self._backend.execute(
-            "UPDATE secrets SET current_version = ?, last_rotated_at = ? WHERE id = ?",
-            (new_version, ts.isoformat(), secret_id),
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
+
+        stmt = sa.update(secrets).where(secrets.c.id == secret_id).values(
+            current_version=new_version,
+            last_rotated_at=ts.isoformat(),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             self._audit.record(
@@ -254,17 +279,20 @@ class SecretVault:
         return version
 
     def get_versions(self, secret_id: str) -> list[SecretVersion]:
-        rows = self._backend.fetch_all(
-            "SELECT * FROM secret_versions WHERE secret_id = ? ORDER BY version DESC",
-            (secret_id,),
-        )
+        stmt = sa.select(secret_versions).where(
+            secret_versions.c.secret_id == secret_id,
+        ).order_by(secret_versions.c.version.desc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [version_from_row(r) for r in rows]
 
     def get_version(self, secret_id: str, version: int) -> SecretVersion | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM secret_versions WHERE secret_id = ? AND version = ?",
-            (secret_id, version),
+        stmt = sa.select(secret_versions).where(
+            (secret_versions.c.secret_id == secret_id)
+            & (secret_versions.c.version == version),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return version_from_row(row) if row else None
 
     # -- Refs --------------------------------------------------------------
@@ -296,15 +324,20 @@ class SecretVault:
             granted_by=granted_by,
             expires_at=expires_at,
         )
-        self._backend.execute(
-            """INSERT INTO secret_refs
-               (id, secret_id, ref_token, granted_to, scope_id, environment_id,
-                granted_at, granted_by, expires_at, lifecycle)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (rid, secret_id, ref_token, granted_to, scope_id, environment_id,
-             ts.isoformat(), granted_by,
-             expires_at.isoformat() if expires_at else None, "ACTIVE"),
+        stmt = sa.insert(secret_refs).values(
+            id=rid,
+            secret_id=secret_id,
+            ref_token=ref_token,
+            granted_to=granted_to,
+            scope_id=scope_id,
+            environment_id=environment_id,
+            granted_at=ts.isoformat(),
+            granted_by=granted_by,
+            expires_at=expires_at.isoformat() if expires_at else None,
+            lifecycle="ACTIVE",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             self._audit.record(
@@ -319,10 +352,12 @@ class SecretVault:
 
     def revoke_ref(self, ref_id: str, *, revoked_by: str) -> None:
         """Immediately revoke a secret ref."""
-        self._backend.execute(
-            "UPDATE secret_refs SET lifecycle = 'REVOKED' WHERE id = ?",
-            (ref_id,),
+        stmt = sa.update(secret_refs).where(secret_refs.c.id == ref_id).values(
+            lifecycle="REVOKED",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
+
         if self._audit is not None:
             self._audit.record(
                 actor_id=revoked_by,
@@ -332,15 +367,15 @@ class SecretVault:
             )
 
     def get_ref(self, ref_id: str) -> SecretRef | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM secret_refs WHERE id = ?", (ref_id,),
-        )
+        stmt = sa.select(secret_refs).where(secret_refs.c.id == ref_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return ref_from_row(row) if row else None
 
     def get_ref_by_token(self, ref_token: str) -> SecretRef | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM secret_refs WHERE ref_token = ?", (ref_token,),
-        )
+        stmt = sa.select(secret_refs).where(secret_refs.c.ref_token == ref_token)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return ref_from_row(row) if row else None
 
     def list_refs(
@@ -349,16 +384,11 @@ class SecretVault:
         *,
         active_only: bool = True,
     ) -> list[SecretRef]:
+        stmt = sa.select(secret_refs).where(secret_refs.c.secret_id == secret_id)
         if active_only:
-            rows = self._backend.fetch_all(
-                "SELECT * FROM secret_refs WHERE secret_id = ? AND lifecycle = 'ACTIVE'",
-                (secret_id,),
-            )
-        else:
-            rows = self._backend.fetch_all(
-                "SELECT * FROM secret_refs WHERE secret_id = ?",
-                (secret_id,),
-            )
+            stmt = stmt.where(secret_refs.c.lifecycle == "ACTIVE")
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [ref_from_row(r) for r in rows]
 
     # -- Resolution --------------------------------------------------------
@@ -495,14 +525,19 @@ class SecretVault:
     ) -> None:
         ts = now_utc()
         aid = generate_id()
-        self._backend.execute(
-            """INSERT INTO secret_access_log
-               (id, secret_id, ref_id, accessor_id, access_type,
-                accessed_at, environment_id, scope_id, result)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (aid, secret_id, ref_id, accessor_id, access_type,
-             ts.isoformat(), environment_id, scope_id, result.value),
+        stmt = sa.insert(secret_access_log).values(
+            id=aid,
+            secret_id=secret_id,
+            ref_id=ref_id,
+            accessor_id=accessor_id,
+            access_type=access_type,
+            accessed_at=ts.isoformat(),
+            environment_id=environment_id,
+            scope_id=scope_id,
+            result=result.value,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def get_access_log(
         self,
@@ -510,8 +545,9 @@ class SecretVault:
         *,
         limit: int = 100,
     ) -> list[SecretAccessEntry]:
-        rows = self._backend.fetch_all(
-            "SELECT * FROM secret_access_log WHERE secret_id = ? ORDER BY accessed_at DESC LIMIT ?",
-            (secret_id, limit),
-        )
+        stmt = sa.select(secret_access_log).where(
+            secret_access_log.c.secret_id == secret_id,
+        ).order_by(secret_access_log.c.accessed_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [access_entry_from_row(r) for r in rows]

@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.secrets.models import (
     SecretPolicy,
     policy_from_row,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import secret_policies, secrets
 from scoped.storage.interface import StorageBackend
 from scoped.types import generate_id, now_utc
 
@@ -43,38 +47,42 @@ class SecretPolicyManager:
             created_at=ts,
             created_by=created_by,
         )
-        self._backend.execute(
-            """INSERT INTO secret_policies
-               (id, secret_id, classification, max_age_seconds, auto_rotate,
-                allowed_scopes, allowed_envs, created_at, created_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (pid, secret_id, classification, max_age_seconds,
-             int(auto_rotate), json.dumps(policy.allowed_scopes),
-             json.dumps(policy.allowed_envs), ts.isoformat(), created_by),
+        stmt = sa.insert(secret_policies).values(
+            id=pid,
+            secret_id=secret_id,
+            classification=classification,
+            max_age_seconds=max_age_seconds,
+            auto_rotate=int(auto_rotate),
+            allowed_scopes=json.dumps(policy.allowed_scopes),
+            allowed_envs=json.dumps(policy.allowed_envs),
+            created_at=ts.isoformat(),
+            created_by=created_by,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         return policy
 
     def get_policy(self, policy_id: str) -> SecretPolicy | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM secret_policies WHERE id = ?", (policy_id,),
-        )
+        stmt = sa.select(secret_policies).where(secret_policies.c.id == policy_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return policy_from_row(row) if row else None
 
     def get_policies_for_secret(self, secret_id: str) -> list[SecretPolicy]:
         """Get policies that apply to a specific secret (by id or classification)."""
         # Get secret's classification
-        secret_row = self._backend.fetch_one(
-            "SELECT classification FROM secrets WHERE id = ?", (secret_id,),
-        )
+        stmt = sa.select(secrets.c.classification).where(secrets.c.id == secret_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        secret_row = self._backend.fetch_one(sql, params)
         if secret_row is None:
             return []
 
-        rows = self._backend.fetch_all(
-            """SELECT * FROM secret_policies
-               WHERE secret_id = ? OR classification = ?
-               ORDER BY created_at""",
-            (secret_id, secret_row["classification"]),
-        )
+        stmt = sa.select(secret_policies).where(
+            (secret_policies.c.secret_id == secret_id)
+            | (secret_policies.c.classification == secret_row["classification"])
+        ).order_by(secret_policies.c.created_at)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [policy_from_row(r) for r in rows]
 
     def check_scope_allowed(self, secret_id: str, scope_id: str) -> bool:
@@ -101,9 +109,9 @@ class SecretPolicyManager:
         """Check if a secret needs rotation based on policy max_age."""
         from scoped.secrets.models import secret_from_row
 
-        secret_row = self._backend.fetch_one(
-            "SELECT * FROM secrets WHERE id = ?", (secret_id,),
-        )
+        stmt = sa.select(secrets).where(secrets.c.id == secret_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        secret_row = self._backend.fetch_one(sql, params)
         if secret_row is None:
             return False
 
@@ -124,14 +132,10 @@ class SecretPolicyManager:
         classification: str | None = None,
         limit: int = 100,
     ) -> list[SecretPolicy]:
+        stmt = sa.select(secret_policies)
         if classification is not None:
-            rows = self._backend.fetch_all(
-                "SELECT * FROM secret_policies WHERE classification = ? ORDER BY created_at LIMIT ?",
-                (classification, limit),
-            )
-        else:
-            rows = self._backend.fetch_all(
-                "SELECT * FROM secret_policies ORDER BY created_at LIMIT ?",
-                (limit,),
-            )
+            stmt = stmt.where(secret_policies.c.classification == classification)
+        stmt = stmt.order_by(secret_policies.c.created_at).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [policy_from_row(r) for r in rows]

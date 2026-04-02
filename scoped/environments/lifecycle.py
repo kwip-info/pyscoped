@@ -10,10 +10,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import (
     EnvironmentNotFoundError,
     EnvironmentStateError,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import environments, environment_templates
 from scoped.storage.interface import StorageBackend
 from scoped.tenancy.lifecycle import ScopeLifecycle
 from scoped.types import ActionType, generate_id, now_utc
@@ -25,8 +29,10 @@ from scoped.environments.models import (
     environment_from_row,
     template_from_row,
 )
+from scoped._stability import experimental
 
 
+@experimental()
 class EnvironmentLifecycle:
     """Manages environment creation and state transitions."""
 
@@ -82,18 +88,16 @@ class EnvironmentLifecycle:
             metadata=meta,
         )
 
-        self._backend.execute(
-            """INSERT INTO environments
-               (id, name, description, owner_id, template_id, scope_id,
-                state, ephemeral, created_at, metadata_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                env.id, env.name, env.description, env.owner_id,
-                env.template_id, env.scope_id, env.state.value,
-                1 if env.ephemeral else 0, env.created_at.isoformat(),
-                json.dumps(meta),
-            ),
+        stmt = sa.insert(environments).values(
+            id=env.id, name=env.name, description=env.description,
+            owner_id=env.owner_id, template_id=env.template_id,
+            scope_id=env.scope_id, state=env.state.value,
+            ephemeral=1 if env.ephemeral else 0,
+            created_at=env.created_at.isoformat(),
+            metadata_json=json.dumps(meta),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         self._trace(
             actor_id=owner_id,
@@ -124,10 +128,13 @@ class EnvironmentLifecycle:
         """Move environment from ACTIVE → COMPLETED."""
         env = self._transition(env_id, EnvironmentState.COMPLETED, actor_id=actor_id)
         # Record completion timestamp
-        self._backend.execute(
-            "UPDATE environments SET completed_at = ? WHERE id = ?",
-            (now_utc().isoformat(), env_id),
+        stmt = (
+            sa.update(environments)
+            .where(environments.c.id == env_id)
+            .values(completed_at=now_utc().isoformat())
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         env.completed_at = now_utc()
         return env
 
@@ -158,9 +165,9 @@ class EnvironmentLifecycle:
 
     def get(self, env_id: str) -> Environment | None:
         """Fetch an environment by ID."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM environments WHERE id = ?", (env_id,),
-        )
+        stmt = sa.select(environments).where(environments.c.id == env_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return environment_from_row(row) if row else None
 
     def get_or_raise(self, env_id: str) -> Environment:
@@ -183,26 +190,16 @@ class EnvironmentLifecycle:
         offset: int = 0,
     ) -> list[Environment]:
         """List environments with optional filters."""
-        clauses: list[str] = []
-        params: list[Any] = []
-
+        stmt = sa.select(environments)
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
+            stmt = stmt.where(environments.c.owner_id == owner_id)
         if state is not None:
-            clauses.append("state = ?")
-            params.append(state.value)
+            stmt = stmt.where(environments.c.state == state.value)
         if ephemeral is not None:
-            clauses.append("ephemeral = ?")
-            params.append(1 if ephemeral else 0)
-
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        params.extend([limit, offset])
-
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM environments{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            tuple(params),
-        )
+            stmt = stmt.where(environments.c.ephemeral == (1 if ephemeral else 0))
+        stmt = stmt.order_by(environments.c.created_at.desc()).limit(limit).offset(offset)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [environment_from_row(r) for r in rows]
 
     # ------------------------------------------------------------------
@@ -231,23 +228,21 @@ class EnvironmentLifecycle:
             created_at=ts,
         )
 
-        self._backend.execute(
-            """INSERT INTO environment_templates
-               (id, name, description, owner_id, config_json, created_at, lifecycle)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                tmpl.id, tmpl.name, tmpl.description, tmpl.owner_id,
-                json.dumps(cfg), tmpl.created_at.isoformat(),
-                tmpl.lifecycle.name,
-            ),
+        stmt = sa.insert(environment_templates).values(
+            id=tmpl.id, name=tmpl.name, description=tmpl.description,
+            owner_id=tmpl.owner_id, config_json=json.dumps(cfg),
+            created_at=tmpl.created_at.isoformat(),
+            lifecycle=tmpl.lifecycle.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         return tmpl
 
     def get_template(self, template_id: str) -> EnvironmentTemplate | None:
         """Fetch a template by ID."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM environment_templates WHERE id = ?", (template_id,),
-        )
+        stmt = sa.select(environment_templates).where(environment_templates.c.id == template_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return template_from_row(row) if row else None
 
     def list_templates(
@@ -257,18 +252,15 @@ class EnvironmentLifecycle:
         limit: int = 100,
     ) -> list[EnvironmentTemplate]:
         """List templates, optionally filtered by owner."""
+        stmt = (
+            sa.select(environment_templates)
+            .where(environment_templates.c.lifecycle == "ACTIVE")
+        )
         if owner_id:
-            rows = self._backend.fetch_all(
-                "SELECT * FROM environment_templates WHERE owner_id = ? AND lifecycle = 'ACTIVE' "
-                "ORDER BY created_at DESC LIMIT ?",
-                (owner_id, limit),
-            )
-        else:
-            rows = self._backend.fetch_all(
-                "SELECT * FROM environment_templates WHERE lifecycle = 'ACTIVE' "
-                "ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            )
+            stmt = stmt.where(environment_templates.c.owner_id == owner_id)
+        stmt = stmt.order_by(environment_templates.c.created_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [template_from_row(r) for r in rows]
 
     def spawn_from_template(
@@ -319,10 +311,13 @@ class EnvironmentLifecycle:
             )
 
         env.state = target
-        self._backend.execute(
-            "UPDATE environments SET state = ? WHERE id = ?",
-            (target.value, env_id),
+        stmt = (
+            sa.update(environments)
+            .where(environments.c.id == env_id)
+            .values(state=target.value)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Map target state to specific action type
         action_map = {

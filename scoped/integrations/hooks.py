@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+import sqlalchemy as sa
+
 from scoped.exceptions import HookExecutionError, PluginError
 from scoped.integrations.models import (
     PluginHook,
@@ -12,8 +14,11 @@ from scoped.integrations.models import (
     hook_from_row,
     plugin_from_row,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import plugin_hooks, plugins
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+from scoped._stability import experimental
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +43,7 @@ class DispatchResult:
     failed_count: int = 0
 
 
+@experimental()
 class HookRegistry:
     """Register and dispatch plugin hooks."""
 
@@ -73,9 +79,9 @@ class HookRegistry:
     ) -> PluginHook:
         """Register a hook binding for a plugin."""
         # Verify plugin exists and is active
-        row = self._backend.fetch_one(
-            "SELECT * FROM plugins WHERE id = ?", (plugin_id,),
-        )
+        stmt = sa.select(plugins).where(plugins.c.id == plugin_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             raise PluginError(
                 f"Plugin {plugin_id} not found",
@@ -97,21 +103,26 @@ class HookRegistry:
             priority=priority,
         )
 
-        self._backend.execute(
-            """INSERT INTO plugin_hooks
-               (id, plugin_id, hook_point, handler_ref, priority, lifecycle)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (hid, plugin_id, hook_point, handler_ref, priority, "ACTIVE"),
+        stmt = sa.insert(plugin_hooks).values(
+            id=hid,
+            plugin_id=plugin_id,
+            hook_point=hook_point,
+            handler_ref=handler_ref,
+            priority=priority,
+            lifecycle="ACTIVE",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         return hook
 
     def deactivate_hook(self, hook_id: str) -> None:
         """Deactivate a specific hook."""
-        self._backend.execute(
-            "UPDATE plugin_hooks SET lifecycle = 'ARCHIVED' WHERE id = ?",
-            (hook_id,),
+        stmt = sa.update(plugin_hooks).where(plugin_hooks.c.id == hook_id).values(
+            lifecycle="ARCHIVED",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def get_hooks_for_plugin(
         self,
@@ -119,16 +130,11 @@ class HookRegistry:
         *,
         active_only: bool = True,
     ) -> list[PluginHook]:
+        stmt = sa.select(plugin_hooks).where(plugin_hooks.c.plugin_id == plugin_id)
         if active_only:
-            rows = self._backend.fetch_all(
-                "SELECT * FROM plugin_hooks WHERE plugin_id = ? AND lifecycle = 'ACTIVE'",
-                (plugin_id,),
-            )
-        else:
-            rows = self._backend.fetch_all(
-                "SELECT * FROM plugin_hooks WHERE plugin_id = ?",
-                (plugin_id,),
-            )
+            stmt = stmt.where(plugin_hooks.c.lifecycle == "ACTIVE")
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [hook_from_row(r) for r in rows]
 
     def get_hooks_for_point(
@@ -136,12 +142,12 @@ class HookRegistry:
         hook_point: str,
     ) -> list[PluginHook]:
         """Get all active hooks for a hook point, ordered by priority (highest first)."""
-        rows = self._backend.fetch_all(
-            """SELECT * FROM plugin_hooks
-               WHERE hook_point = ? AND lifecycle = 'ACTIVE'
-               ORDER BY priority DESC""",
-            (hook_point,),
-        )
+        stmt = sa.select(plugin_hooks).where(
+            (plugin_hooks.c.hook_point == hook_point)
+            & (plugin_hooks.c.lifecycle == "ACTIVE"),
+        ).order_by(plugin_hooks.c.priority.desc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [hook_from_row(r) for r in rows]
 
     # -- Dispatch ----------------------------------------------------------
@@ -167,9 +173,9 @@ class HookRegistry:
 
         for hook in hooks:
             # Verify the owning plugin is still active
-            plugin_row = self._backend.fetch_one(
-                "SELECT * FROM plugins WHERE id = ?", (hook.plugin_id,),
-            )
+            stmt = sa.select(plugins).where(plugins.c.id == hook.plugin_id)
+            sql, params = compile_for(stmt, self._backend.dialect)
+            plugin_row = self._backend.fetch_one(sql, params)
             if plugin_row is None:
                 continue
             plugin = plugin_from_row(plugin_row)

@@ -12,6 +12,8 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.events.models import (
     DeliveryAttempt,
     DeliveryStatus,
@@ -20,8 +22,11 @@ from scoped.events.models import (
     event_from_row,
     webhook_from_row,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import events, webhook_deliveries, webhook_endpoints
 from scoped.storage.interface import StorageBackend
 from scoped.types import generate_id, now_utc
+from scoped._stability import experimental
 
 
 # Type alias for pluggable delivery transport
@@ -29,6 +34,7 @@ DeliveryTransport = Callable[[WebhookEndpoint, Event], tuple[int, str]]
 """(endpoint, event) -> (status_code, response_body)"""
 
 
+@experimental()
 class WebhookDelivery:
     """Manage webhook delivery lifecycle: queue, attempt, retry, track.
 
@@ -65,10 +71,13 @@ class WebhookDelivery:
         Returns a list of :class:`DeliveryAttempt` records for each
         delivery attempted.
         """
-        rows = self._backend.fetch_all(
-            "SELECT * FROM webhook_deliveries WHERE status = 'pending' "
-            "ORDER BY attempted_at ASC",
+        stmt = (
+            sa.select(webhook_deliveries)
+            .where(webhook_deliveries.c.status == "pending")
+            .order_by(webhook_deliveries.c.attempted_at.asc())
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         attempts: list[DeliveryAttempt] = []
         for row in rows:
             attempt = self._attempt_delivery(row)
@@ -84,25 +93,18 @@ class WebhookDelivery:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Query delivery records with optional filters."""
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(webhook_deliveries)
 
         if event_id is not None:
-            clauses.append("event_id = ?")
-            params.append(event_id)
+            stmt = stmt.where(webhook_deliveries.c.event_id == event_id)
         if webhook_endpoint_id is not None:
-            clauses.append("webhook_endpoint_id = ?")
-            params.append(webhook_endpoint_id)
+            stmt = stmt.where(webhook_deliveries.c.webhook_endpoint_id == webhook_endpoint_id)
         if status is not None:
-            clauses.append("status = ?")
-            params.append(status.value)
+            stmt = stmt.where(webhook_deliveries.c.status == status.value)
 
-        where = " AND ".join(clauses) if clauses else "1=1"
-        return self._backend.fetch_all(
-            f"SELECT * FROM webhook_deliveries WHERE {where} "
-            f"ORDER BY attempted_at DESC LIMIT ?",
-            tuple(params) + (limit,),
-        )
+        stmt = stmt.order_by(webhook_deliveries.c.attempted_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        return self._backend.fetch_all(sql, params)
 
     def retry_failed(self, *, backoff_base: int = 60) -> list[DeliveryAttempt]:
         """Retry failed deliveries that haven't exceeded max retries.
@@ -118,12 +120,16 @@ class WebhookDelivery:
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc)
-        rows = self._backend.fetch_all(
-            "SELECT * FROM webhook_deliveries "
-            "WHERE status = 'failed' AND attempt_number < ? "
-            "ORDER BY attempted_at ASC",
-            (self._max_retries,),
+        stmt = (
+            sa.select(webhook_deliveries)
+            .where(
+                webhook_deliveries.c.status == "failed",
+                webhook_deliveries.c.attempt_number < self._max_retries,
+            )
+            .order_by(webhook_deliveries.c.attempted_at.asc())
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         attempts: list[DeliveryAttempt] = []
         for row in rows:
             # Exponential backoff check
@@ -138,10 +144,13 @@ class WebhookDelivery:
                 if elapsed < delay_seconds:
                     continue  # Not enough time has passed
 
-            self._backend.execute(
-                "UPDATE webhook_deliveries SET status = 'retrying' WHERE id = ?",
-                (row["id"],),
+            update_stmt = (
+                sa.update(webhook_deliveries)
+                .where(webhook_deliveries.c.id == row["id"])
+                .values(status="retrying")
             )
+            sql_u, params_u = compile_for(update_stmt, self._backend.dialect)
+            self._backend.execute(sql_u, params_u)
             row["status"] = "retrying"
             attempt = self._attempt_delivery(row)
             attempts.append(attempt)
@@ -159,13 +168,14 @@ class WebhookDelivery:
         attempt_number = delivery_row.get("attempt_number", 0) + 1
 
         # Fetch the event
-        event_row = self._backend.fetch_one(
-            "SELECT * FROM events WHERE id = ?", (event_id,),
-        )
+        evt_stmt = sa.select(events).where(events.c.id == event_id)
+        sql_e, params_e = compile_for(evt_stmt, self._backend.dialect)
+        event_row = self._backend.fetch_one(sql_e, params_e)
+
         # Fetch the endpoint
-        endpoint_row = self._backend.fetch_one(
-            "SELECT * FROM webhook_endpoints WHERE id = ?", (endpoint_id,),
-        )
+        ep_stmt = sa.select(webhook_endpoints).where(webhook_endpoints.c.id == endpoint_id)
+        sql_ep, params_ep = compile_for(ep_stmt, self._backend.dialect)
+        endpoint_row = self._backend.fetch_one(sql_ep, params_ep)
 
         if event_row is None or endpoint_row is None:
             # Mark as failed — missing data
@@ -179,11 +189,17 @@ class WebhookDelivery:
                 error_message="Event or endpoint not found",
                 attempt_number=attempt_number,
             )
-            self._backend.execute(
-                "UPDATE webhook_deliveries SET status = 'failed', "
-                "attempt_number = ?, response_body = ? WHERE id = ?",
-                (attempt_number, "Event or endpoint not found", delivery_id),
+            fail_stmt = (
+                sa.update(webhook_deliveries)
+                .where(webhook_deliveries.c.id == delivery_id)
+                .values(
+                    status="failed",
+                    attempt_number=attempt_number,
+                    response_body="Event or endpoint not found",
+                )
             )
+            sql_f, params_f = compile_for(fail_stmt, self._backend.dialect)
+            self._backend.execute(sql_f, params_f)
             return attempt
 
         event = event_from_row(event_row)
@@ -206,12 +222,18 @@ class WebhookDelivery:
                 attempt_number=attempt_number,
             )
 
-            self._backend.execute(
-                "UPDATE webhook_deliveries SET status = ?, "
-                "attempt_number = ?, response_status = ?, response_body = ? "
-                "WHERE id = ?",
-                (status.value, attempt_number, status_code, response_body, delivery_id),
+            ok_stmt = (
+                sa.update(webhook_deliveries)
+                .where(webhook_deliveries.c.id == delivery_id)
+                .values(
+                    status=status.value,
+                    attempt_number=attempt_number,
+                    response_status=status_code,
+                    response_body=response_body,
+                )
             )
+            sql_ok, params_ok = compile_for(ok_stmt, self._backend.dialect)
+            self._backend.execute(sql_ok, params_ok)
         except Exception as exc:
             attempt = DeliveryAttempt(
                 id=generate_id(),
@@ -223,11 +245,17 @@ class WebhookDelivery:
                 error_message=str(exc),
                 attempt_number=attempt_number,
             )
-            self._backend.execute(
-                "UPDATE webhook_deliveries SET status = 'failed', "
-                "attempt_number = ?, error_message = ? WHERE id = ?",
-                (attempt_number, str(exc), delivery_id),
+            err_stmt = (
+                sa.update(webhook_deliveries)
+                .where(webhook_deliveries.c.id == delivery_id)
+                .values(
+                    status="failed",
+                    attempt_number=attempt_number,
+                    error_message=str(exc),
+                )
             )
+            sql_err, params_err = compile_for(err_stmt, self._backend.dialect)
+            self._backend.execute(sql_err, params_err)
 
         return attempt
 

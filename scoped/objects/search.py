@@ -15,11 +15,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.objects._search_strategies import (
     PostgresFTSStrategy,
     SearchStrategy,
     SQLiteFTS5Strategy,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import search_index
 from scoped.storage.interface import StorageBackend
 from scoped.types import generate_id, now_utc
 
@@ -128,15 +132,18 @@ class SearchIndex:
 
             entry_id = generate_id()
             # Insert into metadata table
-            self._backend.execute(
-                "INSERT INTO search_index "
-                "(id, object_id, object_type, owner_id, field_name, content, scope_id, indexed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    entry_id, object_id, object_type, owner_id,
-                    key, text, scope_id, ts.isoformat(),
-                ),
+            stmt = sa.insert(search_index).values(
+                id=entry_id,
+                object_id=object_id,
+                object_type=object_type,
+                owner_id=owner_id,
+                field_name=key,
+                content=text,
+                scope_id=scope_id,
+                indexed_at=ts.isoformat(),
             )
+            sql, params = compile_for(stmt, self._backend.dialect)
+            self._backend.execute(sql, params)
             # Populate FTS index via strategy
             self._strategy.index_entry(self._backend, entry_id, text)
             count += 1
@@ -145,10 +152,11 @@ class SearchIndex:
 
     def remove_object(self, object_id: str) -> int:
         """Remove all index entries for an object. Returns count removed."""
-        entries = self._backend.fetch_all(
-            "SELECT id FROM search_index WHERE object_id = ?",
-            (object_id,),
+        stmt = sa.select(search_index.c.id).where(
+            search_index.c.object_id == object_id,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        entries = self._backend.fetch_all(sql, params)
         self._strategy.remove_entries(self._backend, object_id)
         return len(entries)
 
@@ -300,23 +308,27 @@ class SearchIndex:
 
     def get_indexed_fields(self, object_id: str) -> list[str]:
         """Get list of field names indexed for an object."""
-        rows = self._backend.fetch_all(
-            "SELECT field_name FROM search_index WHERE object_id = ? ORDER BY field_name",
-            (object_id,),
-        )
+        stmt = sa.select(search_index.c.field_name).where(
+            search_index.c.object_id == object_id,
+        ).order_by(search_index.c.field_name)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [r["field_name"] for r in rows]
 
     def is_indexed(self, object_id: str) -> bool:
         """Check if an object has any index entries."""
-        row = self._backend.fetch_one(
-            "SELECT 1 FROM search_index WHERE object_id = ? LIMIT 1",
-            (object_id,),
-        )
+        stmt = sa.select(sa.literal(1)).select_from(search_index).where(
+            search_index.c.object_id == object_id,
+        ).limit(1)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row is not None
 
     def index_count(self) -> int:
         """Total number of index entries."""
-        row = self._backend.fetch_one("SELECT COUNT(*) as cnt FROM search_index", ())
+        stmt = sa.select(sa.func.count().label("cnt")).select_from(search_index)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row["cnt"] if row else 0
 
     # ------------------------------------------------------------------

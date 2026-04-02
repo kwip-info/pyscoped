@@ -14,14 +14,19 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.events.models import (
     Event,
     EventType,
     event_from_row,
     subscription_from_row,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import events, event_subscriptions, webhook_deliveries
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+from scoped._stability import experimental
 
 
 # Type alias for in-process event listeners
@@ -30,6 +35,7 @@ EventListener = Callable[[Event], None]
 _WILDCARD = "*"
 
 
+@experimental()
 class EventBus:
     """Central event dispatcher.
 
@@ -150,9 +156,9 @@ class EventBus:
 
     def get_event(self, event_id: str) -> Event | None:
         """Fetch a single event by ID."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM events WHERE id = ?", (event_id,),
-        )
+        stmt = sa.select(events).where(events.c.id == event_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return event_from_row(row) if row else None
 
     def list_events(
@@ -165,27 +171,20 @@ class EventBus:
         limit: int = 100,
     ) -> list[Event]:
         """List events with optional filters."""
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(events)
 
         if event_type is not None:
-            clauses.append("event_type = ?")
-            params.append(event_type.value)
+            stmt = stmt.where(events.c.event_type == event_type.value)
         if actor_id is not None:
-            clauses.append("actor_id = ?")
-            params.append(actor_id)
+            stmt = stmt.where(events.c.actor_id == actor_id)
         if scope_id is not None:
-            clauses.append("scope_id = ?")
-            params.append(scope_id)
+            stmt = stmt.where(events.c.scope_id == scope_id)
         if target_type is not None:
-            clauses.append("target_type = ?")
-            params.append(target_type)
+            stmt = stmt.where(events.c.target_type == target_type)
 
-        where = " AND ".join(clauses) if clauses else "1=1"
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM events WHERE {where} ORDER BY timestamp DESC LIMIT ?",
-            tuple(params) + (limit,),
-        )
+        stmt = stmt.order_by(events.c.timestamp.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [event_from_row(r) for r in rows]
 
     def count_events(
@@ -195,21 +194,15 @@ class EventBus:
         scope_id: str | None = None,
     ) -> int:
         """Count events with optional filters."""
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(sa.func.count().label("cnt")).select_from(events)
 
         if event_type is not None:
-            clauses.append("event_type = ?")
-            params.append(event_type.value)
+            stmt = stmt.where(events.c.event_type == event_type.value)
         if scope_id is not None:
-            clauses.append("scope_id = ?")
-            params.append(scope_id)
+            stmt = stmt.where(events.c.scope_id == scope_id)
 
-        where = " AND ".join(clauses) if clauses else "1=1"
-        row = self._backend.fetch_one(
-            f"SELECT COUNT(*) as cnt FROM events WHERE {where}",
-            tuple(params),
-        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row["cnt"] if row else 0
 
     # ------------------------------------------------------------------
@@ -217,47 +210,41 @@ class EventBus:
     # ------------------------------------------------------------------
 
     def _persist_event(self, event: Event) -> None:
-        self._backend.execute(
-            "INSERT INTO events "
-            "(id, event_type, actor_id, target_type, target_id, "
-            "timestamp, scope_id, data_json, source_trace_id, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                event.id,
-                event.event_type.value,
-                event.actor_id,
-                event.target_type,
-                event.target_id,
-                event.timestamp.isoformat(),
-                event.scope_id,
-                json.dumps(event.data),
-                event.source_trace_id,
-                event.lifecycle.name,
-            ),
+        stmt = sa.insert(events).values(
+            id=event.id,
+            event_type=event.event_type.value,
+            actor_id=event.actor_id,
+            target_type=event.target_type,
+            target_id=event.target_id,
+            timestamp=event.timestamp.isoformat(),
+            scope_id=event.scope_id,
+            data_json=json.dumps(event.data),
+            source_trace_id=event.source_trace_id,
+            lifecycle=event.lifecycle.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def _match_subscriptions(self, event: Event) -> list:
         """Find active subscriptions that match this event."""
-        rows = self._backend.fetch_all(
-            "SELECT * FROM event_subscriptions WHERE lifecycle = 'ACTIVE'",
+        stmt = sa.select(event_subscriptions).where(
+            event_subscriptions.c.lifecycle == "ACTIVE"
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         subs = [subscription_from_row(r) for r in rows]
         return [s for s in subs if s.matches(event)]
 
     def _queue_delivery(self, event: Event, subscription) -> None:
         """Create a pending delivery record for a matched subscription."""
-        self._backend.execute(
-            "INSERT INTO webhook_deliveries "
-            "(id, event_id, webhook_endpoint_id, subscription_id, "
-            "status, attempted_at, attempt_number) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                generate_id(),
-                event.id,
-                subscription.webhook_endpoint_id,
-                subscription.id,
-                "pending",
-                now_utc().isoformat(),
-                0,
-            ),
+        stmt = sa.insert(webhook_deliveries).values(
+            id=generate_id(),
+            event_id=event.id,
+            webhook_endpoint_id=subscription.webhook_endpoint_id,
+            subscription_id=subscription.id,
+            status="pending",
+            attempted_at=now_utc().isoformat(),
+            attempt_number=0,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)

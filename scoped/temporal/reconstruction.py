@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
+
+from scoped.storage._query import compile_for
+from scoped.storage._schema import audit_trail
 from scoped.storage.interface import StorageBackend
 
 
@@ -63,17 +67,19 @@ class StateReconstructor:
         indicates whether any trace existed.  If the target had no
         traces on or before *at*, ``state`` is ``None``.
         """
-        row = self._backend.fetch_one(
-            """
-            SELECT id, after_state
-            FROM audit_trail
-            WHERE target_type = ? AND target_id = ? AND timestamp <= ?
-                  AND after_state IS NOT NULL
-            ORDER BY sequence DESC
-            LIMIT 1
-            """,
-            (target_type, target_id, at.isoformat()),
+        stmt = (
+            sa.select(audit_trail.c.id, audit_trail.c.after_state)
+            .where(
+                audit_trail.c.target_type == target_type,
+                audit_trail.c.target_id == target_id,
+                audit_trail.c.timestamp <= at.isoformat(),
+                audit_trail.c.after_state.isnot(None),
+            )
+            .order_by(audit_trail.c.sequence.desc())
+            .limit(1)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
 
         if row is None:
             return ReconstructedState(

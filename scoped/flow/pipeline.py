@@ -10,7 +10,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import FlowError, StageTransitionDeniedError
+from scoped.storage._query import compile_for
+from scoped.storage._schema import pipelines, stage_transitions, stages
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
 
@@ -22,8 +26,10 @@ from scoped.flow.models import (
     stage_from_row,
     transition_from_row,
 )
+from scoped._stability import experimental
 
 
+@experimental()
 class PipelineManager:
     """Manages pipelines, stages, and stage transitions."""
 
@@ -56,12 +62,13 @@ class PipelineManager:
             description=description, created_at=ts,
         )
 
-        self._backend.execute(
-            """INSERT INTO pipelines
-               (id, name, description, owner_id, created_at, lifecycle)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (pid, name, description, owner_id, ts.isoformat(), "ACTIVE"),
+        stmt = sa.insert(pipelines).values(
+            id=pid, name=name, description=description,
+            owner_id=owner_id, created_at=ts.isoformat(),
+            lifecycle="ACTIVE",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         self._trace(
             actor_id=owner_id,
@@ -74,9 +81,9 @@ class PipelineManager:
         return pipeline
 
     def get_pipeline(self, pipeline_id: str) -> Pipeline | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM pipelines WHERE id = ?", (pipeline_id,),
-        )
+        stmt = sa.select(pipelines).where(pipelines.c.id == pipeline_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return pipeline_from_row(row) if row else None
 
     def list_pipelines(
@@ -86,26 +93,24 @@ class PipelineManager:
         active_only: bool = True,
         limit: int = 100,
     ) -> list[Pipeline]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(pipelines)
         if owner_id:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
+            stmt = stmt.where(pipelines.c.owner_id == owner_id)
         if active_only:
-            clauses.append("lifecycle = 'ACTIVE'")
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        params.append(limit)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM pipelines{where} ORDER BY created_at DESC LIMIT ?",
-            tuple(params),
-        )
+            stmt = stmt.where(pipelines.c.lifecycle == "ACTIVE")
+        stmt = stmt.order_by(pipelines.c.created_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [pipeline_from_row(r) for r in rows]
 
     def archive_pipeline(self, pipeline_id: str, *, archived_by: str) -> None:
-        self._backend.execute(
-            "UPDATE pipelines SET lifecycle = 'ARCHIVED' WHERE id = ?",
-            (pipeline_id,),
+        stmt = (
+            sa.update(pipelines)
+            .where(pipelines.c.id == pipeline_id)
+            .values(lifecycle="ARCHIVED")
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         self._trace(
             actor_id=archived_by,
@@ -137,12 +142,13 @@ class PipelineManager:
             name=name, ordinal=ordinal, metadata=meta,
         )
 
-        self._backend.execute(
-            """INSERT INTO stages
-               (id, pipeline_id, name, ordinal, metadata_json)
-               VALUES (?, ?, ?, ?, ?)""",
-            (sid, pipeline_id, name, ordinal, json.dumps(meta)),
+        stmt = sa.insert(stages).values(
+            id=sid, pipeline_id=pipeline_id,
+            name=name, ordinal=ordinal,
+            metadata_json=json.dumps(meta),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Use pipeline owner as actor for stage creation
         pipeline = self.get_pipeline(pipeline_id)
@@ -158,24 +164,29 @@ class PipelineManager:
         return stage
 
     def get_stage(self, stage_id: str) -> Stage | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM stages WHERE id = ?", (stage_id,),
-        )
+        stmt = sa.select(stages).where(stages.c.id == stage_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return stage_from_row(row) if row else None
 
     def get_stages(self, pipeline_id: str) -> list[Stage]:
         """Get all stages for a pipeline, ordered by ordinal."""
-        rows = self._backend.fetch_all(
-            "SELECT * FROM stages WHERE pipeline_id = ? ORDER BY ordinal ASC",
-            (pipeline_id,),
+        stmt = (
+            sa.select(stages)
+            .where(stages.c.pipeline_id == pipeline_id)
+            .order_by(stages.c.ordinal.asc())
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [stage_from_row(r) for r in rows]
 
     def get_stage_by_name(self, pipeline_id: str, name: str) -> Stage | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM stages WHERE pipeline_id = ? AND name = ?",
-            (pipeline_id, name),
+        stmt = (
+            sa.select(stages)
+            .where(stages.c.pipeline_id == pipeline_id, stages.c.name == name)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return stage_from_row(row) if row else None
 
     # ------------------------------------------------------------------
@@ -222,16 +233,14 @@ class PipelineManager:
             reason=reason,
         )
 
-        self._backend.execute(
-            """INSERT INTO stage_transitions
-               (id, object_id, from_stage_id, to_stage_id,
-                transitioned_at, transitioned_by, reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                tid, object_id, from_stage_id, to_stage_id,
-                ts.isoformat(), transitioned_by, reason,
-            ),
+        stmt = sa.insert(stage_transitions).values(
+            id=tid, object_id=object_id,
+            from_stage_id=from_stage_id, to_stage_id=to_stage_id,
+            transitioned_at=ts.isoformat(),
+            transitioned_by=transitioned_by, reason=reason,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         self._trace(
             actor_id=transitioned_by,
@@ -246,12 +255,14 @@ class PipelineManager:
 
     def get_current_stage(self, object_id: str) -> StageTransition | None:
         """Get the most recent stage transition for an object."""
-        row = self._backend.fetch_one(
-            """SELECT * FROM stage_transitions
-               WHERE object_id = ?
-               ORDER BY transitioned_at DESC LIMIT 1""",
-            (object_id,),
+        stmt = (
+            sa.select(stage_transitions)
+            .where(stage_transitions.c.object_id == object_id)
+            .order_by(stage_transitions.c.transitioned_at.desc())
+            .limit(1)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return transition_from_row(row) if row else None
 
     def get_transition_history(
@@ -261,12 +272,14 @@ class PipelineManager:
         limit: int = 100,
     ) -> list[StageTransition]:
         """Get transition history for an object, newest first."""
-        rows = self._backend.fetch_all(
-            """SELECT * FROM stage_transitions
-               WHERE object_id = ?
-               ORDER BY transitioned_at DESC LIMIT ?""",
-            (object_id, limit),
+        stmt = (
+            sa.select(stage_transitions)
+            .where(stage_transitions.c.object_id == object_id)
+            .order_by(stage_transitions.c.transitioned_at.desc())
+            .limit(limit)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [transition_from_row(r) for r in rows]
 
     # ------------------------------------------------------------------

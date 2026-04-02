@@ -8,6 +8,8 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.registry.base import get_registry
 from scoped.registry.kinds import RegistryKind
 from scoped.registry.sqlite_store import SQLiteRegistryStore
@@ -17,10 +19,14 @@ from scoped.scheduling.models import (
     schedule_from_row,
     scheduled_action_from_row,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import recurring_schedules, scheduled_actions
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+from scoped._stability import experimental
 
 
+@experimental()
 class Scheduler:
     """Manage scheduled actions and recurring schedules.
 
@@ -74,16 +80,17 @@ class Scheduler:
             interval_seconds=interval_seconds,
             created_at=now_utc(),
         )
-        self._backend.execute(
-            "INSERT INTO recurring_schedules "
-            "(id, name, owner_id, cron_expression, interval_seconds, created_at, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                schedule.id, schedule.name, schedule.owner_id,
-                schedule.cron_expression, schedule.interval_seconds,
-                schedule.created_at.isoformat(), schedule.lifecycle.name,
-            ),
+        stmt = sa.insert(recurring_schedules).values(
+            id=schedule.id,
+            name=schedule.name,
+            owner_id=schedule.owner_id,
+            cron_expression=schedule.cron_expression,
+            interval_seconds=schedule.interval_seconds,
+            created_at=schedule.created_at.isoformat(),
+            lifecycle=schedule.lifecycle.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Auto-register (Invariant #1)
         try:
@@ -113,9 +120,9 @@ class Scheduler:
         return schedule
 
     def get_schedule(self, schedule_id: str) -> RecurringSchedule | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM recurring_schedules WHERE id = ?", (schedule_id,),
-        )
+        stmt = sa.select(recurring_schedules).where(recurring_schedules.c.id == schedule_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return schedule_from_row(row) if row else None
 
     def list_schedules(
@@ -124,25 +131,24 @@ class Scheduler:
         owner_id: str | None = None,
         active_only: bool = True,
     ) -> list[RecurringSchedule]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(recurring_schedules)
         if active_only:
-            clauses.append("lifecycle = 'ACTIVE'")
+            stmt = stmt.where(recurring_schedules.c.lifecycle == "ACTIVE")
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
-        where = " AND ".join(clauses) if clauses else "1=1"
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM recurring_schedules WHERE {where} ORDER BY created_at DESC",
-            tuple(params),
-        )
+            stmt = stmt.where(recurring_schedules.c.owner_id == owner_id)
+        stmt = stmt.order_by(recurring_schedules.c.created_at.desc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [schedule_from_row(r) for r in rows]
 
     def archive_schedule(self, schedule_id: str) -> None:
-        self._backend.execute(
-            "UPDATE recurring_schedules SET lifecycle = 'ARCHIVED' WHERE id = ?",
-            (schedule_id,),
+        stmt = (
+            sa.update(recurring_schedules)
+            .where(recurring_schedules.c.id == schedule_id)
+            .values(lifecycle="ARCHIVED")
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             try:
@@ -184,19 +190,20 @@ class Scheduler:
             scope_id=scope_id,
             created_at=now_utc(),
         )
-        self._backend.execute(
-            "INSERT INTO scheduled_actions "
-            "(id, name, owner_id, action_type, action_config_json, "
-            "next_run_at, schedule_id, scope_id, created_at, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                action.id, action.name, action.owner_id,
-                action.action_type, json.dumps(action.action_config),
-                action.next_run_at.isoformat(),
-                action.schedule_id, action.scope_id,
-                action.created_at.isoformat(), action.lifecycle.name,
-            ),
+        stmt = sa.insert(scheduled_actions).values(
+            id=action.id,
+            name=action.name,
+            owner_id=action.owner_id,
+            action_type=action.action_type,
+            action_config_json=json.dumps(action.action_config),
+            next_run_at=action.next_run_at.isoformat(),
+            schedule_id=action.schedule_id,
+            scope_id=action.scope_id,
+            created_at=action.created_at.isoformat(),
+            lifecycle=action.lifecycle.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             try:
@@ -213,9 +220,9 @@ class Scheduler:
         return action
 
     def get_action(self, action_id: str) -> ScheduledAction | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM scheduled_actions WHERE id = ?", (action_id,),
-        )
+        stmt = sa.select(scheduled_actions).where(scheduled_actions.c.id == action_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return scheduled_action_from_row(row) if row else None
 
     def list_actions(
@@ -224,29 +231,29 @@ class Scheduler:
         owner_id: str | None = None,
         active_only: bool = True,
     ) -> list[ScheduledAction]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(scheduled_actions)
         if active_only:
-            clauses.append("lifecycle = 'ACTIVE'")
+            stmt = stmt.where(scheduled_actions.c.lifecycle == "ACTIVE")
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
-        where = " AND ".join(clauses) if clauses else "1=1"
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM scheduled_actions WHERE {where} ORDER BY next_run_at ASC",
-            tuple(params),
-        )
+            stmt = stmt.where(scheduled_actions.c.owner_id == owner_id)
+        stmt = stmt.order_by(scheduled_actions.c.next_run_at.asc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [scheduled_action_from_row(r) for r in rows]
 
     def get_due_actions(self, as_of: datetime | None = None) -> list[ScheduledAction]:
         """Get all active scheduled actions whose next_run_at <= as_of."""
         ts = (as_of or now_utc()).isoformat()
-        rows = self._backend.fetch_all(
-            "SELECT * FROM scheduled_actions "
-            "WHERE lifecycle = 'ACTIVE' AND next_run_at <= ? "
-            "ORDER BY next_run_at ASC",
-            (ts,),
+        stmt = (
+            sa.select(scheduled_actions)
+            .where(
+                scheduled_actions.c.lifecycle == "ACTIVE",
+                scheduled_actions.c.next_run_at <= ts,
+            )
+            .order_by(scheduled_actions.c.next_run_at.asc())
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [scheduled_action_from_row(r) for r in rows]
 
     def advance_action(
@@ -255,10 +262,13 @@ class Scheduler:
         next_run_at: datetime,
     ) -> None:
         """Update the next_run_at for a recurring action after execution."""
-        self._backend.execute(
-            "UPDATE scheduled_actions SET next_run_at = ? WHERE id = ?",
-            (next_run_at.isoformat(), action_id),
+        stmt = (
+            sa.update(scheduled_actions)
+            .where(scheduled_actions.c.id == action_id)
+            .values(next_run_at=next_run_at.isoformat())
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def process_due_actions(
         self,
@@ -347,10 +357,13 @@ class Scheduler:
         return jobs
 
     def archive_action(self, action_id: str) -> None:
-        self._backend.execute(
-            "UPDATE scheduled_actions SET lifecycle = 'ARCHIVED' WHERE id = ?",
-            (action_id,),
+        stmt = (
+            sa.update(scheduled_actions)
+            .where(scheduled_actions.c.id == action_id)
+            .values(lifecycle="ARCHIVED")
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             try:

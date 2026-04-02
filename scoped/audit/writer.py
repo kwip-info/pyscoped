@@ -13,8 +13,12 @@ import sqlite3
 import threading
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.audit.models import TraceEntry, compute_hash
 from scoped.exceptions import AuditSequenceCollisionError
+from scoped.storage._query import compile_for
+from scoped.storage._schema import audit_trail
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, generate_id, now_utc
 
@@ -56,9 +60,11 @@ class AuditWriter:
 
     def _seed_chain(self) -> tuple[int, str]:
         """Read the latest sequence and hash from the database."""
-        row = self._backend.fetch_one(
-            "SELECT sequence, hash FROM audit_trail ORDER BY sequence DESC LIMIT 1"
-        )
+        stmt = sa.select(
+            audit_trail.c.sequence, audit_trail.c.hash,
+        ).order_by(audit_trail.c.sequence.desc()).limit(1)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return 0, ""
         return row["sequence"], row["hash"]
@@ -253,46 +259,36 @@ class AuditWriter:
 
     # -- Persistence --------------------------------------------------------
 
+    @staticmethod
+    def _entry_values(entry: TraceEntry) -> dict[str, Any]:
+        return {
+            "id": entry.id,
+            "sequence": entry.sequence,
+            "actor_id": entry.actor_id,
+            "action": entry.action.value,
+            "target_type": entry.target_type,
+            "target_id": entry.target_id,
+            "scope_id": entry.scope_id,
+            "timestamp": entry.timestamp.isoformat(),
+            "before_state": json.dumps(entry.before_state) if entry.before_state is not None else None,
+            "after_state": json.dumps(entry.after_state) if entry.after_state is not None else None,
+            "metadata_json": json.dumps(entry.metadata),
+            "parent_trace_id": entry.parent_trace_id,
+            "hash": entry.hash,
+            "previous_hash": entry.previous_hash,
+        }
+
     def _persist(self, entry: TraceEntry) -> None:
         """Persist a single entry outside a transaction (auto-commit)."""
-        self._backend.execute(
-            """INSERT INTO audit_trail
-               (id, sequence, actor_id, action, target_type, target_id,
-                scope_id, timestamp, before_state, after_state,
-                metadata_json, parent_trace_id, hash, previous_hash)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            self._entry_params(entry),
-        )
+        stmt = sa.insert(audit_trail).values(**self._entry_values(entry))
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def _persist_in_txn(self, txn: Any, entry: TraceEntry) -> None:
         """Persist a single entry within an existing transaction."""
-        txn.execute(
-            """INSERT INTO audit_trail
-               (id, sequence, actor_id, action, target_type, target_id,
-                scope_id, timestamp, before_state, after_state,
-                metadata_json, parent_trace_id, hash, previous_hash)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            self._entry_params(entry),
-        )
-
-    @staticmethod
-    def _entry_params(entry: TraceEntry) -> tuple[Any, ...]:
-        return (
-            entry.id,
-            entry.sequence,
-            entry.actor_id,
-            entry.action.value,
-            entry.target_type,
-            entry.target_id,
-            entry.scope_id,
-            entry.timestamp.isoformat(),
-            json.dumps(entry.before_state) if entry.before_state is not None else None,
-            json.dumps(entry.after_state) if entry.after_state is not None else None,
-            json.dumps(entry.metadata),
-            entry.parent_trace_id,
-            entry.hash,
-            entry.previous_hash,
-        )
+        stmt = sa.insert(audit_trail).values(**self._entry_values(entry))
+        sql, params = compile_for(stmt, self._backend.dialect)
+        txn.execute(sql, params)
 
     @staticmethod
     def _is_sequence_collision(exc: Exception) -> bool:

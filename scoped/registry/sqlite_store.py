@@ -8,8 +8,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.registry.base import RegistryEntry
 from scoped.registry.store import RegistryStore
+from scoped.storage._query import compile_for, dialect_insert
+from scoped.storage._schema import registry_entries
 from scoped.storage.interface import StorageBackend
 
 
@@ -21,75 +25,71 @@ class SQLiteRegistryStore(RegistryStore):
 
     def save_entry(self, entry: RegistryEntry) -> None:
         snapshot = entry.snapshot()
-        self._backend.execute(
-            """
-            INSERT INTO registry_entries
-                (id, urn, kind, namespace, name, lifecycle, registered_at,
-                 registered_by, entry_version, previous_entry_id, metadata_json, tags_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (id) DO UPDATE SET
-                urn = excluded.urn,
-                kind = excluded.kind,
-                namespace = excluded.namespace,
-                name = excluded.name,
-                lifecycle = excluded.lifecycle,
-                registered_at = excluded.registered_at,
-                registered_by = excluded.registered_by,
-                entry_version = excluded.entry_version,
-                previous_entry_id = excluded.previous_entry_id,
-                metadata_json = excluded.metadata_json,
-                tags_json = excluded.tags_json
-            """,
-            (
-                snapshot["id"],
-                snapshot["urn"],
-                snapshot["kind"],
-                snapshot["namespace"],
-                entry.urn.name,
-                snapshot["lifecycle"],
-                snapshot["registered_at"],
-                snapshot["registered_by"],
-                snapshot["entry_version"],
-                entry.previous_entry_id,
-                json.dumps(snapshot["metadata"]),
-                json.dumps(snapshot["tags"]),
-            ),
+        _cols = [
+            "urn", "kind", "namespace", "name", "lifecycle",
+            "registered_at", "registered_by", "entry_version",
+            "previous_entry_id", "metadata_json", "tags_json",
+        ]
+        stmt = dialect_insert(registry_entries, self._backend.dialect).values(
+            id=snapshot["id"],
+            urn=snapshot["urn"],
+            kind=snapshot["kind"],
+            namespace=snapshot["namespace"],
+            name=entry.urn.name,
+            lifecycle=snapshot["lifecycle"],
+            registered_at=snapshot["registered_at"],
+            registered_by=snapshot["registered_by"],
+            entry_version=snapshot["entry_version"],
+            previous_entry_id=entry.previous_entry_id,
+            metadata_json=json.dumps(snapshot["metadata"]),
+            tags_json=json.dumps(snapshot["tags"]),
         )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["id"],
+            set_={col: stmt.excluded[col] for col in _cols},
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def save_all(self, entries: list[RegistryEntry]) -> None:
         tx = self._backend.transaction()
         try:
             for entry in entries:
                 snapshot = entry.snapshot()
-                tx.execute(
-                    """
-                    INSERT OR REPLACE INTO registry_entries
-                        (id, urn, kind, namespace, name, lifecycle, registered_at,
-                         registered_by, entry_version, previous_entry_id, metadata_json, tags_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        snapshot["id"],
-                        snapshot["urn"],
-                        snapshot["kind"],
-                        snapshot["namespace"],
-                        entry.urn.name,
-                        snapshot["lifecycle"],
-                        snapshot["registered_at"],
-                        snapshot["registered_by"],
-                        snapshot["entry_version"],
-                        entry.previous_entry_id,
-                        json.dumps(snapshot["metadata"]),
-                        json.dumps(snapshot["tags"]),
-                    ),
+                _cols = [
+                    "urn", "kind", "namespace", "name", "lifecycle",
+                    "registered_at", "registered_by", "entry_version",
+                    "previous_entry_id", "metadata_json", "tags_json",
+                ]
+                stmt = dialect_insert(registry_entries, self._backend.dialect).values(
+                    id=snapshot["id"],
+                    urn=snapshot["urn"],
+                    kind=snapshot["kind"],
+                    namespace=snapshot["namespace"],
+                    name=entry.urn.name,
+                    lifecycle=snapshot["lifecycle"],
+                    registered_at=snapshot["registered_at"],
+                    registered_by=snapshot["registered_by"],
+                    entry_version=snapshot["entry_version"],
+                    previous_entry_id=entry.previous_entry_id,
+                    metadata_json=json.dumps(snapshot["metadata"]),
+                    tags_json=json.dumps(snapshot["tags"]),
                 )
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={col: stmt.excluded[col] for col in _cols},
+                )
+                sql, params = compile_for(stmt, self._backend.dialect)
+                tx.execute(sql, params)
             tx.commit()
         except Exception:
             tx.rollback()
             raise
 
     def load_all(self) -> list[dict[str, Any]]:
-        rows = self._backend.fetch_all("SELECT * FROM registry_entries")
+        stmt = sa.select(registry_entries)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         results = []
         for row in rows:
             results.append({
@@ -109,10 +109,11 @@ class SQLiteRegistryStore(RegistryStore):
         return results
 
     def delete_entry(self, entry_id: str) -> None:
-        self._backend.execute(
-            "DELETE FROM registry_entries WHERE id = ?",
-            (entry_id,),
-        )
+        stmt = sa.delete(registry_entries).where(registry_entries.c.id == entry_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def clear(self) -> None:
-        self._backend.execute("DELETE FROM registry_entries")
+        stmt = sa.delete(registry_entries)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)

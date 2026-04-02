@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.connector.marketplace.models import (
     ListingType,
     MarketplaceListing,
@@ -14,10 +16,14 @@ from scoped.connector.marketplace.models import (
     review_from_row,
 )
 from scoped.exceptions import MarketplaceError
+from scoped.storage._query import compile_for
+from scoped.storage._schema import marketplace_listings, marketplace_reviews
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+from scoped._stability import preview
 
 
+@preview()
 class MarketplacePublisher:
     """Publish, version, deprecate, and remove marketplace listings."""
 
@@ -62,16 +68,23 @@ class MarketplacePublisher:
             metadata=meta,
         )
 
-        self._backend.execute(
-            """INSERT INTO marketplace_listings
-               (id, name, description, publisher_id, listing_type, version,
-                config_template, visibility, published_at, updated_at,
-                lifecycle, download_count, metadata_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (lid, name, description, publisher_id, listing_type.value, version,
-             json.dumps(cfg), visibility.value, ts.isoformat(), None,
-             "ACTIVE", 0, json.dumps(meta)),
+        stmt = sa.insert(marketplace_listings).values(
+            id=lid,
+            name=name,
+            description=description,
+            publisher_id=publisher_id,
+            listing_type=listing_type.value,
+            version=version,
+            config_template=json.dumps(cfg),
+            visibility=visibility.value,
+            published_at=ts.isoformat(),
+            updated_at=None,
+            lifecycle="ACTIVE",
+            download_count=0,
+            metadata_json=json.dumps(meta),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             self._audit.record(
@@ -85,9 +98,11 @@ class MarketplacePublisher:
         return listing
 
     def get_listing(self, listing_id: str) -> MarketplaceListing | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM marketplace_listings WHERE id = ?", (listing_id,),
+        stmt = sa.select(marketplace_listings).where(
+            marketplace_listings.c.id == listing_id,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return listing_from_row(row) if row else None
 
     def get_listing_or_raise(self, listing_id: str) -> MarketplaceListing:
@@ -112,18 +127,19 @@ class MarketplacePublisher:
         listing = self.get_listing_or_raise(listing_id)
         ts = now_utc()
 
-        updates = ["version = ?", "updated_at = ?"]
-        params: list[Any] = [new_version, ts.isoformat()]
+        values: dict[str, Any] = {
+            "version": new_version,
+            "updated_at": ts.isoformat(),
+        }
 
         if config_template is not None:
-            updates.append("config_template = ?")
-            params.append(json.dumps(config_template))
+            values["config_template"] = json.dumps(config_template)
 
-        params.append(listing_id)
-        self._backend.execute(
-            f"UPDATE marketplace_listings SET {', '.join(updates)} WHERE id = ?",
-            tuple(params),
-        )
+        stmt = sa.update(marketplace_listings).where(
+            marketplace_listings.c.id == listing_id,
+        ).values(**values)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         listing.version = new_version
         listing.updated_at = ts
@@ -136,10 +152,11 @@ class MarketplacePublisher:
         """Deprecate a listing (still visible but flagged)."""
         listing = self.get_listing_or_raise(listing_id)
         ts = now_utc()
-        self._backend.execute(
-            "UPDATE marketplace_listings SET lifecycle = 'DEPRECATED', updated_at = ? WHERE id = ?",
-            (ts.isoformat(), listing_id),
-        )
+        stmt = sa.update(marketplace_listings).where(
+            marketplace_listings.c.id == listing_id,
+        ).values(lifecycle="DEPRECATED", updated_at=ts.isoformat())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         listing.lifecycle = Lifecycle.DEPRECATED
         listing.updated_at = ts
         return listing
@@ -148,10 +165,11 @@ class MarketplacePublisher:
         """Remove a listing from the marketplace."""
         listing = self.get_listing_or_raise(listing_id)
         ts = now_utc()
-        self._backend.execute(
-            "UPDATE marketplace_listings SET lifecycle = 'ARCHIVED', updated_at = ? WHERE id = ?",
-            (ts.isoformat(), listing_id),
-        )
+        stmt = sa.update(marketplace_listings).where(
+            marketplace_listings.c.id == listing_id,
+        ).values(lifecycle="ARCHIVED", updated_at=ts.isoformat())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         listing.lifecycle = Lifecycle.ARCHIVED
         listing.updated_at = ts
         return listing
@@ -166,10 +184,11 @@ class MarketplacePublisher:
         """Change a listing's visibility."""
         listing = self.get_listing_or_raise(listing_id)
         ts = now_utc()
-        self._backend.execute(
-            "UPDATE marketplace_listings SET visibility = ?, updated_at = ? WHERE id = ?",
-            (visibility.value, ts.isoformat(), listing_id),
-        )
+        stmt = sa.update(marketplace_listings).where(
+            marketplace_listings.c.id == listing_id,
+        ).values(visibility=visibility.value, updated_at=ts.isoformat())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         listing.visibility = visibility
         listing.updated_at = ts
         return listing
@@ -204,12 +223,16 @@ class MarketplacePublisher:
             reviewed_at=ts,
         )
 
-        self._backend.execute(
-            """INSERT INTO marketplace_reviews
-               (id, listing_id, reviewer_id, rating, review_text, reviewed_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (rid, listing_id, reviewer_id, rating, review_text, ts.isoformat()),
+        stmt = sa.insert(marketplace_reviews).values(
+            id=rid,
+            listing_id=listing_id,
+            reviewer_id=reviewer_id,
+            rating=rating,
+            review_text=review_text,
+            reviewed_at=ts.isoformat(),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         return review
 
@@ -219,18 +242,21 @@ class MarketplacePublisher:
         *,
         limit: int = 100,
     ) -> list[MarketplaceReview]:
-        rows = self._backend.fetch_all(
-            "SELECT * FROM marketplace_reviews WHERE listing_id = ? ORDER BY reviewed_at DESC LIMIT ?",
-            (listing_id, limit),
-        )
+        stmt = sa.select(marketplace_reviews).where(
+            marketplace_reviews.c.listing_id == listing_id,
+        ).order_by(marketplace_reviews.c.reviewed_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [review_from_row(r) for r in rows]
 
     def get_average_rating(self, listing_id: str) -> float | None:
         """Get average rating for a listing. Returns None if no reviews."""
-        row = self._backend.fetch_one(
-            "SELECT AVG(rating) as avg_rating, COUNT(*) as cnt FROM marketplace_reviews WHERE listing_id = ?",
-            (listing_id,),
-        )
+        stmt = sa.select(
+            sa.func.avg(marketplace_reviews.c.rating).label("avg_rating"),
+            sa.func.count().label("cnt"),
+        ).where(marketplace_reviews.c.listing_id == listing_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None or row["cnt"] == 0:
             return None
         return row["avg_rating"]

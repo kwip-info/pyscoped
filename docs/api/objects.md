@@ -44,7 +44,7 @@ and the operation is rolled back.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `object_type` | `str` | *required* | A string classifying the object (e.g. `"document"`, `"config"`, `"secret"`). Used for filtering and rule matching. |
-| `data` | `dict[str, Any]` | *required* | JSON-serializable payload stored as the first version's content. |
+| `data` | `dict[str, Any] \| Any` | *required* | JSON-serializable payload, or a registered typed instance (Pydantic model, dataclass, `ScopedSerializable`). Typed instances are auto-serialized. |
 | `owner_id` | `str \| None` | `None` | Principal ID of the owner. Falls back to the context principal or `SYSTEM`. |
 | `change_reason` | `str \| None` | `None` | Human-readable reason recorded in the audit trail and version metadata. |
 
@@ -184,7 +184,7 @@ write is committed.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `object_id` | `str` | *required* | The object to update. |
-| `data` | `dict[str, Any]` | *required* | Complete replacement data for the new version. |
+| `data` | `dict[str, Any] \| Any` | *required* | Complete replacement data, or a registered typed instance. |
 | `principal_id` | `str \| None` | `None` | The acting principal. Falls back to the context principal. |
 | `change_reason` | `str \| None` | `None` | Human-readable reason for the change. |
 
@@ -456,6 +456,60 @@ class Tombstone:
 | `deleted_by` | `str` | Principal ID that performed the deletion. |
 | `reason` | `str \| None` | Reason for deletion. |
 | `last_version_number` | `int` | The version number at the time of deletion. |
+
+---
+
+## Typed Object Protocol
+
+Register a type for automatic serialization/deserialization of versioned data:
+
+```python
+from pydantic import BaseModel
+import scoped
+
+class Invoice(BaseModel):
+    amount: float
+    currency: str
+    status: str = "draft"
+
+scoped.register_type("invoice", Invoice)
+
+# Create with a typed instance — auto-serialized to dict
+doc, v1 = scoped.objects.create("invoice", data=Invoice(amount=500, currency="USD"))
+
+# Read with typed access
+versions = scoped.objects.versions(doc.id)
+invoice = versions[0].typed_data  # Invoice(amount=500, currency="USD", status="draft")
+
+# Dict path still works (backward compatible)
+doc, v2 = scoped.objects.create("invoice", data={"amount": 500, "currency": "USD"})
+```
+
+### Supported Types
+
+| Type | Adapter | Serialize | Deserialize |
+|---|---|---|---|
+| Pydantic `BaseModel` | `PydanticAdapter` | `model_dump(mode="json")` | `model_validate(data)` |
+| `@dataclass` | `DataclassAdapter` | `dataclasses.asdict()` | `cls(**data)` |
+| `ScopedSerializable` | `ScopedSerializableAdapter` | `to_scoped_dict()` | `from_scoped_dict(data)` |
+
+Types are auto-detected when registered. The type registry is thread-safe.
+
+### Custom Protocol
+
+```python
+from scoped.types import ScopedSerializable
+
+class MyType:
+    def to_scoped_dict(self) -> dict[str, Any]:
+        return {"key": self.key, "value": self.value}
+
+    @classmethod
+    def from_scoped_dict(cls, data: dict[str, Any]) -> "MyType":
+        return cls(key=data["key"], value=data["value"])
+
+scoped.register_type("my_type", MyType)
+```
 
 ---
 

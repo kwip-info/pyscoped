@@ -6,6 +6,7 @@ import pytest
 
 from scoped.registry.base import Registry, reset_global_registry
 from scoped.registry.kinds import CustomKind
+from scoped.storage.sa_sqlite import SASQLiteBackend
 from scoped.storage.sqlite import SQLiteBackend
 
 
@@ -52,11 +53,25 @@ def _clean_postgres(backend) -> None:
         backend.execute(f"DROP TABLE IF EXISTS {names} CASCADE")
 
 
-@pytest.fixture(params=["sqlite", "postgres"])
+@pytest.fixture
+def sa_sqlite_backend():
+    """In-memory SQLAlchemy SQLite backend, initialized with schema."""
+    backend = SASQLiteBackend(":memory:")
+    backend.initialize()
+    yield backend
+    backend.close()
+
+
+@pytest.fixture(params=["sqlite", "sa_sqlite", "postgres"])
 def storage_backend(request):
-    """Parametrized backend fixture — runs tests on both SQLite and Postgres."""
+    """Parametrized backend fixture — runs tests on SQLite, SA SQLite, and Postgres."""
     if request.param == "sqlite":
         backend = SQLiteBackend(":memory:")
+        backend.initialize()
+        yield backend
+        backend.close()
+    elif request.param == "sa_sqlite":
+        backend = SASQLiteBackend(":memory:")
         backend.initialize()
         yield backend
         backend.close()

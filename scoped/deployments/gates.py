@@ -11,6 +11,10 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+import sqlalchemy as sa
+
+from scoped.storage._query import compile_for
+from scoped.storage._schema import deployment_gates
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, generate_id, now_utc
 
@@ -19,6 +23,7 @@ from scoped.deployments.models import (
     GateType,
     gate_from_row,
 )
+from scoped._stability import experimental
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +36,7 @@ class GateResult:
     failed_count: int = 0
 
 
+@experimental()
 class GateChecker:
     """Record and evaluate deployment gate checks."""
 
@@ -63,13 +69,14 @@ class GateChecker:
             checked_at=ts,
             details=details or {},
         )
-        self._backend.execute(
-            """INSERT INTO deployment_gates
-               (id, deployment_id, gate_type, passed, checked_at, details_json)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (gid, deployment_id, gate_type.value, int(passed),
-             ts.isoformat(), json.dumps(gate.details)),
+        stmt = sa.insert(deployment_gates).values(
+            id=gid, deployment_id=deployment_id,
+            gate_type=gate_type.value, passed=int(passed),
+            checked_at=ts.isoformat(),
+            details_json=json.dumps(gate.details),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None and checked_by is not None:
             self._audit.record(
@@ -84,10 +91,13 @@ class GateChecker:
 
     def get_gates(self, deployment_id: str) -> list[DeploymentGate]:
         """Get all gate checks for a deployment."""
-        rows = self._backend.fetch_all(
-            "SELECT * FROM deployment_gates WHERE deployment_id = ? ORDER BY checked_at",
-            (deployment_id,),
+        stmt = (
+            sa.select(deployment_gates)
+            .where(deployment_gates.c.deployment_id == deployment_id)
+            .order_by(deployment_gates.c.checked_at)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [gate_from_row(r) for r in rows]
 
     def check_all_passed(self, deployment_id: str) -> GateResult:

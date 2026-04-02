@@ -97,6 +97,13 @@ class DjangoORMBackend(StorageBackend):
         self._auto_create = auto_create_tables
 
     @property
+    def dialect(self) -> str:
+        vendor = self._connection.vendor
+        if vendor == "postgresql":
+            return "postgres"
+        return vendor  # "sqlite", etc.
+
+    @property
     def _connection(self):
         from django.db import connections
 

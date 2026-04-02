@@ -12,11 +12,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import (
     AccessDeniedError,
     ScopeFrozenError,
     ScopeNotFoundError,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import scope_settings, scopes
 from scoped.storage.interface import StorageBackend
 from scoped.tenancy.models import _lifecycle_to_db, scope_from_row
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
@@ -132,21 +136,29 @@ class ConfigStore:
         value_json = json.dumps(value)
 
         # Check if setting already exists
-        existing = self._backend.fetch_one(
-            "SELECT * FROM scope_settings "
-            "WHERE scope_id = ? AND key = ? AND lifecycle = ?",
-            (scope_id, key, Lifecycle.ACTIVE.name),
+        stmt = sa.select(scope_settings).where(
+            sa.and_(
+                scope_settings.c.scope_id == scope_id,
+                scope_settings.c.key == key,
+                scope_settings.c.lifecycle == Lifecycle.ACTIVE.name,
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        existing = self._backend.fetch_one(sql, params)
 
         if existing is not None:
             # Update existing
             before = setting_from_row(existing)
-            self._backend.execute(
-                "UPDATE scope_settings SET value_json = ?, updated_at = ?, "
-                "updated_by = ?, description = ? "
-                "WHERE id = ?",
-                (value_json, ts.isoformat(), principal_id, description, existing["id"]),
+            update_stmt = sa.update(scope_settings).where(
+                scope_settings.c.id == existing["id"],
+            ).values(
+                value_json=value_json,
+                updated_at=ts.isoformat(),
+                updated_by=principal_id,
+                description=description,
             )
+            sql, params = compile_for(update_stmt, self._backend.dialect)
+            self._backend.execute(sql, params)
             setting = ScopedSetting(
                 id=existing["id"],
                 scope_id=scope_id,
@@ -182,16 +194,18 @@ class ConfigStore:
             created_by=principal_id,
             description=description,
         )
-        self._backend.execute(
-            "INSERT INTO scope_settings "
-            "(id, scope_id, key, value_json, created_at, created_by, description, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                setting_id, scope_id, key, value_json,
-                ts.isoformat(), principal_id, description,
-                Lifecycle.ACTIVE.name,
-            ),
+        insert_stmt = sa.insert(scope_settings).values(
+            id=setting_id,
+            scope_id=scope_id,
+            key=key,
+            value_json=value_json,
+            created_at=ts.isoformat(),
+            created_by=principal_id,
+            description=description,
+            lifecycle=Lifecycle.ACTIVE.name,
         )
+        sql, params = compile_for(insert_stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit:
             self._audit.record(
@@ -211,11 +225,15 @@ class ConfigStore:
         key: str,
     ) -> ScopedSetting | None:
         """Get a setting directly from a scope (no inheritance)."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM scope_settings "
-            "WHERE scope_id = ? AND key = ? AND lifecycle = ?",
-            (scope_id, key, Lifecycle.ACTIVE.name),
+        stmt = sa.select(scope_settings).where(
+            sa.and_(
+                scope_settings.c.scope_id == scope_id,
+                scope_settings.c.key == key,
+                scope_settings.c.lifecycle == Lifecycle.ACTIVE.name,
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return None
         return setting_from_row(row)
@@ -235,18 +253,23 @@ class ConfigStore:
         self._require_mutable(scope)
         self._require_owner(scope, principal_id)
 
-        existing = self._backend.fetch_one(
-            "SELECT * FROM scope_settings "
-            "WHERE scope_id = ? AND key = ? AND lifecycle = ?",
-            (scope_id, key, Lifecycle.ACTIVE.name),
+        select_stmt = sa.select(scope_settings).where(
+            sa.and_(
+                scope_settings.c.scope_id == scope_id,
+                scope_settings.c.key == key,
+                scope_settings.c.lifecycle == Lifecycle.ACTIVE.name,
+            )
         )
+        sql, params = compile_for(select_stmt, self._backend.dialect)
+        existing = self._backend.fetch_one(sql, params)
         if existing is None:
             return False
 
-        self._backend.execute(
-            "UPDATE scope_settings SET lifecycle = ? WHERE id = ?",
-            (Lifecycle.ARCHIVED.name, existing["id"]),
-        )
+        update_stmt = sa.update(scope_settings).where(
+            scope_settings.c.id == existing["id"],
+        ).values(lifecycle=Lifecycle.ARCHIVED.name)
+        sql, params = compile_for(update_stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit:
             self._audit.record(
@@ -267,17 +290,15 @@ class ConfigStore:
         include_archived: bool = False,
     ) -> list[ScopedSetting]:
         """List all settings for a scope (no inheritance)."""
-        clauses = ["scope_id = ?"]
-        params: list[Any] = [scope_id]
-        if not include_archived:
-            clauses.append("lifecycle = ?")
-            params.append(Lifecycle.ACTIVE.name)
-
-        where = " AND ".join(clauses)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM scope_settings WHERE {where} ORDER BY key ASC",
-            tuple(params),
+        stmt = sa.select(scope_settings).where(
+            scope_settings.c.scope_id == scope_id,
         )
+        if not include_archived:
+            stmt = stmt.where(scope_settings.c.lifecycle == Lifecycle.ACTIVE.name)
+        stmt = stmt.order_by(scope_settings.c.key.asc())
+
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [setting_from_row(r) for r in rows]
 
     # ------------------------------------------------------------------

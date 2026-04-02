@@ -11,8 +11,12 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.objects.export import ExportPackage, ExportedObject, FORMAT_VERSION
 from scoped.objects.models import compute_checksum
+from scoped.storage._query import compile_for
+from scoped.storage._schema import object_versions, scoped_objects
 from scoped.storage.interface import StorageBackend
 from scoped.types import Lifecycle, generate_id, now_utc
 
@@ -126,19 +130,16 @@ class Importer:
         num_versions = len(exported.versions)
 
         # Create the scoped object
-        self._backend.execute(
-            "INSERT INTO scoped_objects "
-            "(id, object_type, owner_id, current_version, created_at, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                new_id,
-                exported.object_type,
-                principal_id,
-                num_versions,
-                ts.isoformat(),
-                Lifecycle.ACTIVE.name,
-            ),
+        obj_stmt = sa.insert(scoped_objects).values(
+            id=new_id,
+            object_type=exported.object_type,
+            owner_id=principal_id,
+            current_version=num_versions,
+            created_at=ts.isoformat(),
+            lifecycle=Lifecycle.ACTIVE.name,
         )
+        sql, params = compile_for(obj_stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Create all versions
         for ev in exported.versions:
@@ -148,21 +149,17 @@ class Importer:
             if recompute_checksums:
                 checksum = compute_checksum(ev.data)
 
-            self._backend.execute(
-                "INSERT INTO object_versions "
-                "(id, object_id, version, data_json, created_at, created_by, "
-                "change_reason, checksum) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    version_id,
-                    new_id,
-                    ev.version,
-                    json.dumps(ev.data),
-                    ts.isoformat(),
-                    principal_id,
-                    ev.change_reason or "imported",
-                    checksum,
-                ),
+            ver_stmt = sa.insert(object_versions).values(
+                id=version_id,
+                object_id=new_id,
+                version=ev.version,
+                data_json=json.dumps(ev.data),
+                created_at=ts.isoformat(),
+                created_by=principal_id,
+                change_reason=ev.change_reason or "imported",
+                checksum=checksum,
             )
+            sql, params = compile_for(ver_stmt, self._backend.dialect)
+            self._backend.execute(sql, params)
 
         return new_id

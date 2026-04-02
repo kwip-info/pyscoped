@@ -14,10 +14,14 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import (
     ContractNotFoundError,
     ContractValidationError,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import contract_versions, contracts
 from scoped.types import Lifecycle, generate_id, now_utc
 
 
@@ -264,18 +268,19 @@ class ContractStore:
             metadata=metadata or {},
         )
 
-        self._backend.execute(
-            "INSERT INTO contracts (id, name, description, object_type, owner_id, "
-            "current_version, created_at, lifecycle, metadata_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                contract.id, contract.name, contract.description,
-                contract.object_type, contract.owner_id,
-                contract.current_version, ts.isoformat(),
-                contract.lifecycle.name,
-                json.dumps(contract.metadata),
-            ),
+        stmt = sa.insert(contracts).values(
+            id=contract.id,
+            name=contract.name,
+            description=contract.description,
+            object_type=contract.object_type,
+            owner_id=contract.owner_id,
+            current_version=contract.current_version,
+            created_at=ts.isoformat(),
+            lifecycle=contract.lifecycle.name,
+            metadata_json=json.dumps(contract.metadata),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Create the initial version
         version_id = generate_id()
@@ -283,23 +288,25 @@ class ContractStore:
         constraints_json = json.dumps(
             [c.snapshot() for c in (constraints or [])]
         )
-        self._backend.execute(
-            "INSERT INTO contract_versions (id, contract_id, version, fields_json, "
-            "constraints_json, created_at, created_by, change_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                version_id, contract_id, 1, fields_json,
-                constraints_json, ts.isoformat(), owner_id,
-                "Initial version",
-            ),
+        stmt = sa.insert(contract_versions).values(
+            id=version_id,
+            contract_id=contract_id,
+            version=1,
+            fields_json=fields_json,
+            constraints_json=constraints_json,
+            created_at=ts.isoformat(),
+            created_by=owner_id,
+            change_reason="Initial version",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         return contract
 
     def get_contract(self, contract_id: str) -> Contract | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM contracts WHERE id = ?", (contract_id,)
-        )
+        stmt = sa.select(contracts).where(contracts.c.id == contract_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return contract_from_row(row) if row else None
 
     def get_contract_or_raise(self, contract_id: str) -> Contract:
@@ -313,11 +320,15 @@ class ContractStore:
 
     def get_contract_for_type(self, object_type: str) -> Contract | None:
         """Get the active contract for an object type."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM contracts WHERE object_type = ? AND lifecycle = 'ACTIVE' "
-            "ORDER BY created_at DESC LIMIT 1",
-            (object_type,),
+        stmt = (
+            sa.select(contracts)
+            .where(contracts.c.object_type == object_type)
+            .where(contracts.c.lifecycle == "ACTIVE")
+            .order_by(contracts.c.created_at.desc())
+            .limit(1)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return contract_from_row(row) if row else None
 
     def list_contracts(
@@ -328,47 +339,47 @@ class ContractStore:
         active_only: bool = True,
         limit: int = 100,
     ) -> list[Contract]:
-        conditions = []
-        params: list[Any] = []
+        stmt = sa.select(contracts)
 
         if owner_id:
-            conditions.append("owner_id = ?")
-            params.append(owner_id)
+            stmt = stmt.where(contracts.c.owner_id == owner_id)
         if object_type:
-            conditions.append("object_type = ?")
-            params.append(object_type)
+            stmt = stmt.where(contracts.c.object_type == object_type)
         if active_only:
-            conditions.append("lifecycle = 'ACTIVE'")
+            stmt = stmt.where(contracts.c.lifecycle == "ACTIVE")
 
-        where = " AND ".join(conditions) if conditions else "1=1"
-        params.append(limit)
-
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM contracts WHERE {where} ORDER BY created_at DESC LIMIT ?",
-            tuple(params),
-        )
+        stmt = stmt.order_by(contracts.c.created_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [contract_from_row(r) for r in rows]
 
     def get_version(self, contract_id: str, version: int | None = None) -> ContractVersion | None:
         """Get a specific version, or the latest if version is None."""
         if version is not None:
-            row = self._backend.fetch_one(
-                "SELECT * FROM contract_versions WHERE contract_id = ? AND version = ?",
-                (contract_id, version),
+            stmt = (
+                sa.select(contract_versions)
+                .where(contract_versions.c.contract_id == contract_id)
+                .where(contract_versions.c.version == version)
             )
         else:
-            row = self._backend.fetch_one(
-                "SELECT * FROM contract_versions WHERE contract_id = ? "
-                "ORDER BY version DESC LIMIT 1",
-                (contract_id,),
+            stmt = (
+                sa.select(contract_versions)
+                .where(contract_versions.c.contract_id == contract_id)
+                .order_by(contract_versions.c.version.desc())
+                .limit(1)
             )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return contract_version_from_row(row) if row else None
 
     def get_all_versions(self, contract_id: str) -> list[ContractVersion]:
-        rows = self._backend.fetch_all(
-            "SELECT * FROM contract_versions WHERE contract_id = ? ORDER BY version",
-            (contract_id,),
+        stmt = (
+            sa.select(contract_versions)
+            .where(contract_versions.c.contract_id == contract_id)
+            .order_by(contract_versions.c.version)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [contract_version_from_row(r) for r in rows]
 
     def update_contract(
@@ -391,20 +402,26 @@ class ContractStore:
             [c.snapshot() for c in (constraints or [])]
         )
 
-        self._backend.execute(
-            "INSERT INTO contract_versions (id, contract_id, version, fields_json, "
-            "constraints_json, created_at, created_by, change_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                version_id, contract_id, new_version, fields_json,
-                constraints_json, ts.isoformat(), actor_id, change_reason,
-            ),
+        stmt = sa.insert(contract_versions).values(
+            id=version_id,
+            contract_id=contract_id,
+            version=new_version,
+            fields_json=fields_json,
+            constraints_json=constraints_json,
+            created_at=ts.isoformat(),
+            created_by=actor_id,
+            change_reason=change_reason,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
-        self._backend.execute(
-            "UPDATE contracts SET current_version = ? WHERE id = ?",
-            (new_version, contract_id),
+        stmt = (
+            sa.update(contracts)
+            .where(contracts.c.id == contract_id)
+            .values(current_version=new_version)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         return ContractVersion(
             id=version_id,
@@ -419,19 +436,25 @@ class ContractStore:
 
     def deprecate(self, contract_id: str) -> Contract:
         contract = self.get_contract_or_raise(contract_id)
-        self._backend.execute(
-            "UPDATE contracts SET lifecycle = ? WHERE id = ?",
-            (Lifecycle.DEPRECATED.name, contract_id),
+        stmt = (
+            sa.update(contracts)
+            .where(contracts.c.id == contract_id)
+            .values(lifecycle=Lifecycle.DEPRECATED.name)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         contract.lifecycle = Lifecycle.DEPRECATED
         return contract
 
     def archive(self, contract_id: str) -> Contract:
         contract = self.get_contract_or_raise(contract_id)
-        self._backend.execute(
-            "UPDATE contracts SET lifecycle = ? WHERE id = ?",
-            (Lifecycle.ARCHIVED.name, contract_id),
+        stmt = (
+            sa.update(contracts)
+            .where(contracts.c.id == contract_id)
+            .values(lifecycle=Lifecycle.ARCHIVED.name)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         contract.lifecycle = Lifecycle.ARCHIVED
         return contract
 

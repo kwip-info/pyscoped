@@ -10,6 +10,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
+from scoped.storage._query import compile_for
+from scoped.storage._schema import (
+    environment_objects,
+    environment_snapshots,
+    environments,
+    object_versions,
+    scope_memberships,
+    scoped_objects,
+)
 from scoped.storage.interface import StorageBackend
 from scoped.types import generate_id, now_utc
 
@@ -18,8 +29,10 @@ from scoped.environments.models import (
     compute_snapshot_checksum,
     snapshot_from_row,
 )
+from scoped._stability import experimental
 
 
+@experimental()
 class SnapshotManager:
     """Capture and restore environment state snapshots."""
 
@@ -54,25 +67,21 @@ class SnapshotManager:
             checksum=checksum,
         )
 
-        self._backend.execute(
-            """INSERT INTO environment_snapshots
-               (id, environment_id, name, snapshot_data, created_at, created_by, checksum)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                snap.id, snap.environment_id, snap.name,
-                json.dumps(data, default=str),
-                snap.created_at.isoformat(),
-                snap.created_by, snap.checksum,
-            ),
+        stmt = sa.insert(environment_snapshots).values(
+            id=snap.id, environment_id=snap.environment_id,
+            name=snap.name, snapshot_data=json.dumps(data, default=str),
+            created_at=snap.created_at.isoformat(),
+            created_by=snap.created_by, checksum=snap.checksum,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         return snap
 
     def get(self, snapshot_id: str) -> EnvironmentSnapshot | None:
         """Fetch a snapshot by ID."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM environment_snapshots WHERE id = ?",
-            (snapshot_id,),
-        )
+        stmt = sa.select(environment_snapshots).where(environment_snapshots.c.id == snapshot_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return snapshot_from_row(row) if row else None
 
     def list_snapshots(
@@ -82,11 +91,14 @@ class SnapshotManager:
         limit: int = 100,
     ) -> list[EnvironmentSnapshot]:
         """List snapshots for an environment, newest first."""
-        rows = self._backend.fetch_all(
-            "SELECT * FROM environment_snapshots "
-            "WHERE environment_id = ? ORDER BY created_at DESC LIMIT ?",
-            (env_id, limit),
+        stmt = (
+            sa.select(environment_snapshots)
+            .where(environment_snapshots.c.environment_id == env_id)
+            .order_by(environment_snapshots.c.created_at.desc())
+            .limit(limit)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [snapshot_from_row(r) for r in rows]
 
     def verify(self, snapshot_id: str) -> bool:
@@ -104,29 +116,34 @@ class SnapshotManager:
     def _collect_state(self, env_id: str) -> dict[str, Any]:
         """Collect the full environment state for serialization."""
         # Environment record
-        env_row = self._backend.fetch_one(
-            "SELECT * FROM environments WHERE id = ?", (env_id,),
-        )
+        stmt = sa.select(environments).where(environments.c.id == env_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        env_row = self._backend.fetch_one(sql, params)
         if env_row is None:
             return {"environment": None, "objects": [], "versions": []}
 
         # Environment objects
-        obj_rows = self._backend.fetch_all(
-            "SELECT * FROM environment_objects WHERE environment_id = ?",
-            (env_id,),
-        )
+        stmt = sa.select(environment_objects).where(environment_objects.c.environment_id == env_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        obj_rows = self._backend.fetch_all(sql, params)
 
         # Collect current versions for each object
         versions: list[dict[str, Any]] = []
         for obj_row in obj_rows:
             oid = obj_row["object_id"]
-            ver_row = self._backend.fetch_one(
-                """SELECT ov.* FROM object_versions ov
-                   JOIN scoped_objects so ON so.id = ov.object_id
-                     AND so.current_version = ov.version
-                   WHERE ov.object_id = ?""",
-                (oid,),
+            stmt = (
+                sa.select(object_versions)
+                .select_from(
+                    object_versions.join(
+                        scoped_objects,
+                        (scoped_objects.c.id == object_versions.c.object_id)
+                        & (scoped_objects.c.current_version == object_versions.c.version),
+                    )
+                )
+                .where(object_versions.c.object_id == oid)
             )
+            sql, params = compile_for(stmt, self._backend.dialect)
+            ver_row = self._backend.fetch_one(sql, params)
             if ver_row:
                 versions.append(dict(ver_row))
 
@@ -134,10 +151,15 @@ class SnapshotManager:
         scope_id = env_row.get("scope_id")
         memberships: list[dict[str, Any]] = []
         if scope_id:
-            mem_rows = self._backend.fetch_all(
-                "SELECT * FROM scope_memberships WHERE scope_id = ? AND lifecycle = 'ACTIVE'",
-                (scope_id,),
+            stmt = (
+                sa.select(scope_memberships)
+                .where(
+                    scope_memberships.c.scope_id == scope_id,
+                    scope_memberships.c.lifecycle == "ACTIVE",
+                )
             )
+            sql, params = compile_for(stmt, self._backend.dialect)
+            mem_rows = self._backend.fetch_all(sql, params)
             memberships = [dict(r) for r in mem_rows]
 
         return {

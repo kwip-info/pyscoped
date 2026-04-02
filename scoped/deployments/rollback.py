@@ -10,14 +10,20 @@ from __future__ import annotations
 
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import DeploymentError, DeploymentRollbackError
+from scoped.storage._query import compile_for
+from scoped.storage._schema import deployments
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, now_utc
 
 from scoped.deployments.executor import DeploymentExecutor
 from scoped.deployments.models import Deployment, DeploymentState
+from scoped._stability import experimental
 
 
+@experimental()
 class DeploymentRollbackManager:
     """Create and manage deployment rollbacks."""
 
@@ -98,10 +104,12 @@ class DeploymentRollbackManager:
                 break
             chain.append(dep)
             # Find any deployment that is a rollback of this one
-            row = self._backend.fetch_one(
-                "SELECT id FROM deployments WHERE rollback_of = ?",
-                (current_id,),
+            stmt = (
+                sa.select(deployments.c.id)
+                .where(deployments.c.rollback_of == current_id)
             )
+            sql, params = compile_for(stmt, self._backend.dialect)
+            row = self._backend.fetch_one(sql, params)
             current_id = row["id"] if row else None
 
         return chain

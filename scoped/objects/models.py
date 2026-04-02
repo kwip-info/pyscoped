@@ -49,7 +49,13 @@ class ScopedObject:
 
 @dataclass(frozen=True, slots=True)
 class ObjectVersion:
-    """Immutable snapshot of an object's state at a point in time."""
+    """Immutable snapshot of an object's state at a point in time.
+
+    The ``data`` field always contains a raw ``dict[str, Any]``.
+    If a type is registered for this object's type via
+    ``scoped.register_type()``, the ``typed_data`` property returns
+    a deserialized typed instance.
+    """
 
     id: str
     object_id: str
@@ -59,6 +65,22 @@ class ObjectVersion:
     created_by: str
     change_reason: str = ""
     checksum: str = ""
+    _object_type: str = ""
+
+    @property
+    def typed_data(self) -> Any:
+        """Deserialize ``data`` to a typed instance if a type is registered.
+
+        Returns the typed instance if ``object_type`` is registered via
+        ``scoped.register_type()``, otherwise returns the raw ``data`` dict.
+        """
+        if not self._object_type:
+            return self.data
+        from scoped._type_registry import _registry
+
+        if not _registry.has_type(self._object_type):
+            return self.data
+        return _registry.deserialize(self._object_type, self.data)
 
     def snapshot(self) -> dict[str, Any]:
         """Serializable snapshot."""

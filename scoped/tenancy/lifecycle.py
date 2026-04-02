@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import (
     AccessDeniedError,
     ScopeFrozenError,
     ScopeNotFoundError,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import scope_memberships, scope_projections, scopes
 from scoped.storage.interface import StorageBackend
 from scoped.tenancy.models import (
     SCOPE_LIFECYCLE_FROZEN,
@@ -64,18 +68,19 @@ class ScopeLifecycle:
             metadata=meta,
         )
 
-        self._backend.execute(
-            "INSERT INTO scopes "
-            "(id, name, description, owner_id, parent_scope_id, registry_entry_id, "
-            "created_at, lifecycle, metadata_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                scope.id, scope.name, scope.description, scope.owner_id,
-                scope.parent_scope_id, scope.registry_entry_id,
-                scope.created_at.isoformat(), _lifecycle_to_db(scope.lifecycle),
-                json.dumps(meta),
-            ),
+        stmt = sa.insert(scopes).values(
+            id=scope.id,
+            name=scope.name,
+            description=scope.description,
+            owner_id=scope.owner_id,
+            parent_scope_id=scope.parent_scope_id,
+            registry_entry_id=scope.registry_entry_id,
+            created_at=scope.created_at.isoformat(),
+            lifecycle=_lifecycle_to_db(scope.lifecycle),
+            metadata_json=json.dumps(meta),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Auto-add owner as owner-role member
         self._add_membership(
@@ -101,9 +106,9 @@ class ScopeLifecycle:
     # ------------------------------------------------------------------
 
     def get_scope(self, scope_id: str) -> Scope | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM scopes WHERE id = ?", (scope_id,),
-        )
+        stmt = sa.select(scopes).where(scopes.c.id == scope_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return None
         return scope_from_row(row)
@@ -138,34 +143,28 @@ class ScopeLifecycle:
             limit: Maximum rows to return. ``None`` means no limit.
             offset: Number of rows to skip.
         """
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(scopes)
 
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
+            stmt = stmt.where(scopes.c.owner_id == owner_id)
         if parent_scope_id is not None:
-            clauses.append("parent_scope_id = ?")
-            params.append(parent_scope_id)
+            stmt = stmt.where(scopes.c.parent_scope_id == parent_scope_id)
         if not include_archived:
-            clauses.append("lifecycle != ?")
-            params.append(Lifecycle.ARCHIVED.name)
-
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            stmt = stmt.where(scopes.c.lifecycle != Lifecycle.ARCHIVED.name)
 
         # Parse order_by: "-name" → name DESC, "created_at" → created_at ASC
         desc = order_by.startswith("-")
         col = order_by.lstrip("-")
         if col not in self._SCOPE_ORDER_COLUMNS:
             col = "created_at"
-        direction = "DESC" if desc else "ASC"
+        order_col = scopes.c[col]
+        stmt = stmt.order_by(order_col.desc() if desc else order_col.asc())
 
-        sql = f"SELECT * FROM scopes{where} ORDER BY {col} {direction}"
         if limit is not None:
-            sql += " LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
+            stmt = stmt.limit(limit).offset(offset)
 
-        rows = self._backend.fetch_all(sql, tuple(params))
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [scope_from_row(r) for r in rows]
 
     def count_scopes(
@@ -176,24 +175,17 @@ class ScopeLifecycle:
         include_archived: bool = False,
     ) -> int:
         """Count scopes matching the given filters."""
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(sa.func.count().label("cnt")).select_from(scopes)
 
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
+            stmt = stmt.where(scopes.c.owner_id == owner_id)
         if parent_scope_id is not None:
-            clauses.append("parent_scope_id = ?")
-            params.append(parent_scope_id)
+            stmt = stmt.where(scopes.c.parent_scope_id == parent_scope_id)
         if not include_archived:
-            clauses.append("lifecycle != ?")
-            params.append(Lifecycle.ARCHIVED.name)
+            stmt = stmt.where(scopes.c.lifecycle != Lifecycle.ARCHIVED.name)
 
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        row = self._backend.fetch_one(
-            f"SELECT COUNT(*) as cnt FROM scopes{where}",
-            tuple(params),
-        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row["cnt"] if row else 0
 
     # ------------------------------------------------------------------
@@ -215,10 +207,9 @@ class ScopeLifecycle:
         if old_name == new_name:
             return scope
 
-        self._backend.execute(
-            "UPDATE scopes SET name = ? WHERE id = ?",
-            (new_name, scope_id),
-        )
+        stmt = sa.update(scopes).where(scopes.c.id == scope_id).values(name=new_name)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit:
             self._audit.record(
@@ -250,30 +241,25 @@ class ScopeLifecycle:
 
         before: dict[str, Any] = {}
         after: dict[str, Any] = {}
-        sets: list[str] = []
-        params: list[Any] = []
+        values: dict[str, Any] = {}
 
         if description is not None and description != scope.description:
-            sets.append("description = ?")
-            params.append(description)
+            values["description"] = description
             before["description"] = scope.description
             after["description"] = description
 
         if metadata is not None:
             merged = {**scope.metadata, **metadata}
-            sets.append("metadata_json = ?")
-            params.append(json.dumps(merged))
+            values["metadata_json"] = json.dumps(merged)
             before["metadata"] = scope.metadata
             after["metadata"] = merged
 
-        if not sets:
+        if not values:
             return scope
 
-        params.append(scope_id)
-        self._backend.execute(
-            f"UPDATE scopes SET {', '.join(sets)} WHERE id = ?",
-            tuple(params),
-        )
+        stmt = sa.update(scopes).where(scopes.c.id == scope_id).values(**values)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit:
             self._audit.record(
@@ -355,11 +341,15 @@ class ScopeLifecycle:
 
         # Read + conditional write in a single transaction to prevent races
         with self._backend.transaction() as txn:
-            existing = txn.fetch_one(
-                "SELECT * FROM scope_memberships "
-                "WHERE scope_id = ? AND principal_id = ? AND role = ?",
-                (scope_id, principal_id, role.value),
+            select_stmt = sa.select(scope_memberships).where(
+                sa.and_(
+                    scope_memberships.c.scope_id == scope_id,
+                    scope_memberships.c.principal_id == principal_id,
+                    scope_memberships.c.role == role.value,
+                )
             )
+            sql, params = compile_for(select_stmt, self._backend.dialect)
+            existing = txn.fetch_one(sql, params)
 
             if existing and existing["lifecycle"] == Lifecycle.ACTIVE.name:
                 # Already active — return existing membership
@@ -368,16 +358,20 @@ class ScopeLifecycle:
 
             if existing:
                 # Reactivate the archived membership
-                txn.execute(
-                    "UPDATE scope_memberships "
-                    "SET lifecycle = ?, granted_at = ?, granted_by = ?, expires_at = ? "
-                    "WHERE scope_id = ? AND principal_id = ? AND role = ?",
-                    (
-                        Lifecycle.ACTIVE.name, ts.isoformat(), granted_by,
-                        expires_at.isoformat() if expires_at else None,
-                        scope_id, principal_id, role.value,
-                    ),
+                update_stmt = sa.update(scope_memberships).where(
+                    sa.and_(
+                        scope_memberships.c.scope_id == scope_id,
+                        scope_memberships.c.principal_id == principal_id,
+                        scope_memberships.c.role == role.value,
+                    )
+                ).values(
+                    lifecycle=Lifecycle.ACTIVE.name,
+                    granted_at=ts.isoformat(),
+                    granted_by=granted_by,
+                    expires_at=expires_at.isoformat() if expires_at else None,
                 )
+                sql, params = compile_for(update_stmt, self._backend.dialect)
+                txn.execute(sql, params)
                 mem = ScopeMembership(
                     id=existing["id"],
                     scope_id=scope_id,
@@ -399,17 +393,18 @@ class ScopeLifecycle:
                     granted_by=granted_by,
                     expires_at=expires_at,
                 )
-                txn.execute(
-                    "INSERT INTO scope_memberships "
-                    "(id, scope_id, principal_id, role, granted_at, granted_by, expires_at, lifecycle) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        mem.id, mem.scope_id, mem.principal_id, mem.role.value,
-                        mem.granted_at.isoformat(), mem.granted_by,
-                        mem.expires_at.isoformat() if mem.expires_at else None,
-                        mem.lifecycle.name,
-                    ),
+                insert_stmt = sa.insert(scope_memberships).values(
+                    id=mem.id,
+                    scope_id=mem.scope_id,
+                    principal_id=mem.principal_id,
+                    role=mem.role.value,
+                    granted_at=mem.granted_at.isoformat(),
+                    granted_by=mem.granted_by,
+                    expires_at=mem.expires_at.isoformat() if mem.expires_at else None,
+                    lifecycle=mem.lifecycle.name,
                 )
+                sql, params = compile_for(insert_stmt, self._backend.dialect)
+                txn.execute(sql, params)
             txn.commit()
 
         if self._audit:
@@ -439,28 +434,27 @@ class ScopeLifecycle:
         scope = self.get_scope_or_raise(scope_id)
         self._require_mutable(scope)
 
-        clauses = ["scope_id = ?", "principal_id = ?", "lifecycle = ?"]
-        params: list[Any] = [scope_id, principal_id, Lifecycle.ACTIVE.name]
-
+        conditions = sa.and_(
+            scope_memberships.c.scope_id == scope_id,
+            scope_memberships.c.principal_id == principal_id,
+            scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+        )
         if role is not None:
-            clauses.append("role = ?")
-            params.append(role.value)
-
-        where = " AND ".join(clauses)
+            conditions = sa.and_(conditions, scope_memberships.c.role == role.value)
 
         # Get before state for audit
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM scope_memberships WHERE {where}",
-            tuple(params),
-        )
+        select_stmt = sa.select(scope_memberships).where(conditions)
+        sql, params = compile_for(select_stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
 
         if not rows:
             return 0
 
-        self._backend.execute(
-            f"UPDATE scope_memberships SET lifecycle = ? WHERE {where}",
-            (Lifecycle.ARCHIVED.name, *params),
+        update_stmt = sa.update(scope_memberships).where(conditions).values(
+            lifecycle=Lifecycle.ARCHIVED.name,
         )
+        sql, params = compile_for(update_stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit:
             for row in rows:
@@ -481,17 +475,15 @@ class ScopeLifecycle:
         *,
         active_only: bool = True,
     ) -> list[ScopeMembership]:
-        clauses = ["scope_id = ?"]
-        params: list[Any] = [scope_id]
-        if active_only:
-            clauses.append("lifecycle = ?")
-            params.append(Lifecycle.ACTIVE.name)
-
-        where = " AND ".join(clauses)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM scope_memberships WHERE {where} ORDER BY granted_at ASC",
-            tuple(params),
+        stmt = sa.select(scope_memberships).where(
+            scope_memberships.c.scope_id == scope_id,
         )
+        if active_only:
+            stmt = stmt.where(scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name)
+        stmt = stmt.order_by(scope_memberships.c.granted_at.asc())
+
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [membership_from_row(r) for r in rows]
 
     def get_principal_scopes(
@@ -501,17 +493,14 @@ class ScopeLifecycle:
         active_only: bool = True,
     ) -> list[ScopeMembership]:
         """Get all scopes a principal is a member of."""
-        clauses = ["principal_id = ?"]
-        params: list[Any] = [principal_id]
-        if active_only:
-            clauses.append("lifecycle = ?")
-            params.append(Lifecycle.ACTIVE.name)
-
-        where = " AND ".join(clauses)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM scope_memberships WHERE {where}",
-            tuple(params),
+        stmt = sa.select(scope_memberships).where(
+            scope_memberships.c.principal_id == principal_id,
         )
+        if active_only:
+            stmt = stmt.where(scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name)
+
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [membership_from_row(r) for r in rows]
 
     def is_member(
@@ -520,11 +509,15 @@ class ScopeLifecycle:
         principal_id: str,
     ) -> bool:
         """Check if a principal has any active membership in a scope."""
-        row = self._backend.fetch_one(
-            "SELECT 1 FROM scope_memberships "
-            "WHERE scope_id = ? AND principal_id = ? AND lifecycle = ?",
-            (scope_id, principal_id, Lifecycle.ACTIVE.name),
+        stmt = sa.select(sa.literal(1)).select_from(scope_memberships).where(
+            sa.and_(
+                scope_memberships.c.scope_id == scope_id,
+                scope_memberships.c.principal_id == principal_id,
+                scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row is not None
 
     # ------------------------------------------------------------------
@@ -541,10 +534,11 @@ class ScopeLifecycle:
             )
 
         with self._backend.transaction() as txn:
-            txn.execute(
-                "UPDATE scopes SET lifecycle = ? WHERE id = ?",
-                (SCOPE_LIFECYCLE_FROZEN, scope_id),
+            stmt = sa.update(scopes).where(scopes.c.id == scope_id).values(
+                lifecycle=SCOPE_LIFECYCLE_FROZEN,
             )
+            sql, params = compile_for(stmt, self._backend.dialect)
+            txn.execute(sql, params)
             txn.commit()
 
         if self._audit:
@@ -577,22 +571,32 @@ class ScopeLifecycle:
 
         with self._backend.transaction() as txn:
             # Archive all active memberships
-            txn.execute(
-                "UPDATE scope_memberships SET lifecycle = ? "
-                "WHERE scope_id = ? AND lifecycle = ?",
-                (Lifecycle.ARCHIVED.name, scope_id, Lifecycle.ACTIVE.name),
-            )
+            stmt1 = sa.update(scope_memberships).where(
+                sa.and_(
+                    scope_memberships.c.scope_id == scope_id,
+                    scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+                )
+            ).values(lifecycle=Lifecycle.ARCHIVED.name)
+            sql, params = compile_for(stmt1, self._backend.dialect)
+            txn.execute(sql, params)
+
             # Archive all active projections
-            txn.execute(
-                "UPDATE scope_projections SET lifecycle = ? "
-                "WHERE scope_id = ? AND lifecycle = ?",
-                (Lifecycle.ARCHIVED.name, scope_id, Lifecycle.ACTIVE.name),
-            )
+            stmt2 = sa.update(scope_projections).where(
+                sa.and_(
+                    scope_projections.c.scope_id == scope_id,
+                    scope_projections.c.lifecycle == Lifecycle.ACTIVE.name,
+                )
+            ).values(lifecycle=Lifecycle.ARCHIVED.name)
+            sql, params = compile_for(stmt2, self._backend.dialect)
+            txn.execute(sql, params)
+
             # Archive the scope itself
-            txn.execute(
-                "UPDATE scopes SET lifecycle = ? WHERE id = ?",
-                (Lifecycle.ARCHIVED.name, scope_id),
+            stmt3 = sa.update(scopes).where(scopes.c.id == scope_id).values(
+                lifecycle=Lifecycle.ARCHIVED.name,
             )
+            sql, params = compile_for(stmt3, self._backend.dialect)
+            txn.execute(sql, params)
+
             txn.commit()
 
         if self._audit:

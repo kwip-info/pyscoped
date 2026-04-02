@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.0 (2026-04-02)
+
+### Added
+- **SQLAlchemy Core query layer** — All 462 raw SQL strings across 58 consumer files converted to `sa.select()`, `sa.insert()`, `sa.update()`, `sa.delete()` constructs compiled via `compile_for(stmt, dialect)`. Queries are dialect-portable across SQLite and PostgreSQL. Raw SQL preserved only for FTS5/tsvector full-text search and dynamic quota table queries with allowlist validation
+- **SQLAlchemy Core schema** — `scoped.storage._schema` defines 63 `sa.Table` objects matching all DDL from migrations m0001–m0014 plus `scoped_migrations`. Used for query building only (not DDL)
+- **Query compilation bridge** — `scoped.storage._query.compile_for(stmt, dialect)` compiles SQLAlchemy Core statements to `(sql, params)` tuples compatible with the existing `StorageBackend.execute/fetch_*` interface. Supports `render_postcompile=True` for IN clause expansion. `dialect_insert()` helper for dialect-aware UPSERT via `on_conflict_do_update()`
+- **SASQLiteBackend** — `scoped.storage.sa_sqlite.SASQLiteBackend` — SQLAlchemy Core-backed SQLite storage, drop-in replacement for `SQLiteBackend`. Uses `StaticPool` for in-memory, `metadata.create_all()` for schema, DBAPI `executescript()` for scripts. Pragma setting via SA event listener
+- **SAPostgresBackend** — `scoped.storage.sa_postgres.SAPostgresBackend` — SQLAlchemy Core-backed PostgreSQL storage with connection pooling (`QueuePool`), RLS support via `SET [LOCAL] app.current_principal_id`, drop-in replacement for `PostgresBackend`
+- **Typed Object Protocol** — `scoped.register_type("invoice", InvoiceModel)` registers Pydantic models, dataclasses, or `ScopedSerializable` protocol types. `ScopedManager.create()` and `update()` auto-serialize typed instances. `ObjectVersion.typed_data` property auto-deserializes back to the registered type
+- **Type adapters** — `scoped._type_adapters` with `PydanticAdapter` (`model_dump`/`model_validate`), `DataclassAdapter` (`asdict`/`cls(**data)`), `ScopedSerializableAdapter` (protocol methods), auto-detection in `TypeRegistry.register()`
+- **`ScopedSerializable` protocol** — `scoped.types.ScopedSerializable` with `to_scoped_dict()` and `from_scoped_dict()` for custom serialization
+- **Stability markers** — `@experimental()`, `@preview()`, `@stable()` decorators in `scoped._stability`. Emit `ExperimentalAPIWarning` or `PreviewAPIWarning` (both `FutureWarning` subclasses) on first use. Suppressible via `warnings.filterwarnings("ignore", category=...)`. `get_stability_level()` introspection helper
+- **Django ScopedModel** — `scoped.contrib.django.models.ScopedModel` abstract base for Django models that auto-sync with pyscoped's object layer. `save()` creates/updates ScopedObjects atomically. `delete()` tombstones. `_to_scoped_dict()` handles DateTimeField, DecimalField, UUIDField, ForeignKey serialization. `ScopedMeta.scoped_fields` controls which fields sync
+- **Django ScopedQuerySet** — `ScopedQuerySet.for_principal(principal_id)` filters by pyscoped visibility (owner + scope projections), falls back to `scoped_owner_id` filtering when no client
+- **Django ScopedDjangoManager** — Secondary manager on `ScopedModel` with `for_principal()` shortcut. Default `objects` manager untouched
+- **`scoped_context_for()` helper** — Context manager for non-HTTP code (management commands, Celery tasks) that sets `ScopedContext` from a principal ID
+- **DjangoORMBackend dialect** — `dialect` property now returns the actual Django connection vendor (`"sqlite"` or `"postgres"`) instead of `"generic"`
+
+### Changed
+- **`sqlalchemy>=2.0` dependency** — Added to `pyproject.toml`. All storage consumers now build queries via SQLAlchemy Core instead of string interpolation
+- **Stability decorations** — 21 classes marked `@experimental` (Layers 8-16), 4 classes marked `@preview` (Layer 13 connector/marketplace)
+
 ## 0.6.2 (2026-04-02)
 
 ### Security

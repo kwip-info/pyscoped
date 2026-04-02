@@ -33,7 +33,17 @@ import threading
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import SyncError, SyncTransportError
+from scoped.storage._query import compile_for, dialect_insert
+from scoped.storage._schema import (
+    _sync_state,
+    audit_trail,
+    principals,
+    scoped_objects,
+    scopes,
+)
 from scoped.storage.interface import StorageBackend
 from scoped.sync.config import SyncConfig
 from scoped.sync.models import (
@@ -53,7 +63,7 @@ from scoped.types import generate_id, now_utc
 class SyncAgent:
     """Background sync agent that pushes audit metadata to the management plane.
 
-    Lifecycle: ``idle → syncing ⇄ paused → stopped``
+    Lifecycle: ``idle -> syncing <-> paused -> stopped``
 
     Thread-safe — all public methods can be called from any thread.
 
@@ -132,9 +142,9 @@ class SyncAgent:
 
     def status(self) -> SyncStateSnapshot:
         """Return current sync state from the ``_sync_state`` table."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM _sync_state WHERE id = 'singleton'", ()
-        )
+        stmt = sa.select(_sync_state).where(_sync_state.c.id == "singleton")
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return SyncStateSnapshot()
         return SyncStateSnapshot(
@@ -185,7 +195,7 @@ class SyncAgent:
             self._stop_event.wait(timeout=self._config.interval_seconds)
 
     def _sync_cycle(self) -> None:
-        """Execute one sync cycle: read → package → push → update watermark."""
+        """Execute one sync cycle: read -> package -> push -> update watermark."""
         state = self.status()
 
         # 1. Query new audit entries (no before_state/after_state)
@@ -216,15 +226,27 @@ class SyncAgent:
         Deliberately excludes before_state and after_state — data never
         leaves customer infrastructure.
         """
-        rows = self._backend.fetch_all(
-            "SELECT id, sequence, actor_id, action, target_type, target_id, "
-            "timestamp, hash, previous_hash, scope_id, parent_trace_id, metadata_json "
-            "FROM audit_trail "
-            "WHERE sequence > ? "
-            "ORDER BY sequence ASC "
-            "LIMIT ?",
-            (after_sequence, self._config.batch_size),
+        stmt = (
+            sa.select(
+                audit_trail.c.id,
+                audit_trail.c.sequence,
+                audit_trail.c.actor_id,
+                audit_trail.c.action,
+                audit_trail.c.target_type,
+                audit_trail.c.target_id,
+                audit_trail.c.timestamp,
+                audit_trail.c.hash,
+                audit_trail.c.previous_hash,
+                audit_trail.c.scope_id,
+                audit_trail.c.parent_trace_id,
+                audit_trail.c.metadata_json,
+            )
+            .where(audit_trail.c.sequence > after_sequence)
+            .order_by(audit_trail.c.sequence.asc())
+            .limit(self._config.batch_size)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [
             SyncEntryMetadata(
                 id=r["id"],
@@ -245,15 +267,30 @@ class SyncAgent:
 
     def _count_resources(self) -> ResourceCounts:
         """Count active objects, principals, and scopes."""
-        obj_row = self._backend.fetch_one(
-            "SELECT COUNT(*) as cnt FROM scoped_objects WHERE lifecycle = 'ACTIVE'", ()
+        obj_stmt = (
+            sa.select(sa.func.count().label("cnt"))
+            .select_from(scoped_objects)
+            .where(scoped_objects.c.lifecycle == "ACTIVE")
         )
-        prin_row = self._backend.fetch_one(
-            "SELECT COUNT(*) as cnt FROM principals WHERE lifecycle = 'ACTIVE'", ()
+        sql_o, params_o = compile_for(obj_stmt, self._backend.dialect)
+        obj_row = self._backend.fetch_one(sql_o, params_o)
+
+        prin_stmt = (
+            sa.select(sa.func.count().label("cnt"))
+            .select_from(principals)
+            .where(principals.c.lifecycle == "ACTIVE")
         )
-        scope_row = self._backend.fetch_one(
-            "SELECT COUNT(*) as cnt FROM scopes WHERE lifecycle = 'ACTIVE'", ()
+        sql_p, params_p = compile_for(prin_stmt, self._backend.dialect)
+        prin_row = self._backend.fetch_one(sql_p, params_p)
+
+        scope_stmt = (
+            sa.select(sa.func.count().label("cnt"))
+            .select_from(scopes)
+            .where(scopes.c.lifecycle == "ACTIVE")
         )
+        sql_s, params_s = compile_for(scope_stmt, self._backend.dialect)
+        scope_row = self._backend.fetch_one(sql_s, params_s)
+
         return ResourceCounts(
             active_objects=obj_row["cnt"] if obj_row else 0,
             active_principals=prin_row["cnt"] if prin_row else 0,
@@ -299,34 +336,51 @@ class SyncAgent:
     def _ensure_sync_state(self) -> None:
         """Create the singleton _sync_state row if it doesn't exist."""
         ts = now_utc().isoformat()
-        self._backend.execute(
-            "INSERT OR IGNORE INTO _sync_state "
-            "(id, last_sequence, last_hash, status, error_count, created_at, updated_at) "
-            "VALUES ('singleton', 0, '', 'idle', 0, ?, ?)",
-            (ts, ts),
+        stmt = dialect_insert(_sync_state, self._backend.dialect).values(
+            id="singleton",
+            last_sequence=0,
+            last_hash="",
+            status="idle",
+            error_count=0,
+            created_at=ts,
+            updated_at=ts,
         )
+        stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def _update_watermark(
         self, *, last_sequence: int, last_hash: str, batch_id: str
     ) -> None:
         """Update _sync_state after a successful batch push."""
         ts = now_utc().isoformat()
-        self._backend.execute(
-            "UPDATE _sync_state "
-            "SET last_sequence = ?, last_hash = ?, last_synced_at = ?, "
-            "last_batch_id = ?, status = 'syncing', error_message = NULL, "
-            "error_count = 0, updated_at = ? "
-            "WHERE id = 'singleton'",
-            (last_sequence, last_hash, ts, batch_id, ts),
+        stmt = (
+            sa.update(_sync_state)
+            .where(_sync_state.c.id == "singleton")
+            .values(
+                last_sequence=last_sequence,
+                last_hash=last_hash,
+                last_synced_at=ts,
+                last_batch_id=batch_id,
+                status="syncing",
+                error_message=None,
+                error_count=0,
+                updated_at=ts,
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def _update_status(self, status: SyncStatus) -> None:
         """Update the status field in _sync_state."""
         ts = now_utc().isoformat()
-        self._backend.execute(
-            "UPDATE _sync_state SET status = ?, updated_at = ? WHERE id = 'singleton'",
-            (status.value, ts),
+        stmt = (
+            sa.update(_sync_state)
+            .where(_sync_state.c.id == "singleton")
+            .values(status=status.value, updated_at=ts)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def _handle_error(self, exc: Exception) -> None:
         """Record error state and compute backoff delay."""
@@ -334,13 +388,18 @@ class SyncAgent:
         error_count = state.error_count + 1
         ts = now_utc().isoformat()
 
-        self._backend.execute(
-            "UPDATE _sync_state "
-            "SET status = 'error', error_message = ?, "
-            "error_count = ?, updated_at = ? "
-            "WHERE id = 'singleton'",
-            (str(exc)[:500], error_count, ts),
+        stmt = (
+            sa.update(_sync_state)
+            .where(_sync_state.c.id == "singleton")
+            .values(
+                status="error",
+                error_message=str(exc)[:500],
+                error_count=error_count,
+                updated_at=ts,
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Exponential backoff with jitter
         delay = min(

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.rules.models import (
     BindingTargetType,
     Rule,
@@ -12,6 +14,8 @@ from scoped.rules.models import (
     binding_from_row,
     rule_from_row,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import rule_bindings, rules
 from scoped.storage.interface import StorageBackend
 from scoped.types import Lifecycle
 
@@ -76,18 +80,12 @@ class RuleCompiler:
         ruleset = CompiledRuleSet()
 
         # Load active rules
-        clauses = ["r.lifecycle = ?"]
-        params: list[Any] = [Lifecycle.ACTIVE.name]
-
+        stmt = sa.select(rules).where(rules.c.lifecycle == Lifecycle.ACTIVE.name)
         if rule_type is not None:
-            clauses.append("r.rule_type = ?")
-            params.append(rule_type)
-
-        where = " AND ".join(clauses)
-        rule_rows = self._backend.fetch_all(
-            f"SELECT * FROM rules r WHERE {where} ORDER BY r.priority DESC",
-            tuple(params),
-        )
+            stmt = stmt.where(rules.c.rule_type == rule_type)
+        stmt = stmt.order_by(rules.c.priority.desc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rule_rows = self._backend.fetch_all(sql, params)
 
         rule_map = {}
         for row in rule_rows:
@@ -98,19 +96,17 @@ class RuleCompiler:
             return ruleset
 
         # Load active bindings for those rules
-        placeholders = ",".join("?" for _ in rule_map)
-        binding_clauses = [f"rule_id IN ({placeholders})", "lifecycle = ?"]
-        binding_params: list[Any] = list(rule_map.keys()) + [Lifecycle.ACTIVE.name]
-
-        if scope_id is not None:
-            binding_clauses.append("(target_type = ? AND target_id = ?)")
-            binding_params.extend(["scope", scope_id])
-
-        binding_where = " AND ".join(binding_clauses)
-        binding_rows = self._backend.fetch_all(
-            f"SELECT * FROM rule_bindings WHERE {binding_where}",
-            tuple(binding_params),
+        stmt2 = sa.select(rule_bindings).where(
+            rule_bindings.c.rule_id.in_(list(rule_map.keys())),
+            rule_bindings.c.lifecycle == Lifecycle.ACTIVE.name,
         )
+        if scope_id is not None:
+            stmt2 = stmt2.where(
+                rule_bindings.c.target_type == "scope",
+                rule_bindings.c.target_id == scope_id,
+            )
+        sql, params = compile_for(stmt2, self._backend.dialect)
+        binding_rows = self._backend.fetch_all(sql, params)
 
         for brow in binding_rows:
             binding = binding_from_row(brow)

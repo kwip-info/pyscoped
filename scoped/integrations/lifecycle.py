@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import PluginError
 from scoped.registry.base import get_registry
 from scoped.registry.kinds import RegistryKind
@@ -17,10 +19,14 @@ from scoped.integrations.models import (
     permission_from_row,
     plugin_from_row,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import plugin_hooks, plugin_permissions, plugins
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+from scoped._stability import experimental
 
 
+@experimental()
 class PluginLifecycleManager:
     """Manage plugin installation, activation, suspension, and removal."""
 
@@ -65,14 +71,20 @@ class PluginLifecycleManager:
             metadata=meta,
         )
 
-        self._backend.execute(
-            """INSERT INTO plugins
-               (id, name, description, version, owner_id, scope_id,
-                manifest_json, state, installed_at, metadata_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (pid, name, description, version, owner_id, scope_id,
-             json.dumps(mfst), "installed", ts.isoformat(), json.dumps(meta)),
+        stmt = sa.insert(plugins).values(
+            id=pid,
+            name=name,
+            description=description,
+            version=version,
+            owner_id=owner_id,
+            scope_id=scope_id,
+            manifest_json=json.dumps(mfst),
+            state="installed",
+            installed_at=ts.isoformat(),
+            metadata_json=json.dumps(meta),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Auto-register in registry (Invariant #1)
         try:
@@ -102,15 +114,15 @@ class PluginLifecycleManager:
     # -- State transitions -------------------------------------------------
 
     def get_plugin(self, plugin_id: str) -> Plugin | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM plugins WHERE id = ?", (plugin_id,),
-        )
+        stmt = sa.select(plugins).where(plugins.c.id == plugin_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return plugin_from_row(row) if row else None
 
     def get_plugin_by_name(self, name: str) -> Plugin | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM plugins WHERE name = ?", (name,),
-        )
+        stmt = sa.select(plugins).where(plugins.c.name == name)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return plugin_from_row(row) if row else None
 
     def get_plugin_or_raise(self, plugin_id: str) -> Plugin:
@@ -129,20 +141,14 @@ class PluginLifecycleManager:
         state: PluginState | None = None,
         limit: int = 100,
     ) -> list[Plugin]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(plugins)
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
+            stmt = stmt.where(plugins.c.owner_id == owner_id)
         if state is not None:
-            clauses.append("state = ?")
-            params.append(state.value)
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        params.append(limit)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM plugins{where} ORDER BY installed_at DESC LIMIT ?",
-            tuple(params),
-        )
+            stmt = stmt.where(plugins.c.state == state.value)
+        stmt = stmt.order_by(plugins.c.installed_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [plugin_from_row(r) for r in rows]
 
     def _transition(
@@ -167,18 +173,14 @@ class PluginLifecycleManager:
             )
 
         ts = now_utc()
-        updates = ["state = ?"]
-        params: list[Any] = [target_state.value]
+        values: dict[str, Any] = {"state": target_state.value}
 
         if target_state == PluginState.ACTIVE:
-            updates.append("activated_at = ?")
-            params.append(ts.isoformat())
+            values["activated_at"] = ts.isoformat()
 
-        params.append(plugin_id)
-        self._backend.execute(
-            f"UPDATE plugins SET {', '.join(updates)} WHERE id = ?",
-            tuple(params),
-        )
+        stmt = sa.update(plugins).where(plugins.c.id == plugin_id).values(**values)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         plugin.state = target_state
         if target_state == PluginState.ACTIVE:
@@ -209,10 +211,12 @@ class PluginLifecycleManager:
             actor_id=actor_id, action=ActionType.PLUGIN_SUSPEND,
         )
         # Deactivate all hooks when suspended
-        self._backend.execute(
-            "UPDATE plugin_hooks SET lifecycle = 'ARCHIVED' WHERE plugin_id = ? AND lifecycle = 'ACTIVE'",
-            (plugin_id,),
-        )
+        stmt = sa.update(plugin_hooks).where(
+            (plugin_hooks.c.plugin_id == plugin_id)
+            & (plugin_hooks.c.lifecycle == "ACTIVE"),
+        ).values(lifecycle="ARCHIVED")
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         return plugin
 
     def uninstall(self, plugin_id: str, *, actor_id: str) -> Plugin:
@@ -222,15 +226,18 @@ class PluginLifecycleManager:
             actor_id=actor_id, action=ActionType.PLUGIN_UNINSTALL,
         )
         # Revoke all permissions
-        self._backend.execute(
-            "UPDATE plugin_permissions SET lifecycle = 'ARCHIVED' WHERE plugin_id = ?",
-            (plugin_id,),
-        )
+        stmt = sa.update(plugin_permissions).where(
+            plugin_permissions.c.plugin_id == plugin_id,
+        ).values(lifecycle="ARCHIVED")
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
+
         # Deactivate all hooks
-        self._backend.execute(
-            "UPDATE plugin_hooks SET lifecycle = 'ARCHIVED' WHERE plugin_id = ?",
-            (plugin_id,),
-        )
+        stmt = sa.update(plugin_hooks).where(
+            plugin_hooks.c.plugin_id == plugin_id,
+        ).values(lifecycle="ARCHIVED")
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         return plugin
 
     # -- Permissions -------------------------------------------------------
@@ -257,22 +264,27 @@ class PluginLifecycleManager:
             granted_by=granted_by,
         )
 
-        self._backend.execute(
-            """INSERT INTO plugin_permissions
-               (id, plugin_id, permission_type, target_ref, granted_at, granted_by, lifecycle)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (pid, plugin_id, permission_type, target_ref,
-             ts.isoformat(), granted_by, "ACTIVE"),
+        stmt = sa.insert(plugin_permissions).values(
+            id=pid,
+            plugin_id=plugin_id,
+            permission_type=permission_type,
+            target_ref=target_ref,
+            granted_at=ts.isoformat(),
+            granted_by=granted_by,
+            lifecycle="ACTIVE",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         return perm
 
     def revoke_permission(self, permission_id: str) -> None:
         """Revoke a specific permission."""
-        self._backend.execute(
-            "UPDATE plugin_permissions SET lifecycle = 'ARCHIVED' WHERE id = ?",
-            (permission_id,),
-        )
+        stmt = sa.update(plugin_permissions).where(
+            plugin_permissions.c.id == permission_id,
+        ).values(lifecycle="ARCHIVED")
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def get_permissions(
         self,
@@ -280,16 +292,13 @@ class PluginLifecycleManager:
         *,
         active_only: bool = True,
     ) -> list[PluginPermission]:
+        stmt = sa.select(plugin_permissions).where(
+            plugin_permissions.c.plugin_id == plugin_id,
+        )
         if active_only:
-            rows = self._backend.fetch_all(
-                "SELECT * FROM plugin_permissions WHERE plugin_id = ? AND lifecycle = 'ACTIVE'",
-                (plugin_id,),
-            )
-        else:
-            rows = self._backend.fetch_all(
-                "SELECT * FROM plugin_permissions WHERE plugin_id = ?",
-                (plugin_id,),
-            )
+            stmt = stmt.where(plugin_permissions.c.lifecycle == "ACTIVE")
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [permission_from_row(r) for r in rows]
 
     def has_permission(
@@ -299,10 +308,12 @@ class PluginLifecycleManager:
         target_ref: str,
     ) -> bool:
         """Check if a plugin has a specific active permission."""
-        row = self._backend.fetch_one(
-            """SELECT id FROM plugin_permissions
-               WHERE plugin_id = ? AND permission_type = ? AND target_ref = ?
-               AND lifecycle = 'ACTIVE'""",
-            (plugin_id, permission_type, target_ref),
+        stmt = sa.select(plugin_permissions.c.id).where(
+            (plugin_permissions.c.plugin_id == plugin_id)
+            & (plugin_permissions.c.permission_type == permission_type)
+            & (plugin_permissions.c.target_ref == target_ref)
+            & (plugin_permissions.c.lifecycle == "ACTIVE"),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row is not None

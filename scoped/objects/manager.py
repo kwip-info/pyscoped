@@ -9,6 +9,8 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import (
     AccessDeniedError,
     IsolationViolationError,
@@ -21,6 +23,8 @@ from scoped.objects.models import (
     compute_checksum,
 )
 from scoped.objects.versioning import diff_versions
+from scoped.storage._query import compile_for
+from scoped.storage._schema import object_versions, scoped_objects, tombstones
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
 
@@ -93,7 +97,7 @@ class ScopedManager:
         *,
         object_type: str,
         owner_id: str,
-        data: dict[str, Any],
+        data: dict[str, Any] | Any,
         registry_entry_id: str | None = None,
         change_reason: str = "created",
         scope_id: str | None = None,
@@ -102,7 +106,23 @@ class ScopedManager:
 
         Returns (object, version_1).
         Quota checks run inside the write transaction to prevent TOCTOU races.
+
+        ``data`` can be a dict or a typed instance (Pydantic model, dataclass,
+        or any class registered via ``scoped.register_type()``).  Typed
+        instances are auto-serialized to dicts before storage.
         """
+        # Auto-serialize typed data
+        if not isinstance(data, dict):
+            from scoped._type_registry import _registry
+
+            if _registry.has_type(object_type):
+                data = _registry.serialize(object_type, data)
+            else:
+                raise TypeError(
+                    f"data must be a dict or a registered type for {object_type!r}. "
+                    f"Use scoped.register_type() to register a type."
+                )
+
         self._check_rules(
             action="create", principal_id=owner_id, object_type=object_type,
         )
@@ -149,6 +169,7 @@ class ScopedManager:
             created_by=owner_id,
             change_reason=change_reason,
             checksum=checksum,
+            _object_type=object_type,
         )
 
         with self._backend.transaction() as txn:
@@ -222,22 +243,17 @@ class ScopedManager:
                     change_reason=reason, checksum=checksum,
                 )
 
-                txn.execute(
-                    "INSERT INTO scoped_objects "
-                    "(id, object_type, owner_id, registry_entry_id, current_version, created_at, lifecycle) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (obj.id, obj.object_type, obj.owner_id, None, 1,
-                     obj.created_at.isoformat(), obj.lifecycle.name),
+                obj_stmt = sa.insert(scoped_objects).values(
+                    **self._object_values(obj),
                 )
-                txn.execute(
-                    "INSERT INTO object_versions "
-                    "(id, object_id, version, data_json, created_at, created_by, change_reason, checksum) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (ver.id, ver.object_id, ver.version,
-                     json.dumps(ver.data, sort_keys=True, default=str),
-                     ver.created_at.isoformat(), ver.created_by,
-                     ver.change_reason, ver.checksum),
+                sql, params = compile_for(obj_stmt, self._backend.dialect)
+                txn.execute(sql, params)
+
+                ver_stmt = sa.insert(object_versions).values(
+                    **self._version_values(ver),
                 )
+                sql, params = compile_for(ver_stmt, self._backend.dialect)
+                txn.execute(sql, params)
                 results.append((obj, ver))
             txn.commit()
 
@@ -302,32 +318,30 @@ class ScopedManager:
             order_by: Column to sort by. Prefix with ``-`` for descending.
                       Allowed: ``created_at``, ``object_type``. Default: ``created_at``.
         """
-        clauses = ["owner_id = ?"]
-        params: list[Any] = [principal_id]
+        stmt = sa.select(scoped_objects).where(
+            scoped_objects.c.owner_id == principal_id,
+        )
 
         if object_type is not None:
-            clauses.append("object_type = ?")
-            params.append(object_type)
+            stmt = stmt.where(scoped_objects.c.object_type == object_type)
 
         if not include_tombstoned:
-            clauses.append("lifecycle != ?")
-            params.append(Lifecycle.ARCHIVED.name)
-
-        where = " AND ".join(clauses)
+            stmt = stmt.where(scoped_objects.c.lifecycle != Lifecycle.ARCHIVED.name)
 
         desc = order_by.startswith("-")
         col = order_by.lstrip("-")
         if col not in self._OBJECT_ORDER_COLUMNS:
             col = "created_at"
-        direction = "DESC" if desc else "ASC"
 
-        sql = (
-            f"SELECT * FROM scoped_objects WHERE {where} "
-            f"ORDER BY {col} {direction} LIMIT ? OFFSET ?"
-        )
-        params.extend([limit, offset])
+        col_ref = scoped_objects.c[col]
+        if desc:
+            stmt = stmt.order_by(col_ref.desc())
+        else:
+            stmt = stmt.order_by(col_ref.asc())
+        stmt = stmt.limit(limit).offset(offset)
 
-        rows = self._backend.fetch_all(sql, tuple(params))
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [self._row_to_object(r) for r in rows]
 
     def count(
@@ -338,22 +352,18 @@ class ScopedManager:
         include_tombstoned: bool = False,
     ) -> int:
         """Count objects visible to a principal."""
-        clauses = ["owner_id = ?"]
-        params: list[Any] = [principal_id]
+        stmt = sa.select(sa.func.count().label("cnt")).select_from(
+            scoped_objects,
+        ).where(scoped_objects.c.owner_id == principal_id)
 
         if object_type is not None:
-            clauses.append("object_type = ?")
-            params.append(object_type)
+            stmt = stmt.where(scoped_objects.c.object_type == object_type)
 
         if not include_tombstoned:
-            clauses.append("lifecycle != ?")
-            params.append(Lifecycle.ARCHIVED.name)
+            stmt = stmt.where(scoped_objects.c.lifecycle != Lifecycle.ARCHIVED.name)
 
-        where = " AND ".join(clauses)
-        row = self._backend.fetch_one(
-            f"SELECT COUNT(*) as cnt FROM scoped_objects WHERE {where}",
-            tuple(params),
-        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row["cnt"] if row else 0
 
     # ------------------------------------------------------------------
@@ -365,16 +375,28 @@ class ScopedManager:
         object_id: str,
         *,
         principal_id: str,
-        data: dict[str, Any],
+        data: dict[str, Any] | Any,
         change_reason: str = "",
     ) -> tuple[ScopedObject, ObjectVersion]:
         """Update an object by creating a new version. Never modifies existing data.
 
         Returns (updated_object, new_version).
+        ``data`` can be a dict or a typed instance (auto-serialized).
         Raises AccessDeniedError if principal cannot access the object.
         Raises IsolationViolationError if the object is tombstoned.
         """
         obj = self.get_or_raise(object_id, principal_id=principal_id)
+
+        # Auto-serialize typed data
+        if not isinstance(data, dict):
+            from scoped._type_registry import _registry
+
+            if _registry.has_type(obj.object_type):
+                data = _registry.serialize(obj.object_type, data)
+            else:
+                raise TypeError(
+                    f"data must be a dict or a registered type for {obj.object_type!r}"
+                )
         self._check_rules(
             action="update", principal_id=principal_id,
             object_type=obj.object_type, object_id=object_id,
@@ -404,14 +426,16 @@ class ScopedManager:
             created_by=principal_id,
             change_reason=change_reason,
             checksum=checksum,
+            _object_type=obj.object_type,
         )
 
         with self._backend.transaction() as txn:
             self._persist_version_in_txn(txn, ver)
-            txn.execute(
-                "UPDATE scoped_objects SET current_version = ? WHERE id = ?",
-                (new_version_num, object_id),
-            )
+            upd_stmt = sa.update(scoped_objects).where(
+                scoped_objects.c.id == object_id,
+            ).values(current_version=new_version_num)
+            sql, params = compile_for(upd_stmt, self._backend.dialect)
+            txn.execute(sql, params)
             txn.commit()
 
         # Return updated object
@@ -480,15 +504,21 @@ class ScopedManager:
         before_data = cur_ver.data if cur_ver else None
 
         with self._backend.transaction() as txn:
-            txn.execute(
-                "UPDATE scoped_objects SET lifecycle = ? WHERE id = ?",
-                (Lifecycle.ARCHIVED.name, object_id),
+            upd_stmt = sa.update(scoped_objects).where(
+                scoped_objects.c.id == object_id,
+            ).values(lifecycle=Lifecycle.ARCHIVED.name)
+            sql, params = compile_for(upd_stmt, self._backend.dialect)
+            txn.execute(sql, params)
+
+            ins_stmt = sa.insert(tombstones).values(
+                id=tomb.id,
+                object_id=tomb.object_id,
+                tombstoned_at=tomb.tombstoned_at.isoformat(),
+                tombstoned_by=tomb.tombstoned_by,
+                reason=tomb.reason,
             )
-            txn.execute(
-                "INSERT INTO tombstones (id, object_id, tombstoned_at, tombstoned_by, reason) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (tomb.id, tomb.object_id, tomb.tombstoned_at.isoformat(), tomb.tombstoned_by, tomb.reason),
-            )
+            sql, params = compile_for(ins_stmt, self._backend.dialect)
+            txn.execute(sql, params)
             txn.commit()
 
         if self._audit:
@@ -504,9 +534,9 @@ class ScopedManager:
 
     def get_tombstone(self, object_id: str) -> Tombstone | None:
         """Get the tombstone marker for an object, if it exists."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM tombstones WHERE object_id = ?", (object_id,)
-        )
+        stmt = sa.select(tombstones).where(tombstones.c.object_id == object_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return None
         return Tombstone(
@@ -523,10 +553,12 @@ class ScopedManager:
 
     def get_version(self, object_id: str, version: int) -> ObjectVersion | None:
         """Get a specific version of an object."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM object_versions WHERE object_id = ? AND version = ?",
-            (object_id, version),
+        stmt = sa.select(object_versions).where(
+            (object_versions.c.object_id == object_id)
+            & (object_versions.c.version == version)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return None
         return self._row_to_version(row)
@@ -557,12 +589,13 @@ class ScopedManager:
         obj = self.get(object_id, principal_id=principal_id)
         if obj is None:
             return []
-        sql = "SELECT * FROM object_versions WHERE object_id = ? ORDER BY version ASC"
-        params: list[Any] = [object_id]
+        stmt = sa.select(object_versions).where(
+            object_versions.c.object_id == object_id,
+        ).order_by(object_versions.c.version.asc())
         if limit is not None:
-            sql += " LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-        rows = self._backend.fetch_all(sql, tuple(params))
+            stmt = stmt.limit(limit).offset(offset)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [self._row_to_version(r) for r in rows]
 
     def diff(
@@ -591,66 +624,54 @@ class ScopedManager:
     # ------------------------------------------------------------------
 
     def _persist_object(self, obj: ScopedObject) -> None:
-        self._backend.execute(
-            "INSERT INTO scoped_objects "
-            "(id, object_type, owner_id, registry_entry_id, current_version, created_at, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            self._object_params(obj),
-        )
+        stmt = sa.insert(scoped_objects).values(**self._object_values(obj))
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def _persist_object_in_txn(self, txn: Any, obj: ScopedObject) -> None:
-        txn.execute(
-            "INSERT INTO scoped_objects "
-            "(id, object_type, owner_id, registry_entry_id, current_version, created_at, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            self._object_params(obj),
-        )
+        stmt = sa.insert(scoped_objects).values(**self._object_values(obj))
+        sql, params = compile_for(stmt, self._backend.dialect)
+        txn.execute(sql, params)
 
     @staticmethod
-    def _object_params(obj: ScopedObject) -> tuple[Any, ...]:
-        return (
-            obj.id,
-            obj.object_type,
-            obj.owner_id,
-            obj.registry_entry_id,
-            obj.current_version,
-            obj.created_at.isoformat(),
-            obj.lifecycle.name,
-        )
+    def _object_values(obj: ScopedObject) -> dict[str, Any]:
+        return {
+            "id": obj.id,
+            "object_type": obj.object_type,
+            "owner_id": obj.owner_id,
+            "registry_entry_id": obj.registry_entry_id,
+            "current_version": obj.current_version,
+            "created_at": obj.created_at.isoformat(),
+            "lifecycle": obj.lifecycle.name,
+        }
 
     def _persist_version(self, ver: ObjectVersion) -> None:
-        self._backend.execute(
-            "INSERT INTO object_versions "
-            "(id, object_id, version, data_json, created_at, created_by, change_reason, checksum) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            self._version_params(ver),
-        )
+        stmt = sa.insert(object_versions).values(**self._version_values(ver))
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     def _persist_version_in_txn(self, txn: Any, ver: ObjectVersion) -> None:
-        txn.execute(
-            "INSERT INTO object_versions "
-            "(id, object_id, version, data_json, created_at, created_by, change_reason, checksum) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            self._version_params(ver),
-        )
+        stmt = sa.insert(object_versions).values(**self._version_values(ver))
+        sql, params = compile_for(stmt, self._backend.dialect)
+        txn.execute(sql, params)
 
     @staticmethod
-    def _version_params(ver: ObjectVersion) -> tuple[Any, ...]:
-        return (
-            ver.id,
-            ver.object_id,
-            ver.version,
-            json.dumps(ver.data, sort_keys=True, default=str),
-            ver.created_at.isoformat(),
-            ver.created_by,
-            ver.change_reason,
-            ver.checksum,
-        )
+    def _version_values(ver: ObjectVersion) -> dict[str, Any]:
+        return {
+            "id": ver.id,
+            "object_id": ver.object_id,
+            "version": ver.version,
+            "data_json": json.dumps(ver.data, sort_keys=True, default=str),
+            "created_at": ver.created_at.isoformat(),
+            "created_by": ver.created_by,
+            "change_reason": ver.change_reason,
+            "checksum": ver.checksum,
+        }
 
     def _load_object(self, object_id: str) -> ScopedObject | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM scoped_objects WHERE id = ?", (object_id,)
-        )
+        stmt = sa.select(scoped_objects).where(scoped_objects.c.id == object_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return None
         return self._row_to_object(row)
@@ -668,7 +689,10 @@ class ScopedManager:
         )
 
     @staticmethod
-    def _row_to_version(row: dict[str, Any]) -> ObjectVersion:
+    @staticmethod
+    def _row_to_version(
+        row: dict[str, Any], *, object_type: str = "",
+    ) -> ObjectVersion:
         return ObjectVersion(
             id=row["id"],
             object_id=row["object_id"],
@@ -678,4 +702,5 @@ class ScopedManager:
             created_by=row["created_by"],
             change_reason=row["change_reason"],
             checksum=row["checksum"],
+            _object_type=object_type,
         )

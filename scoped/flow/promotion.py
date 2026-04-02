@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import FlowBlockedError, PromotionDeniedError
+from scoped.storage._query import compile_for
+from scoped.storage._schema import promotions
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, generate_id, now_utc
 
@@ -19,8 +23,10 @@ from scoped.flow.models import (
     Promotion,
     promotion_from_row,
 )
+from scoped._stability import experimental
 
 
+@experimental()
 class PromotionManager:
     """Promote objects from environments into persistent scopes."""
 
@@ -85,16 +91,16 @@ class PromotionManager:
             promoted_by=promoted_by,
         )
 
-        self._backend.execute(
-            """INSERT INTO promotions
-               (id, object_id, source_env_id, target_scope_id,
-                target_stage_id, promoted_at, promoted_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                pid, object_id, source_env_id, target_scope_id,
-                target_stage_id, ts.isoformat(), promoted_by,
-            ),
+        stmt = sa.insert(promotions).values(
+            id=pid, object_id=object_id,
+            source_env_id=source_env_id,
+            target_scope_id=target_scope_id,
+            target_stage_id=target_stage_id,
+            promoted_at=ts.isoformat(),
+            promoted_by=promoted_by,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit is not None:
             self._audit.record(
@@ -109,9 +115,9 @@ class PromotionManager:
         return promo
 
     def get(self, promotion_id: str) -> Promotion | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM promotions WHERE id = ?", (promotion_id,),
-        )
+        stmt = sa.select(promotions).where(promotions.c.id == promotion_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return promotion_from_row(row) if row else None
 
     def list_promotions(
@@ -122,31 +128,24 @@ class PromotionManager:
         object_id: str | None = None,
         limit: int = 100,
     ) -> list[Promotion]:
-        clauses: list[str] = []
-        params: list[Any] = []
-
+        stmt = sa.select(promotions)
         if source_env_id is not None:
-            clauses.append("source_env_id = ?")
-            params.append(source_env_id)
+            stmt = stmt.where(promotions.c.source_env_id == source_env_id)
         if target_scope_id is not None:
-            clauses.append("target_scope_id = ?")
-            params.append(target_scope_id)
+            stmt = stmt.where(promotions.c.target_scope_id == target_scope_id)
         if object_id is not None:
-            clauses.append("object_id = ?")
-            params.append(object_id)
-
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        params.append(limit)
-
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM promotions{where} ORDER BY promoted_at DESC LIMIT ?",
-            tuple(params),
-        )
+            stmt = stmt.where(promotions.c.object_id == object_id)
+        stmt = stmt.order_by(promotions.c.promoted_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [promotion_from_row(r) for r in rows]
 
     def count_promotions(self, source_env_id: str) -> int:
-        row = self._backend.fetch_one(
-            "SELECT COUNT(*) as cnt FROM promotions WHERE source_env_id = ?",
-            (source_env_id,),
+        stmt = (
+            sa.select(sa.func.count().label("cnt"))
+            .select_from(promotions)
+            .where(promotions.c.source_env_id == source_env_id)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row["cnt"] if row else 0

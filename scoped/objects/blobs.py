@@ -17,6 +17,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
+
+from scoped.storage._query import compile_for
+from scoped.storage._schema import blobs, blob_versions
 from scoped.storage.blobs import BlobBackend
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
@@ -202,21 +206,22 @@ class BlobManager:
         )
 
         # Persist metadata
-        self._backend.execute(
-            "INSERT INTO blobs "
-            "(id, filename, content_type, size_bytes, content_hash, "
-            "owner_id, created_at, storage_path, current_version, "
-            "lifecycle, object_id, metadata_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                ref.id, ref.filename, ref.content_type,
-                ref.size_bytes, ref.content_hash,
-                ref.owner_id, ref.created_at.isoformat(),
-                ref.storage_path, ref.current_version,
-                ref.lifecycle.name, ref.object_id,
-                json.dumps(metadata or {}),
-            ),
+        stmt = sa.insert(blobs).values(
+            id=ref.id,
+            filename=ref.filename,
+            content_type=ref.content_type,
+            size_bytes=ref.size_bytes,
+            content_hash=ref.content_hash,
+            owner_id=ref.owner_id,
+            created_at=ref.created_at.isoformat(),
+            storage_path=ref.storage_path,
+            current_version=ref.current_version,
+            lifecycle=ref.lifecycle.name,
+            object_id=ref.object_id,
+            metadata_json=json.dumps(metadata or {}),
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         # Create version 1
         self._create_version(ref, created_by=owner_id, change_reason=change_reason)
@@ -295,11 +300,14 @@ class BlobManager:
         ref.size_bytes = size_bytes
         ref.storage_path = new_path
 
-        self._backend.execute(
-            "UPDATE blobs SET current_version = ?, content_hash = ?, "
-            "size_bytes = ?, storage_path = ? WHERE id = ?",
-            (ref.current_version, content_hash, size_bytes, new_path, blob_id),
+        stmt = sa.update(blobs).where(blobs.c.id == blob_id).values(
+            current_version=ref.current_version,
+            content_hash=content_hash,
+            size_bytes=size_bytes,
+            storage_path=new_path,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         self._create_version(ref, created_by=principal_id, change_reason=change_reason)
 
@@ -321,10 +329,11 @@ class BlobManager:
         before = ref.snapshot()
 
         ref.lifecycle = Lifecycle.ARCHIVED
-        self._backend.execute(
-            "UPDATE blobs SET lifecycle = ? WHERE id = ?",
-            (Lifecycle.ARCHIVED.name, blob_id),
+        stmt = sa.update(blobs).where(blobs.c.id == blob_id).values(
+            lifecycle=Lifecycle.ARCHIVED.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         if self._audit:
             self._audit.record(
@@ -348,32 +357,28 @@ class BlobManager:
         active_only: bool = True,
     ) -> list[BlobRef]:
         """List blobs owned by a principal."""
-        clauses = ["owner_id = ?"]
-        params: list[Any] = [principal_id]
+        stmt = sa.select(blobs).where(blobs.c.owner_id == principal_id)
 
         if object_id is not None:
-            clauses.append("object_id = ?")
-            params.append(object_id)
+            stmt = stmt.where(blobs.c.object_id == object_id)
         if content_type is not None:
-            clauses.append("content_type = ?")
-            params.append(content_type)
+            stmt = stmt.where(blobs.c.content_type == content_type)
         if active_only:
-            clauses.append("lifecycle = ?")
-            params.append(Lifecycle.ACTIVE.name)
+            stmt = stmt.where(blobs.c.lifecycle == Lifecycle.ACTIVE.name)
 
-        where = " AND ".join(clauses)
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM blobs WHERE {where} ORDER BY created_at DESC",
-            tuple(params),
-        )
+        stmt = stmt.order_by(blobs.c.created_at.desc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [blob_ref_from_row(r) for r in rows]
 
     def get_version(self, blob_id: str, version: int) -> BlobVersion | None:
         """Get a specific version of a blob."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM blob_versions WHERE blob_id = ? AND version = ?",
-            (blob_id, version),
+        stmt = sa.select(blob_versions).where(
+            (blob_versions.c.blob_id == blob_id)
+            & (blob_versions.c.version == version)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return None
         return blob_version_from_row(row)
@@ -381,27 +386,29 @@ class BlobManager:
     def list_versions(self, blob_id: str, *, principal_id: str) -> list[BlobVersion]:
         """List all versions of a blob (isolation-enforced)."""
         self.get_or_raise(blob_id, principal_id=principal_id)
-        rows = self._backend.fetch_all(
-            "SELECT * FROM blob_versions WHERE blob_id = ? ORDER BY version ASC",
-            (blob_id,),
-        )
+        stmt = sa.select(blob_versions).where(
+            blob_versions.c.blob_id == blob_id,
+        ).order_by(blob_versions.c.version.asc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [blob_version_from_row(r) for r in rows]
 
     def link_to_object(self, blob_id: str, object_id: str) -> None:
         """Link a blob to a scoped object."""
-        self._backend.execute(
-            "UPDATE blobs SET object_id = ? WHERE id = ?",
-            (object_id, blob_id),
+        stmt = sa.update(blobs).where(blobs.c.id == blob_id).values(
+            object_id=object_id,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
     def _get_ref(self, blob_id: str) -> BlobRef | None:
-        row = self._backend.fetch_one(
-            "SELECT * FROM blobs WHERE id = ?", (blob_id,),
-        )
+        stmt = sa.select(blobs).where(blobs.c.id == blob_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return None
         return blob_ref_from_row(row)
@@ -426,16 +433,17 @@ class BlobManager:
             created_by=created_by,
             change_reason=change_reason,
         )
-        self._backend.execute(
-            "INSERT INTO blob_versions "
-            "(id, blob_id, version, content_hash, size_bytes, "
-            "storage_path, created_at, created_by, change_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                ver.id, ver.blob_id, ver.version,
-                ver.content_hash, ver.size_bytes, ver.storage_path,
-                ver.created_at.isoformat(), ver.created_by,
-                ver.change_reason,
-            ),
+        stmt = sa.insert(blob_versions).values(
+            id=ver.id,
+            blob_id=ver.blob_id,
+            version=ver.version,
+            content_hash=ver.content_hash,
+            size_bytes=ver.size_bytes,
+            storage_path=ver.storage_path,
+            created_at=ver.created_at.isoformat(),
+            created_by=ver.created_by,
+            change_reason=ver.change_reason,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         return ver

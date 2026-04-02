@@ -6,9 +6,14 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.scheduling.models import Job, JobState, job_from_row
+from scoped.storage._query import compile_for
+from scoped.storage._schema import jobs
 from scoped.storage.interface import StorageBackend
 from scoped.types import Lifecycle, generate_id, now_utc
+from scoped._stability import experimental
 
 
 # Type alias for job executors
@@ -16,6 +21,7 @@ JobExecutor = Callable[[str, dict[str, Any]], dict[str, Any]]
 """(action_type, action_config) -> result_dict"""
 
 
+@experimental()
 class JobQueue:
     """Execute jobs, track status, and record results.
 
@@ -64,19 +70,20 @@ class JobQueue:
             scheduled_action_id=scheduled_action_id,
             scope_id=scope_id,
         )
-        self._backend.execute(
-            "INSERT INTO jobs "
-            "(id, name, action_type, action_config_json, owner_id, state, "
-            "created_at, scheduled_action_id, scope_id, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                job.id, job.name, job.action_type,
-                json.dumps(job.action_config), job.owner_id,
-                job.state.value, job.created_at.isoformat(),
-                job.scheduled_action_id, job.scope_id,
-                job.lifecycle.name,
-            ),
+        stmt = sa.insert(jobs).values(
+            id=job.id,
+            name=job.name,
+            action_type=job.action_type,
+            action_config_json=json.dumps(job.action_config),
+            owner_id=job.owner_id,
+            state=job.state.value,
+            created_at=job.created_at.isoformat(),
+            scheduled_action_id=job.scheduled_action_id,
+            scope_id=job.scope_id,
+            lifecycle=job.lifecycle.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         return job
 
     # ------------------------------------------------------------------
@@ -85,18 +92,27 @@ class JobQueue:
 
     def run_next(self) -> Job | None:
         """Run the next queued job. Returns the completed/failed Job, or None."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM jobs WHERE state = 'queued' ORDER BY created_at ASC LIMIT 1",
+        stmt = (
+            sa.select(jobs)
+            .where(jobs.c.state == "queued")
+            .order_by(jobs.c.created_at.asc())
+            .limit(1)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             return None
         return self._run_job(row)
 
     def run_all(self) -> list[Job]:
         """Run all queued jobs in order. Returns list of completed/failed Jobs."""
-        rows = self._backend.fetch_all(
-            "SELECT * FROM jobs WHERE state = 'queued' ORDER BY created_at ASC",
+        stmt = (
+            sa.select(jobs)
+            .where(jobs.c.state == "queued")
+            .order_by(jobs.c.created_at.asc())
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [self._run_job(r) for r in rows]
 
     # ------------------------------------------------------------------
@@ -104,7 +120,9 @@ class JobQueue:
     # ------------------------------------------------------------------
 
     def get_job(self, job_id: str) -> Job | None:
-        row = self._backend.fetch_one("SELECT * FROM jobs WHERE id = ?", (job_id,))
+        stmt = sa.select(jobs).where(jobs.c.id == job_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return job_from_row(row) if row else None
 
     def list_jobs(
@@ -114,36 +132,33 @@ class JobQueue:
         state: JobState | None = None,
         limit: int = 100,
     ) -> list[Job]:
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(jobs)
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
+            stmt = stmt.where(jobs.c.owner_id == owner_id)
         if state is not None:
-            clauses.append("state = ?")
-            params.append(state.value)
-        where = " AND ".join(clauses) if clauses else "1=1"
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM jobs WHERE {where} ORDER BY created_at DESC LIMIT ?",
-            tuple(params) + (limit,),
-        )
+            stmt = stmt.where(jobs.c.state == state.value)
+        stmt = stmt.order_by(jobs.c.created_at.desc()).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [job_from_row(r) for r in rows]
 
     def count_jobs(self, *, state: JobState | None = None) -> int:
+        stmt = sa.select(sa.func.count().label("cnt")).select_from(jobs)
         if state is not None:
-            row = self._backend.fetch_one(
-                "SELECT COUNT(*) as cnt FROM jobs WHERE state = ?", (state.value,),
-            )
-        else:
-            row = self._backend.fetch_one("SELECT COUNT(*) as cnt FROM jobs")
+            stmt = stmt.where(jobs.c.state == state.value)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row["cnt"] if row else 0
 
     def cancel_job(self, job_id: str) -> None:
         """Cancel a queued job."""
-        self._backend.execute(
-            "UPDATE jobs SET state = 'cancelled' WHERE id = ? AND state = 'queued'",
-            (job_id,),
+        stmt = (
+            sa.update(jobs)
+            .where(jobs.c.id == job_id, jobs.c.state == "queued")
+            .values(state="cancelled")
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
     # ------------------------------------------------------------------
     # Internal
@@ -155,27 +170,50 @@ class JobQueue:
         config = json.loads(row["action_config_json"]) if row.get("action_config_json") else {}
 
         started_at = now_utc()
-        self._backend.execute(
-            "UPDATE jobs SET state = 'running', started_at = ? WHERE id = ?",
-            (started_at.isoformat(), job_id),
+        start_stmt = (
+            sa.update(jobs)
+            .where(jobs.c.id == job_id)
+            .values(state="running", started_at=started_at.isoformat())
         )
+        sql_s, params_s = compile_for(start_stmt, self._backend.dialect)
+        self._backend.execute(sql_s, params_s)
 
         try:
             result = self._executor(action_type, config)
             completed_at = now_utc()
-            self._backend.execute(
-                "UPDATE jobs SET state = 'completed', completed_at = ?, result_json = ? WHERE id = ?",
-                (completed_at.isoformat(), json.dumps(result), job_id),
+            done_stmt = (
+                sa.update(jobs)
+                .where(jobs.c.id == job_id)
+                .values(
+                    state="completed",
+                    completed_at=completed_at.isoformat(),
+                    result_json=json.dumps(result),
+                )
             )
-            row_updated = self._backend.fetch_one("SELECT * FROM jobs WHERE id = ?", (job_id,))
+            sql_d, params_d = compile_for(done_stmt, self._backend.dialect)
+            self._backend.execute(sql_d, params_d)
+
+            get_stmt = sa.select(jobs).where(jobs.c.id == job_id)
+            sql_g, params_g = compile_for(get_stmt, self._backend.dialect)
+            row_updated = self._backend.fetch_one(sql_g, params_g)
             return job_from_row(row_updated)
         except Exception as exc:
             completed_at = now_utc()
-            self._backend.execute(
-                "UPDATE jobs SET state = 'failed', completed_at = ?, error_message = ? WHERE id = ?",
-                (completed_at.isoformat(), str(exc), job_id),
+            fail_stmt = (
+                sa.update(jobs)
+                .where(jobs.c.id == job_id)
+                .values(
+                    state="failed",
+                    completed_at=completed_at.isoformat(),
+                    error_message=str(exc),
+                )
             )
-            row_updated = self._backend.fetch_one("SELECT * FROM jobs WHERE id = ?", (job_id,))
+            sql_f, params_f = compile_for(fail_stmt, self._backend.dialect)
+            self._backend.execute(sql_f, params_f)
+
+            get_stmt = sa.select(jobs).where(jobs.c.id == job_id)
+            sql_g, params_g = compile_for(get_stmt, self._backend.dialect)
+            row_updated = self._backend.fetch_one(sql_g, params_g)
             return job_from_row(row_updated)
 
     @staticmethod

@@ -12,7 +12,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import AccessDeniedError
+from scoped.storage._query import compile_for
+from scoped.storage._schema import object_versions, scoped_objects
 from scoped.storage.interface import StorageBackend
 from scoped.types import now_utc
 
@@ -181,17 +185,20 @@ class Exporter:
         total_versions = 0
 
         for oid in object_ids:
-            obj_row = self._backend.fetch_one(
-                "SELECT * FROM scoped_objects WHERE id = ? AND owner_id = ?",
-                (oid, principal_id),
+            obj_stmt = sa.select(scoped_objects).where(
+                (scoped_objects.c.id == oid)
+                & (scoped_objects.c.owner_id == principal_id)
             )
+            sql, params = compile_for(obj_stmt, self._backend.dialect)
+            obj_row = self._backend.fetch_one(sql, params)
             if obj_row is None:
                 continue
 
-            version_rows = self._backend.fetch_all(
-                "SELECT * FROM object_versions WHERE object_id = ? ORDER BY version",
-                (oid,),
-            )
+            ver_stmt = sa.select(object_versions).where(
+                object_versions.c.object_id == oid,
+            ).order_by(object_versions.c.version)
+            sql, params = compile_for(ver_stmt, self._backend.dialect)
+            version_rows = self._backend.fetch_all(sql, params)
 
             versions = [
                 ExportedVersion(
@@ -234,9 +241,11 @@ class Exporter:
         limit: int = 1000,
     ) -> ExportPackage:
         """Export all objects of a given type owned by the principal."""
-        rows = self._backend.fetch_all(
-            "SELECT id FROM scoped_objects WHERE object_type = ? AND owner_id = ? LIMIT ?",
-            (object_type, principal_id, limit),
-        )
+        stmt = sa.select(scoped_objects.c.id).where(
+            (scoped_objects.c.object_type == object_type)
+            & (scoped_objects.c.owner_id == principal_id)
+        ).limit(limit)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         object_ids = [r["id"] for r in rows]
         return self.export_objects(object_ids, principal_id=principal_id)

@@ -54,4 +54,9 @@ def __getattr__(name: str):
 
         return _get_default_client().services
 
+    if name == "register_type":
+        from scoped._type_registry import _registry
+
+        return _registry.register
+
     raise AttributeError(f"module 'scoped' has no attribute {name!r}")

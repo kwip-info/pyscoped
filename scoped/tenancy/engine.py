@@ -8,6 +8,15 @@ from __future__ import annotations
 
 from typing import Any
 
+import sqlalchemy as sa
+
+from scoped.storage._query import compile_for
+from scoped.storage._schema import (
+    scope_memberships,
+    scope_projections,
+    scoped_objects,
+    scopes,
+)
 from scoped.storage.interface import StorageBackend
 from scoped.tenancy.models import (
     AccessLevel,
@@ -59,22 +68,38 @@ class VisibilityEngine:
     def can_see(self, principal_id: str, object_id: str) -> bool:
         """Check if a principal can see a specific object."""
         # Check ownership
-        row = self._backend.fetch_one(
-            "SELECT 1 FROM scoped_objects "
-            "WHERE id = ? AND owner_id = ? AND lifecycle != ?",
-            (object_id, principal_id, Lifecycle.ARCHIVED.name),
+        stmt = sa.select(sa.literal(1)).select_from(scoped_objects).where(
+            sa.and_(
+                scoped_objects.c.id == object_id,
+                scoped_objects.c.owner_id == principal_id,
+                scoped_objects.c.lifecycle != Lifecycle.ARCHIVED.name,
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is not None:
             return True
 
         # Check scope projections
-        row = self._backend.fetch_one(
-            "SELECT 1 FROM scope_projections sp "
-            "JOIN scope_memberships sm ON sp.scope_id = sm.scope_id "
-            "WHERE sp.object_id = ? AND sm.principal_id = ? "
-            "AND sp.lifecycle = ? AND sm.lifecycle = ?",
-            (object_id, principal_id, Lifecycle.ACTIVE.name, Lifecycle.ACTIVE.name),
+        stmt = (
+            sa.select(sa.literal(1))
+            .select_from(
+                scope_projections.join(
+                    scope_memberships,
+                    scope_projections.c.scope_id == scope_memberships.c.scope_id,
+                )
+            )
+            .where(
+                sa.and_(
+                    scope_projections.c.object_id == object_id,
+                    scope_memberships.c.principal_id == principal_id,
+                    scope_projections.c.lifecycle == Lifecycle.ACTIVE.name,
+                    scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+                )
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is not None:
             return True
 
@@ -92,21 +117,37 @@ class VisibilityEngine:
         Owner always gets ADMIN access.
         """
         # Owner gets admin
-        row = self._backend.fetch_one(
-            "SELECT 1 FROM scoped_objects WHERE id = ? AND owner_id = ?",
-            (object_id, principal_id),
+        stmt = sa.select(sa.literal(1)).select_from(scoped_objects).where(
+            sa.and_(
+                scoped_objects.c.id == object_id,
+                scoped_objects.c.owner_id == principal_id,
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is not None:
             return AccessLevel.ADMIN
 
         # Find highest access via projections
-        rows = self._backend.fetch_all(
-            "SELECT sp.access_level FROM scope_projections sp "
-            "JOIN scope_memberships sm ON sp.scope_id = sm.scope_id "
-            "WHERE sp.object_id = ? AND sm.principal_id = ? "
-            "AND sp.lifecycle = ? AND sm.lifecycle = ?",
-            (object_id, principal_id, Lifecycle.ACTIVE.name, Lifecycle.ACTIVE.name),
+        stmt = (
+            sa.select(scope_projections.c.access_level)
+            .select_from(
+                scope_projections.join(
+                    scope_memberships,
+                    scope_projections.c.scope_id == scope_memberships.c.scope_id,
+                )
+            )
+            .where(
+                sa.and_(
+                    scope_projections.c.object_id == object_id,
+                    scope_memberships.c.principal_id == principal_id,
+                    scope_projections.c.lifecycle == Lifecycle.ACTIVE.name,
+                    scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+                )
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         if not rows:
             return None
 
@@ -117,11 +158,17 @@ class VisibilityEngine:
 
     def scope_member_ids(self, scope_id: str) -> list[str]:
         """Get all active member principal IDs for a scope."""
-        rows = self._backend.fetch_all(
-            "SELECT DISTINCT principal_id FROM scope_memberships "
-            "WHERE scope_id = ? AND lifecycle = ?",
-            (scope_id, Lifecycle.ACTIVE.name),
+        stmt = (
+            sa.select(sa.distinct(scope_memberships.c.principal_id))
+            .where(
+                sa.and_(
+                    scope_memberships.c.scope_id == scope_id,
+                    scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+                )
+            )
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [r["principal_id"] for r in rows]
 
     def ancestor_scope_ids(self, scope_id: str, *, max_depth: int = 20) -> list[str]:
@@ -129,17 +176,31 @@ class VisibilityEngine:
 
         Uses a recursive CTE (single query) instead of one query per level.
         """
-        rows = self._backend.fetch_all(
-            "WITH RECURSIVE ancestors(id, parent_scope_id, depth) AS ("
-            "  SELECT id, parent_scope_id, 0 FROM scopes WHERE id = ? "
-            "  UNION ALL "
-            "  SELECT s.id, s.parent_scope_id, a.depth + 1 "
-            "  FROM scopes s JOIN ancestors a ON s.id = a.parent_scope_id "
-            "  WHERE a.depth < ?"
-            ") "
-            "SELECT id FROM ancestors WHERE depth > 0 ORDER BY depth ASC",
-            (scope_id, max_depth),
+        depth_col = sa.literal(0).label("depth")
+        base = sa.select(
+            scopes.c.id, scopes.c.parent_scope_id, depth_col,
+        ).where(scopes.c.id == scope_id)
+
+        cte = base.cte(name="ancestors", recursive=True)
+
+        recursive = (
+            sa.select(
+                scopes.c.id,
+                scopes.c.parent_scope_id,
+                (cte.c.depth + 1).label("depth"),
+            )
+            .select_from(scopes.join(cte, scopes.c.id == cte.c.parent_scope_id))
+            .where(cte.c.depth < max_depth)
         )
+        cte = cte.union_all(recursive)
+
+        stmt = (
+            sa.select(cte.c.id)
+            .where(cte.c.depth > 0)
+            .order_by(cte.c.depth.asc())
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [r["id"] for r in rows]
 
     def descendant_scope_ids(self, scope_id: str, *, max_depth: int = 20) -> list[str]:
@@ -147,17 +208,33 @@ class VisibilityEngine:
 
         Uses a recursive CTE (single query) instead of one query per level.
         """
-        rows = self._backend.fetch_all(
-            "WITH RECURSIVE descendants(id, depth) AS ("
-            "  SELECT id, 0 FROM scopes WHERE id = ? "
-            "  UNION ALL "
-            "  SELECT s.id, d.depth + 1 "
-            "  FROM scopes s JOIN descendants d ON s.parent_scope_id = d.id "
-            "  WHERE s.lifecycle != ? AND d.depth < ?"
-            ") "
-            "SELECT id FROM descendants WHERE depth > 0 ORDER BY depth ASC",
-            (scope_id, Lifecycle.ARCHIVED.name, max_depth),
+        depth_col = sa.literal(0).label("depth")
+        base = sa.select(scopes.c.id, depth_col).where(scopes.c.id == scope_id)
+
+        cte = base.cte(name="descendants", recursive=True)
+
+        recursive = (
+            sa.select(
+                scopes.c.id,
+                (cte.c.depth + 1).label("depth"),
+            )
+            .select_from(scopes.join(cte, scopes.c.parent_scope_id == cte.c.id))
+            .where(
+                sa.and_(
+                    scopes.c.lifecycle != Lifecycle.ARCHIVED.name,
+                    cte.c.depth < max_depth,
+                )
+            )
         )
+        cte = cte.union_all(recursive)
+
+        stmt = (
+            sa.select(cte.c.id)
+            .where(cte.c.depth > 0)
+            .order_by(cte.c.depth.asc())
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [r["id"] for r in rows]
 
     # ------------------------------------------------------------------
@@ -170,16 +247,17 @@ class VisibilityEngine:
         *,
         object_type: str | None = None,
     ) -> list[str]:
-        clauses = ["owner_id = ?", "lifecycle != ?"]
-        params: list[Any] = [principal_id, Lifecycle.ARCHIVED.name]
-        if object_type:
-            clauses.append("object_type = ?")
-            params.append(object_type)
-        where = " AND ".join(clauses)
-        rows = self._backend.fetch_all(
-            f"SELECT id FROM scoped_objects WHERE {where}",
-            tuple(params),
+        stmt = sa.select(scoped_objects.c.id).where(
+            sa.and_(
+                scoped_objects.c.owner_id == principal_id,
+                scoped_objects.c.lifecycle != Lifecycle.ARCHIVED.name,
+            )
         )
+        if object_type:
+            stmt = stmt.where(scoped_objects.c.object_type == object_type)
+
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [r["id"] for r in rows]
 
     def _projected_object_ids(
@@ -189,24 +267,32 @@ class VisibilityEngine:
         object_type: str | None = None,
     ) -> list[str]:
         """Get object IDs visible through scope projections (direct memberships)."""
-        type_join = ""
-        params: list[Any] = [principal_id, Lifecycle.ACTIVE.name, Lifecycle.ACTIVE.name]
-
-        if object_type:
-            type_join = "JOIN scoped_objects so ON sp.object_id = so.id "
-            params.append(object_type)
-
-        type_filter = "AND so.object_type = ? " if object_type else ""
-
-        sql = (
-            "SELECT DISTINCT sp.object_id FROM scope_projections sp "
-            "JOIN scope_memberships sm ON sp.scope_id = sm.scope_id "
-            f"{type_join}"
-            "WHERE sm.principal_id = ? "
-            "AND sp.lifecycle = ? AND sm.lifecycle = ? "
-            f"{type_filter}"
+        join_clause = scope_projections.join(
+            scope_memberships,
+            scope_projections.c.scope_id == scope_memberships.c.scope_id,
         )
-        rows = self._backend.fetch_all(sql, tuple(params))
+        if object_type:
+            join_clause = join_clause.join(
+                scoped_objects,
+                scope_projections.c.object_id == scoped_objects.c.id,
+            )
+
+        stmt = (
+            sa.select(sa.distinct(scope_projections.c.object_id))
+            .select_from(join_clause)
+            .where(
+                sa.and_(
+                    scope_memberships.c.principal_id == principal_id,
+                    scope_projections.c.lifecycle == Lifecycle.ACTIVE.name,
+                    scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+                )
+            )
+        )
+        if object_type:
+            stmt = stmt.where(scoped_objects.c.object_type == object_type)
+
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [r["object_id"] for r in rows]
 
     def _visible_via_hierarchy(self, principal_id: str, object_id: str) -> bool:
@@ -215,20 +301,49 @@ class VisibilityEngine:
         Uses a recursive CTE to walk all ancestor scopes for the
         principal's memberships in a single query, then checks projections.
         """
-        row = self._backend.fetch_one(
-            "WITH RECURSIVE member_ancestors(scope_id, depth) AS ("
-            "  SELECT sm.scope_id, 0 "
-            "  FROM scope_memberships sm "
-            "  WHERE sm.principal_id = ? AND sm.lifecycle = ? "
-            "  UNION ALL "
-            "  SELECT s.parent_scope_id, ma.depth + 1 "
-            "  FROM scopes s JOIN member_ancestors ma ON s.id = ma.scope_id "
-            "  WHERE s.parent_scope_id IS NOT NULL AND ma.depth < 20"
-            ") "
-            "SELECT 1 FROM scope_projections sp "
-            "WHERE sp.object_id = ? AND sp.lifecycle = ? "
-            "AND sp.scope_id IN (SELECT scope_id FROM member_ancestors WHERE depth > 0) "
-            "LIMIT 1",
-            (principal_id, Lifecycle.ACTIVE.name, object_id, Lifecycle.ACTIVE.name),
+        # Base: all scopes the principal is an active member of
+        depth_col = sa.literal(0).label("depth")
+        base = (
+            sa.select(scope_memberships.c.scope_id, depth_col)
+            .where(
+                sa.and_(
+                    scope_memberships.c.principal_id == principal_id,
+                    scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+                )
+            )
         )
+        cte = base.cte(name="member_ancestors", recursive=True)
+
+        # Recursive: walk up parent_scope_id
+        recursive = (
+            sa.select(
+                scopes.c.parent_scope_id.label("scope_id"),
+                (cte.c.depth + 1).label("depth"),
+            )
+            .select_from(scopes.join(cte, scopes.c.id == cte.c.scope_id))
+            .where(
+                sa.and_(
+                    scopes.c.parent_scope_id.isnot(None),
+                    cte.c.depth < 20,
+                )
+            )
+        )
+        cte = cte.union_all(recursive)
+
+        # Check if any projection matches an ancestor scope
+        ancestor_ids = sa.select(cte.c.scope_id).where(cte.c.depth > 0)
+        stmt = (
+            sa.select(sa.literal(1))
+            .select_from(scope_projections)
+            .where(
+                sa.and_(
+                    scope_projections.c.object_id == object_id,
+                    scope_projections.c.lifecycle == Lifecycle.ACTIVE.name,
+                    scope_projections.c.scope_id.in_(ancestor_ids),
+                )
+            )
+            .limit(1)
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         return row is not None

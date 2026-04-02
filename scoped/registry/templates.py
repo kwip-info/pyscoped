@@ -16,12 +16,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import (
     AccessDeniedError,
     TemplateInstantiationError,
     TemplateNotFoundError,
     TemplateVersionNotFoundError,
 )
+from scoped.storage._query import compile_for
+from scoped.storage._schema import template_versions, templates
 from scoped.storage.interface import StorageBackend
 from scoped.types import Lifecycle, generate_id, now_utc
 
@@ -151,24 +155,32 @@ class TemplateStore:
         template_id = generate_id()
         version_id = generate_id()
 
-        self._backend.execute(
-            "INSERT INTO templates "
-            "(id, name, description, template_type, owner_id, schema_json, "
-            "current_version, created_at, scope_id, lifecycle) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                template_id, name, description, template_type, owner_id,
-                json.dumps(schema), 1, ts.isoformat(), scope_id,
-                Lifecycle.ACTIVE.name,
-            ),
+        stmt = sa.insert(templates).values(
+            id=template_id,
+            name=name,
+            description=description,
+            template_type=template_type,
+            owner_id=owner_id,
+            schema_json=json.dumps(schema),
+            current_version=1,
+            created_at=ts.isoformat(),
+            scope_id=scope_id,
+            lifecycle=Lifecycle.ACTIVE.name,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
-        self._backend.execute(
-            "INSERT INTO template_versions "
-            "(id, template_id, version, schema_json, created_at, created_by, change_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (version_id, template_id, 1, json.dumps(schema), ts.isoformat(), owner_id, "initial"),
+        stmt = sa.insert(template_versions).values(
+            id=version_id,
+            template_id=template_id,
+            version=1,
+            schema_json=json.dumps(schema),
+            created_at=ts.isoformat(),
+            created_by=owner_id,
+            change_reason="initial",
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         return Template(
             id=template_id,
@@ -189,9 +201,9 @@ class TemplateStore:
 
     def get_template(self, template_id: str) -> Template:
         """Get a template by ID. Raises TemplateNotFoundError if not found."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM templates WHERE id = ?", (template_id,)
-        )
+        stmt = sa.select(templates).where(templates.c.id == template_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             raise TemplateNotFoundError(
                 f"Template not found: {template_id}",
@@ -201,10 +213,13 @@ class TemplateStore:
 
     def get_version(self, template_id: str, version: int) -> TemplateVersion:
         """Get a specific version of a template."""
-        row = self._backend.fetch_one(
-            "SELECT * FROM template_versions WHERE template_id = ? AND version = ?",
-            (template_id, version),
+        stmt = (
+            sa.select(template_versions)
+            .where(template_versions.c.template_id == template_id)
+            .where(template_versions.c.version == version)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
         if row is None:
             raise TemplateVersionNotFoundError(
                 f"Template version not found: {template_id} v{version}",
@@ -214,10 +229,13 @@ class TemplateStore:
 
     def list_versions(self, template_id: str) -> list[TemplateVersion]:
         """List all versions of a template, ordered by version number."""
-        rows = self._backend.fetch_all(
-            "SELECT * FROM template_versions WHERE template_id = ? ORDER BY version",
-            (template_id,),
+        stmt = (
+            sa.select(template_versions)
+            .where(template_versions.c.template_id == template_id)
+            .order_by(template_versions.c.version)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [version_from_row(r) for r in rows]
 
     # ------------------------------------------------------------------
@@ -246,30 +264,36 @@ class TemplateStore:
         new_version = template.current_version + 1
         version_id = generate_id()
 
-        updates: list[str] = ["current_version = ?", "schema_json = ?"]
-        params: list[Any] = [new_version, json.dumps(schema)]
+        values: dict[str, Any] = {
+            "current_version": new_version,
+            "schema_json": json.dumps(schema),
+        }
 
         if name is not None:
-            updates.append("name = ?")
-            params.append(name)
+            values["name"] = name
 
         if description is not None:
-            updates.append("description = ?")
-            params.append(description)
+            values["description"] = description
 
-        params.append(template_id)
-
-        self._backend.execute(
-            f"UPDATE templates SET {', '.join(updates)} WHERE id = ?",
-            tuple(params),
+        stmt = (
+            sa.update(templates)
+            .where(templates.c.id == template_id)
+            .values(**values)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
-        self._backend.execute(
-            "INSERT INTO template_versions "
-            "(id, template_id, version, schema_json, created_at, created_by, change_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (version_id, template_id, new_version, json.dumps(schema), ts.isoformat(), principal_id, change_reason),
+        stmt = sa.insert(template_versions).values(
+            id=version_id,
+            template_id=template_id,
+            version=new_version,
+            schema_json=json.dumps(schema),
+            created_at=ts.isoformat(),
+            created_by=principal_id,
+            change_reason=change_reason,
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
 
         return self.get_template(template_id)
 
@@ -286,30 +310,23 @@ class TemplateStore:
         include_archived: bool = False,
     ) -> list[Template]:
         """List templates with optional filters."""
-        clauses: list[str] = []
-        params: list[Any] = []
+        stmt = sa.select(templates)
 
         if owner_id is not None:
-            clauses.append("owner_id = ?")
-            params.append(owner_id)
+            stmt = stmt.where(templates.c.owner_id == owner_id)
 
         if template_type is not None:
-            clauses.append("template_type = ?")
-            params.append(template_type)
+            stmt = stmt.where(templates.c.template_type == template_type)
 
         if scope_id is not None:
-            clauses.append("scope_id = ?")
-            params.append(scope_id)
+            stmt = stmt.where(templates.c.scope_id == scope_id)
 
         if not include_archived:
-            clauses.append("lifecycle != ?")
-            params.append(Lifecycle.ARCHIVED.name)
+            stmt = stmt.where(templates.c.lifecycle != Lifecycle.ARCHIVED.name)
 
-        where = " AND ".join(clauses) if clauses else "1=1"
-        rows = self._backend.fetch_all(
-            f"SELECT * FROM templates WHERE {where} ORDER BY created_at DESC",
-            tuple(params),
-        )
+        stmt = stmt.order_by(templates.c.created_at.desc())
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         return [template_from_row(r) for r in rows]
 
     # ------------------------------------------------------------------
@@ -321,10 +338,13 @@ class TemplateStore:
         template = self.get_template(template_id)
         self._require_owner(template, principal_id)
 
-        self._backend.execute(
-            "UPDATE templates SET lifecycle = ? WHERE id = ?",
-            (Lifecycle.ARCHIVED.name, template_id),
+        stmt = (
+            sa.update(templates)
+            .where(templates.c.id == template_id)
+            .values(lifecycle=Lifecycle.ARCHIVED.name)
         )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
         return self.get_template(template_id)
 
     # ------------------------------------------------------------------

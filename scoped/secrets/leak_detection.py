@@ -10,9 +10,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.exceptions import SecretLeakDetectedError
 from scoped.secrets.backend import SecretBackend
 from scoped.secrets.models import version_from_row
+from scoped.storage._query import compile_for
+from scoped.storage._schema import secret_versions, secrets
 from scoped.storage.interface import StorageBackend
 
 
@@ -35,11 +39,15 @@ class LeakDetector:
         on every operation).
         """
         values: set[str] = set()
-        rows = self._backend.fetch_all(
-            """SELECT sv.* FROM secret_versions sv
-               JOIN secrets s ON sv.secret_id = s.id AND sv.version = s.current_version
-               WHERE s.lifecycle = 'ACTIVE'""",
-        )
+        stmt = sa.select(secret_versions).select_from(
+            secret_versions.join(
+                secrets,
+                (secret_versions.c.secret_id == secrets.c.id)
+                & (secret_versions.c.version == secrets.c.current_version),
+            )
+        ).where(secrets.c.lifecycle == "ACTIVE")
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
         for row in rows:
             ver = version_from_row(row)
             try:
