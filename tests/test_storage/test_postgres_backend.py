@@ -30,9 +30,9 @@ def _skip_if_no_psycopg():
 def pg_backend():
     """Fresh Postgres backend for each test, cleaned up after."""
     _skip_if_no_psycopg()
-    from scoped.storage.postgres import PostgresBackend
+    from scoped.storage.sa_postgres import SAPostgresBackend
 
-    backend = PostgresBackend(_PG_DSN, pool_min_size=1, pool_max_size=3)
+    backend = SAPostgresBackend(_PG_DSN, pool_size=3)
     backend.initialize()
     yield backend
 
