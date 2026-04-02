@@ -13,6 +13,9 @@ from scoped.logging import ScopedLogger, StructuredFormatter, get_logger
 # =============================================================================
 
 
+django = pytest.importorskip("django")
+
+
 class TestDjangoMiddlewareAsync:
     """Verify the middleware supports async mode detection."""
 
