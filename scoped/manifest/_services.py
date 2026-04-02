@@ -23,6 +23,7 @@ class ScopedServices:
     _projections: Any = None
     _rules: Any = None
     _rule_engine: Any = None
+    _visibility_engine: Any = None
     _environments: Any = None
     _pipelines: Any = None
     _flow: Any = None
@@ -34,6 +35,20 @@ class ScopedServices:
     _subscriptions: Any = None
     _notifications: Any = None
     _scheduler: Any = None
+    _webhook_fernet_key: bytes | None = None
+
+    @property
+    def webhook_key(self) -> bytes:
+        """Lazily generate and cache a Fernet key for webhook config encryption.
+
+        In production, this key should be persisted (e.g., in a database or
+        environment variable). The auto-generated per-process key is suitable
+        for development and testing.
+        """
+        if self._webhook_fernet_key is None:
+            from scoped.events.crypto import generate_webhook_key
+            self._webhook_fernet_key = generate_webhook_key()
+        return self._webhook_fernet_key
 
     @property
     def principals(self) -> Any:
@@ -43,6 +58,13 @@ class ScopedServices:
         return self._principals
 
     @property
+    def visibility_engine(self) -> Any:
+        if self._visibility_engine is None:
+            from scoped.tenancy.engine import VisibilityEngine
+            self._visibility_engine = VisibilityEngine(self.backend)
+        return self._visibility_engine
+
+    @property
     def manager(self) -> Any:
         if self._manager is None:
             from scoped.objects.manager import ScopedManager
@@ -50,6 +72,7 @@ class ScopedServices:
                 self.backend,
                 audit_writer=self.audit,
                 rule_engine=self.rule_engine,
+                visibility_engine=self.visibility_engine,
             )
         return self._manager
 
@@ -148,7 +171,11 @@ class ScopedServices:
     def subscriptions(self) -> Any:
         if self._subscriptions is None:
             from scoped.events.subscriptions import SubscriptionManager
-            self._subscriptions = SubscriptionManager(self.backend, audit_writer=self.audit)
+            self._subscriptions = SubscriptionManager(
+                self.backend,
+                audit_writer=self.audit,
+                webhook_key=self.webhook_key,
+            )
         return self._subscriptions
 
     @property

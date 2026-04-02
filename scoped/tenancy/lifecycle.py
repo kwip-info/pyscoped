@@ -21,6 +21,7 @@ from scoped.tenancy.models import (
     ScopeMembership,
     ScopeRole,
     _lifecycle_to_db,
+    active_membership_condition,
     membership_from_row,
     scope_from_row,
 )
@@ -481,7 +482,7 @@ class ScopeLifecycle:
             scope_memberships.c.scope_id == scope_id,
         )
         if active_only:
-            stmt = stmt.where(scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name)
+            stmt = stmt.where(active_membership_condition(scope_memberships))
         stmt = stmt.order_by(scope_memberships.c.granted_at.asc())
 
         if limit is not None:
@@ -504,7 +505,7 @@ class ScopeLifecycle:
             scope_memberships.c.principal_id == principal_id,
         )
         if active_only:
-            stmt = stmt.where(scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name)
+            stmt = stmt.where(active_membership_condition(scope_memberships))
 
         if limit is not None:
             stmt = stmt.limit(limit).offset(offset)
@@ -518,17 +519,40 @@ class ScopeLifecycle:
         scope_id: str,
         principal_id: str,
     ) -> bool:
-        """Check if a principal has any active membership in a scope."""
+        """Check if a principal has any active, non-expired membership in a scope."""
         stmt = sa.select(sa.literal(1)).select_from(scope_memberships).where(
-            sa.and_(
-                scope_memberships.c.scope_id == scope_id,
-                scope_memberships.c.principal_id == principal_id,
-                scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
-            )
+            scope_memberships.c.scope_id == scope_id,
+            scope_memberships.c.principal_id == principal_id,
+            active_membership_condition(scope_memberships),
         )
         sql, params = compile_for(stmt, self._backend.dialect)
         row = self._backend.fetch_one(sql, params)
-        return row is not None
+        if row is not None:
+            return True
+
+        # Lazy archival: check if membership exists but expired
+        expired_stmt = sa.select(sa.literal(1)).select_from(scope_memberships).where(
+            scope_memberships.c.scope_id == scope_id,
+            scope_memberships.c.principal_id == principal_id,
+            scope_memberships.c.lifecycle == "ACTIVE",
+            scope_memberships.c.expires_at.isnot(None),
+            scope_memberships.c.expires_at <= now_utc().isoformat(),
+        )
+        sql, params = compile_for(expired_stmt, self._backend.dialect)
+        expired_row = self._backend.fetch_one(sql, params)
+        if expired_row is not None:
+            # Archive the expired membership
+            archive_stmt = sa.update(scope_memberships).where(
+                scope_memberships.c.scope_id == scope_id,
+                scope_memberships.c.principal_id == principal_id,
+                scope_memberships.c.lifecycle == "ACTIVE",
+                scope_memberships.c.expires_at.isnot(None),
+                scope_memberships.c.expires_at <= now_utc().isoformat(),
+            ).values(lifecycle="ARCHIVED")
+            sql, params = compile_for(archive_stmt, self._backend.dialect)
+            self._backend.execute(sql, params)
+
+        return False
 
     # ------------------------------------------------------------------
     # Lifecycle transitions

@@ -56,10 +56,12 @@ class WebhookDelivery:
         *,
         transport: DeliveryTransport | None = None,
         max_retries: int = 3,
+        webhook_key: bytes | None = None,
     ) -> None:
         self._backend = backend
         self._transport = transport or self._default_transport
         self._max_retries = max_retries
+        self._webhook_key = webhook_key
 
     # ------------------------------------------------------------------
     # Delivery execution
@@ -204,6 +206,21 @@ class WebhookDelivery:
 
         event = event_from_row(event_row)
         endpoint = webhook_from_row(endpoint_row)
+
+        # Decrypt sensitive config fields if a webhook key is configured
+        if self._webhook_key is not None:
+            from scoped.events.crypto import decrypt_config
+            decrypted = decrypt_config(endpoint.config, self._webhook_key)
+            endpoint = WebhookEndpoint(
+                id=endpoint.id,
+                name=endpoint.name,
+                owner_id=endpoint.owner_id,
+                url=endpoint.url,
+                config=decrypted,
+                scope_id=endpoint.scope_id,
+                created_at=endpoint.created_at,
+                lifecycle=endpoint.lifecycle,
+            )
 
         try:
             status_code, response_body = self._transport(endpoint, event)

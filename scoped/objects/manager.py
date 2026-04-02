@@ -46,12 +46,14 @@ class ScopedManager:
         rule_engine: Any | None = None,
         quota_checker: Any | None = None,
         rate_limit_checker: Any | None = None,
+        visibility_engine: Any | None = None,
     ) -> None:
         self._backend = backend
         self._audit = audit_writer
         self._rule_engine = rule_engine
         self._quota_checker = quota_checker
         self._rate_limit_checker = rate_limit_checker
+        self._visibility = visibility_engine
 
     # ------------------------------------------------------------------
     # Rule enforcement
@@ -86,6 +88,57 @@ class ScopedManager:
                     "principal_id": principal_id,
                     "object_type": object_type,
                     "deny_rules": deny_names,
+                },
+            )
+
+    # ------------------------------------------------------------------
+    # Projection access-level enforcement
+    # ------------------------------------------------------------------
+
+    def _check_access_level(
+        self,
+        object_id: str,
+        principal_id: str,
+        *,
+        required: str,  # "read", "write", "admin"
+    ) -> None:
+        """Check if the principal has sufficient access level on a projected object.
+
+        Only enforced when a visibility_engine is configured. If the principal
+        is the object owner, access is always granted (ownership trumps projection level).
+        """
+        if self._visibility is None:
+            return
+
+        # Load the object to check ownership
+        obj = self._load_object(object_id)
+        if obj is None:
+            return
+
+        # Owner always has full access
+        if can_access(obj.owner_id, principal_id):
+            return
+
+        # Non-owner: check projection access level
+        from scoped.tenancy.models import AccessLevel
+
+        level = self._visibility.get_access_level(principal_id, object_id)
+
+        required_levels = {
+            "read": {AccessLevel.READ, AccessLevel.WRITE, AccessLevel.ADMIN},
+            "write": {AccessLevel.WRITE, AccessLevel.ADMIN},
+            "admin": {AccessLevel.ADMIN},
+        }
+
+        if level not in required_levels.get(required, set()):
+            raise AccessDeniedError(
+                f"Principal {principal_id} has {level.value if level else 'no'} access "
+                f"on object {object_id}, but {required} is required",
+                context={
+                    "object_id": object_id,
+                    "principal_id": principal_id,
+                    "required_level": required,
+                    "actual_level": level.value if level else None,
                 },
             )
 
@@ -387,6 +440,7 @@ class ScopedManager:
         Raises IsolationViolationError if the object is tombstoned.
         """
         obj = self.get_or_raise(object_id, principal_id=principal_id)
+        self._check_access_level(object_id, principal_id, required="write")
 
         # Auto-serialize typed data
         if not isinstance(data, dict):
@@ -479,6 +533,7 @@ class ScopedManager:
         Raises IsolationViolationError if already tombstoned.
         """
         obj = self.get_or_raise(object_id, principal_id=principal_id)
+        self._check_access_level(object_id, principal_id, required="admin")
         self._check_rules(
             action="delete", principal_id=principal_id,
             object_type=obj.object_type, object_id=object_id,

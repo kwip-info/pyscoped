@@ -31,9 +31,16 @@ class SubscriptionManager:
     Enforces owner-only access for mutations.
     """
 
-    def __init__(self, backend: StorageBackend, *, audit_writer: Any | None = None) -> None:
+    def __init__(
+        self,
+        backend: StorageBackend,
+        *,
+        audit_writer: Any | None = None,
+        webhook_key: bytes | None = None,
+    ) -> None:
         self._backend = backend
         self._audit = audit_writer
+        self._webhook_key = webhook_key
 
     # ------------------------------------------------------------------
     # Webhook endpoints
@@ -49,12 +56,21 @@ class SubscriptionManager:
         scope_id: str | None = None,
     ) -> WebhookEndpoint:
         """Register a new webhook endpoint."""
+        raw_config = config or {}
+
+        # Encrypt sensitive fields before persisting
+        if self._webhook_key is not None:
+            from scoped.events.crypto import encrypt_config
+            store_config = encrypt_config(raw_config, self._webhook_key)
+        else:
+            store_config = raw_config
+
         wh = WebhookEndpoint(
             id=generate_id(),
             name=name,
             owner_id=owner_id,
             url=url,
-            config=config or {},
+            config=raw_config,
             scope_id=scope_id,
             created_at=now_utc(),
         )
@@ -63,7 +79,7 @@ class SubscriptionManager:
             name=wh.name,
             owner_id=wh.owner_id,
             url=wh.url,
-            config_json=json.dumps(wh.config),
+            config_json=json.dumps(store_config),
             scope_id=wh.scope_id,
             created_at=wh.created_at.isoformat(),
             lifecycle=wh.lifecycle.name,
@@ -103,7 +119,23 @@ class SubscriptionManager:
         stmt = sa.select(webhook_endpoints).where(webhook_endpoints.c.id == webhook_id)
         sql, params = compile_for(stmt, self._backend.dialect)
         row = self._backend.fetch_one(sql, params)
-        return webhook_from_row(row) if row else None
+        if row is None:
+            return None
+        wh = webhook_from_row(row)
+        if self._webhook_key is not None:
+            from scoped.events.crypto import decrypt_config
+            decrypted = decrypt_config(wh.config, self._webhook_key)
+            wh = WebhookEndpoint(
+                id=wh.id,
+                name=wh.name,
+                owner_id=wh.owner_id,
+                url=wh.url,
+                config=decrypted,
+                scope_id=wh.scope_id,
+                created_at=wh.created_at,
+                lifecycle=wh.lifecycle,
+            )
+        return wh
 
     def list_webhooks(
         self,
@@ -124,7 +156,26 @@ class SubscriptionManager:
         stmt = stmt.order_by(webhook_endpoints.c.created_at.desc())
         sql, params = compile_for(stmt, self._backend.dialect)
         rows = self._backend.fetch_all(sql, params)
-        return [webhook_from_row(r) for r in rows]
+        results = [webhook_from_row(r) for r in rows]
+        if self._webhook_key is not None:
+            from scoped.events.crypto import decrypt_config
+            decrypted_results = []
+            for wh in results:
+                decrypted = decrypt_config(wh.config, self._webhook_key)
+                decrypted_results.append(
+                    WebhookEndpoint(
+                        id=wh.id,
+                        name=wh.name,
+                        owner_id=wh.owner_id,
+                        url=wh.url,
+                        config=decrypted,
+                        scope_id=wh.scope_id,
+                        created_at=wh.created_at,
+                        lifecycle=wh.lifecycle,
+                    )
+                )
+            return decrypted_results
+        return results
 
     def delete_webhook(self, webhook_id: str, *, principal_id: str) -> None:
         """Archive a webhook endpoint (owner only)."""

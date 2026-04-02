@@ -6,6 +6,7 @@ interested principals. Webhooks deliver events to external HTTP endpoints.
 """
 
 from scoped.events.bus import EventBus
+from scoped.events.crypto import decrypt_config, encrypt_config, generate_webhook_key
 from scoped.events.models import (
     DeliveryAttempt,
     DeliveryStatus,
@@ -30,7 +31,10 @@ __all__ = [
     "SubscriptionManager",
     "WebhookDelivery",
     "WebhookEndpoint",
+    "decrypt_config",
+    "encrypt_config",
     "event_from_row",
+    "generate_webhook_key",
     "subscription_from_row",
     "webhook_from_row",
 ]

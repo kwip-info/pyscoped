@@ -20,6 +20,7 @@ from scoped.storage._schema import (
 from scoped.storage.interface import StorageBackend
 from scoped.tenancy.models import (
     AccessLevel,
+    active_membership_condition,
     scope_from_row,
 )
 from scoped.types import Lifecycle
@@ -94,7 +95,7 @@ class VisibilityEngine:
                     scope_projections.c.object_id == object_id,
                     scope_memberships.c.principal_id == principal_id,
                     scope_projections.c.lifecycle == Lifecycle.ACTIVE.name,
-                    scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+                    active_membership_condition(scope_memberships),
                 )
             )
         )
@@ -142,7 +143,7 @@ class VisibilityEngine:
                     scope_projections.c.object_id == object_id,
                     scope_memberships.c.principal_id == principal_id,
                     scope_projections.c.lifecycle == Lifecycle.ACTIVE.name,
-                    scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+                    active_membership_condition(scope_memberships),
                 )
             )
         )
@@ -157,13 +158,13 @@ class VisibilityEngine:
         return max(levels, key=lambda l: priority[l])
 
     def scope_member_ids(self, scope_id: str) -> list[str]:
-        """Get all active member principal IDs for a scope."""
+        """Get all active, non-expired member principal IDs for a scope."""
         stmt = (
             sa.select(sa.distinct(scope_memberships.c.principal_id))
             .where(
                 sa.and_(
                     scope_memberships.c.scope_id == scope_id,
-                    scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+                    active_membership_condition(scope_memberships),
                 )
             )
         )
@@ -284,7 +285,7 @@ class VisibilityEngine:
                 sa.and_(
                     scope_memberships.c.principal_id == principal_id,
                     scope_projections.c.lifecycle == Lifecycle.ACTIVE.name,
-                    scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+                    active_membership_condition(scope_memberships),
                 )
             )
         )
@@ -301,14 +302,14 @@ class VisibilityEngine:
         Uses a recursive CTE to walk all ancestor scopes for the
         principal's memberships in a single query, then checks projections.
         """
-        # Base: all scopes the principal is an active member of
+        # Base: all scopes the principal is an active, non-expired member of
         depth_col = sa.literal(0).label("depth")
         base = (
             sa.select(scope_memberships.c.scope_id, depth_col)
             .where(
                 sa.and_(
                     scope_memberships.c.principal_id == principal_id,
-                    scope_memberships.c.lifecycle == Lifecycle.ACTIVE.name,
+                    active_membership_condition(scope_memberships),
                 )
             )
         )

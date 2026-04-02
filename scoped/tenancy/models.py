@@ -8,6 +8,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+import sqlalchemy as sa
+
 from scoped.types import Lifecycle
 
 
@@ -142,6 +144,14 @@ class ScopeMembership:
     def is_active(self) -> bool:
         return self.lifecycle == Lifecycle.ACTIVE
 
+    @property
+    def is_expired(self) -> bool:
+        """True if this membership has passed its expiration date."""
+        if self.expires_at is None:
+            return False
+        from scoped.types import now_utc
+        return now_utc() > self.expires_at
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -180,6 +190,26 @@ class ScopeProjection:
             "access_level": self.access_level.value,
             "lifecycle": self.lifecycle.name,
         }
+
+
+# ---------------------------------------------------------------------------
+# Membership expiration helpers
+# ---------------------------------------------------------------------------
+
+def active_membership_condition(table):
+    """Return SQLAlchemy condition for active, non-expired memberships.
+
+    Checks: lifecycle == 'ACTIVE' AND (expires_at IS NULL OR expires_at > now).
+    """
+    from scoped.types import now_utc
+    now_iso = now_utc().isoformat()
+    return sa.and_(
+        table.c.lifecycle == "ACTIVE",
+        sa.or_(
+            table.c.expires_at.is_(None),
+            table.c.expires_at > now_iso,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

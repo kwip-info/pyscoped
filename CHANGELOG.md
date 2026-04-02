@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.1 (2026-04-02)
+
+### Security
+- **Membership expiration enforcement** — `scope_memberships.expires_at` is now checked in all 6 visibility query sites: `is_member()`, `can_see()`, `scope_member_ids()`, `get_memberships()`, `get_principal_scopes()`, `_projected_object_ids()`. Expired memberships are lazily archived on access. New `ScopeMembership.is_expired` property and `active_membership_condition()` helper
+- **Projection access level enforcement** — `AccessLevel` (READ/WRITE/ADMIN) stored on projections is now enforced: `update()` requires WRITE, `tombstone()` requires ADMIN. Opt-in via `visibility_engine` parameter on `ScopedManager`. Owners always have full access regardless of projection
+- **Webhook secrets encryption** — `config_json` sensitive fields (`headers`, `auth_token`, `secret`) are Fernet-encrypted at rest. `encrypt_config()` / `decrypt_config()` in `scoped.events.crypto`. Backward compatible with existing plaintext configs
+
 ## 0.9.0 (2026-04-02)
 
 ### Added
