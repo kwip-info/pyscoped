@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0 (2026-04-02)
+
+### Added
+- **Typed IDs** — `scoped.ids` module with 13 thin `str` subclasses: `PrincipalId`, `ObjectId`, `ScopeId`, `RuleId`, `TraceId`, `SecretId`, `VersionId`, `BindingId`, `MembershipId`, `ProjectionId`, `ConnectorId`, `ScheduleId`, `JobId`. All are `isinstance(x, str)` — zero breakage. `PrincipalId.generate()` replaces `generate_id()` for typed ID creation. Re-exported from `scoped.types`
+- **Typed rule conditions** — `scoped.rules.conditions` module with Pydantic models for each rule type: `AccessCondition`, `RateLimitCondition`, `QuotaCondition`, `RedactionCondition`, `FeatureFlagCondition`. Validated at creation time (not evaluation time). `Rule.typed_conditions` property for typed access. `RuleStore.create_rule()` accepts typed models or raw dicts
+- **Enum coercion helpers** — `coerce_role()` and `coerce_access_level()` in `scoped.tenancy.models` validate string inputs with descriptive `ValueError` messages. Namespace APIs now accept `str | ScopeRole` and `str | AccessLevel`
+- **`Scope.lifecycle_display`** property — returns `"FROZEN"` instead of the internal `"DEPRECATED"` name
+
 ## 0.7.1 (2026-04-02)
 
 ### Changed

@@ -14,8 +14,32 @@ from typing import Any, Protocol, runtime_checkable
 # ---------------------------------------------------------------------------
 
 def generate_id() -> str:
-    """Generate a globally unique identifier."""
+    """Generate a globally unique identifier.
+
+    For new code, prefer the typed factories: ``PrincipalId.generate()``,
+    ``ObjectId.generate()``, etc. from :mod:`scoped.ids`.
+    """
     return uuid.uuid4().hex
+
+
+# Re-export typed ID classes for convenience
+from scoped.ids import (  # noqa: E402, F401
+    BindingId,
+    ConnectorId,
+    EntryId,
+    JobId,
+    MembershipId,
+    ObjectId,
+    PrincipalId,
+    ProjectionId,
+    RuleId,
+    ScheduleId,
+    ScopeId,
+    ScopedId,
+    SecretId,
+    TraceId,
+    VersionId,
+)
 
 
 def now_utc() -> datetime:

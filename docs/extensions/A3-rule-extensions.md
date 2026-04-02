@@ -107,10 +107,36 @@ Rollout uses deterministic hashing of `(feature_name, principal_id)` so a princi
 
 **Key class:** `FeatureFlagEngine` — evaluates flag rules by priority, supports `is_enabled(feature_name, principal_id, scope_id)` queries, returns all flags with `list_flags()`.
 
+## Typed Conditions (v0.8.0+)
+
+Rule conditions can be created using validated Pydantic models instead of raw dicts:
+
+```python
+from scoped.rules.conditions import (
+    AccessCondition, RateLimitCondition, RateLimitSpec,
+    QuotaCondition, QuotaSpec, RedactionCondition, RedactionSpec,
+    FeatureFlagCondition, FeatureFlagSpec,
+)
+
+# Validated at creation time — typos caught immediately
+cond = RateLimitCondition(
+    action=["create"],
+    rate_limit=RateLimitSpec(max_count=100, window_seconds=3600),
+)
+rule = store.create_rule(name="rate-limit", rule_type=RuleType.RATE_LIMIT, ..., conditions=cond)
+
+# Typed access on existing rules
+rule.typed_conditions  # RateLimitCondition(...)
+rule.conditions        # {"action": ["create"], "rate_limit": {...}}  (raw dict, backward compat)
+```
+
+Raw `dict` conditions continue to work everywhere — typed models are opt-in.
+
 ## Files
 
 ```
 scoped/rules/
+    conditions.py      # Typed condition models (AccessCondition, QuotaCondition, etc.)
     builtins.py        # Updated with REDACTION, RATE_LIMIT, QUOTA, FEATURE_FLAG types
     redaction.py       # RedactionEngine, RedactionStrategy, RedactionConfig
     rate_limit.py      # RateLimitChecker, RateLimitConfig, RateLimitResult

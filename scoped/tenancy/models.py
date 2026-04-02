@@ -34,6 +34,38 @@ class AccessLevel(Enum):
     ADMIN = "admin"
 
 
+def coerce_role(value: str | ScopeRole) -> ScopeRole:
+    """Convert a string or ScopeRole to ScopeRole.
+
+    Raises ValueError with a descriptive message if the value is invalid.
+    """
+    if isinstance(value, ScopeRole):
+        return value
+    try:
+        return ScopeRole(value)
+    except ValueError:
+        valid = ", ".join(repr(r.value) for r in ScopeRole)
+        raise ValueError(
+            f"Invalid role {value!r}. Valid roles: {valid}"
+        ) from None
+
+
+def coerce_access_level(value: str | AccessLevel) -> AccessLevel:
+    """Convert a string or AccessLevel to AccessLevel.
+
+    Raises ValueError with a descriptive message if the value is invalid.
+    """
+    if isinstance(value, AccessLevel):
+        return value
+    try:
+        return AccessLevel(value)
+    except ValueError:
+        valid = ", ".join(repr(a.value) for a in AccessLevel)
+        raise ValueError(
+            f"Invalid access level {value!r}. Valid levels: {valid}"
+        ) from None
+
+
 # ---------------------------------------------------------------------------
 # Core models
 # ---------------------------------------------------------------------------
@@ -68,6 +100,13 @@ class Scope:
     @property
     def is_archived(self) -> bool:
         return self.lifecycle == Lifecycle.ARCHIVED
+
+    @property
+    def lifecycle_display(self) -> str:
+        """Human-readable lifecycle state (uses 'FROZEN' instead of 'DEPRECATED')."""
+        if self.lifecycle == Lifecycle.DEPRECATED:
+            return "FROZEN"
+        return self.lifecycle.name
 
     def snapshot(self) -> dict[str, Any]:
         return {

@@ -25,6 +25,7 @@ from scoped.rules.models import (
 )
 from scoped.storage._query import compile_for
 from scoped.storage._schema import rule_bindings, rule_versions, rules
+from scoped.ids import BindingId, RuleId, VersionId
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
 
@@ -51,15 +52,22 @@ class RuleStore:
         name: str,
         rule_type: RuleType,
         effect: RuleEffect,
-        conditions: dict[str, Any] | None = None,
+        conditions: dict[str, Any] | Any | None = None,
         priority: int = 0,
         description: str = "",
         created_by: str,
     ) -> Rule:
-        """Create a new rule with its first version."""
+        """Create a new rule with its first version.
+
+        ``conditions`` can be a raw dict or a typed ``RuleConditions``
+        model (e.g. ``AccessCondition``, ``QuotaCondition``).  Typed
+        models are validated immediately and serialized to dict for storage.
+        """
+        from scoped.rules.conditions import conditions_to_dict
+
         ts = now_utc()
-        rule_id = generate_id()
-        conds = conditions or {}
+        rule_id = RuleId.generate()
+        conds = conditions_to_dict(conditions) if conditions else {}
 
         rule = Rule(
             id=rule_id,
@@ -227,7 +235,7 @@ class RuleStore:
         created_by: str | None = None,
     ) -> RuleVersion:
         ts = now_utc()
-        ver_id = generate_id()
+        ver_id = VersionId.generate()
         ver = RuleVersion(
             id=ver_id,
             rule_id=rule.id,
@@ -264,7 +272,7 @@ class RuleStore:
     ) -> RuleBinding:
         """Bind a rule to a target."""
         ts = now_utc()
-        binding_id = generate_id()
+        binding_id = BindingId.generate()
         binding = RuleBinding(
             id=binding_id,
             rule_id=rule_id,

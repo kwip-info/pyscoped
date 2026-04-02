@@ -22,6 +22,7 @@ from scoped.registry.kinds import RegistryKind
 from scoped.registry.sqlite_store import SQLiteRegistryStore
 from scoped.storage._query import compile_for
 from scoped.storage._schema import principal_relationships, principals
+from scoped.ids import PrincipalId
 from scoped.types import ActionType, Lifecycle, Metadata, generate_id, now_utc
 
 
@@ -133,7 +134,7 @@ class PrincipalStore:
     ) -> Principal:
         """Create a new principal, register it, and persist it."""
         reg = registry or get_registry()
-        pid = principal_id or generate_id()
+        pid = principal_id or PrincipalId.generate()
         ts = now_utc()
 
         # Register in the universal registry

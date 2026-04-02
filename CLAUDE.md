@@ -507,6 +507,38 @@ class MyTest(ScopedTestCase):
 
 pytest fixtures via conftest: `sqlite_backend`, `sa_sqlite_backend`, `storage_backend` (parametrized SQLite + SA SQLite + Postgres), `registry`.
 
+## Typed IDs
+
+All entity IDs are thin `str` subclasses for static type safety with zero runtime overhead:
+```python
+from scoped.ids import PrincipalId, ObjectId, ScopeId
+
+pid = PrincipalId.generate()   # PrincipalId (is-a str)
+oid = ObjectId.generate()      # ObjectId  (is-a str)
+isinstance(pid, str)           # True — fully backward compatible
+```
+
+Available types: `PrincipalId`, `ObjectId`, `VersionId`, `ScopeId`, `MembershipId`, `ProjectionId`, `RuleId`, `BindingId`, `TraceId`, `EntryId`, `SecretId`, `ConnectorId`, `ScheduleId`, `JobId`. All re-exported from `scoped.types`.
+
+## Typed Rule Conditions
+
+Rule conditions are validated at creation time via Pydantic models:
+```python
+from scoped.rules.conditions import AccessCondition, QuotaCondition, QuotaSpec
+
+# Typed (validated immediately)
+cond = AccessCondition(action=["create", "read"], object_type="invoice")
+rule = client.services.rules.create_rule(name="allow-invoices", ..., conditions=cond)
+
+# Raw dict still works (backward compatible)
+rule = client.services.rules.create_rule(..., conditions={"action": "create"})
+
+# Typed access on existing rules
+rule.typed_conditions  # AccessCondition(action="create", ...)
+```
+
+Models: `AccessCondition`, `RateLimitCondition` (+ `RateLimitSpec`), `QuotaCondition` (+ `QuotaSpec`), `RedactionCondition` (+ `RedactionSpec`), `FeatureFlagCondition` (+ `FeatureFlagSpec`).
+
 ## Typed Object Protocol
 
 Register types for auto-serialization/deserialization of versioned object data:
@@ -556,7 +588,8 @@ class MyConnector: ...
 scoped/
   __init__.py              # Module-level proxy after scoped.init()
   client.py                # ScopedClient + init() + URL parsing
-  types.py                 # Lifecycle, ActionType, URN, ScopedSerializable protocol
+  ids.py                   # Typed ID classes (PrincipalId, ObjectId, ScopeId, etc.)
+  types.py                 # Lifecycle, ActionType, URN, ScopedSerializable, re-exports ids
   exceptions.py            # Exception hierarchy (40+ classes)
   logging.py               # Structured JSON logging
   _stability.py            # @experimental, @preview, @stable decorators
@@ -567,7 +600,7 @@ scoped/
   registry/                # Layer 1: URN registration
   objects/                 # Layer 3: Versioned objects + search
   tenancy/                 # Layer 4: Scopes, membership, projection, visibility
-  rules/                   # Layer 5: Policy engine + rate limiting
+  rules/                   # Layer 5: Policy engine + rate limiting + typed conditions
   audit/                   # Layer 6: Hash-chained trail (writer + query)
   temporal/                # Layer 7: Rollback + reconstruction
   environments/            # Layer 8: Ephemeral workspaces (@experimental)

@@ -26,6 +26,7 @@ from scoped.objects.versioning import diff_versions
 from scoped.storage._query import compile_for
 from scoped.storage._schema import object_versions, scoped_objects, tombstones
 from scoped.storage.interface import StorageBackend
+from scoped.ids import ObjectId, VersionId
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
 
 
@@ -147,8 +148,8 @@ class ScopedManager:
                 )
 
         ts = now_utc()
-        obj_id = generate_id()
-        ver_id = generate_id()
+        obj_id = ObjectId.generate()
+        ver_id = VersionId.generate()
         checksum = compute_checksum(data)
 
         obj = ScopedObject(
@@ -226,8 +227,8 @@ class ScopedManager:
 
         with self._backend.transaction() as txn:
             for item in items:
-                obj_id = generate_id()
-                ver_id = generate_id()
+                obj_id = ObjectId.generate()
+                ver_id = VersionId.generate()
                 object_type = item["object_type"]
                 data = item["data"]
                 checksum = compute_checksum(data)
@@ -415,7 +416,7 @@ class ScopedManager:
         ts = now_utc()
         new_version_num = obj.current_version + 1
         checksum = compute_checksum(data)
-        ver_id = generate_id()
+        ver_id = VersionId.generate()
 
         ver = ObjectVersion(
             id=ver_id,

@@ -76,6 +76,20 @@ class Rule:
     def is_active(self) -> bool:
         return self.lifecycle == Lifecycle.ACTIVE
 
+    @property
+    def typed_conditions(self) -> Any:
+        """Parse conditions into a typed model based on rule_type.
+
+        Returns a ``RuleConditions`` instance (Pydantic model) for
+        validated access.  Falls back to the raw dict on parse failure.
+        """
+        from scoped.rules.conditions import parse_conditions
+
+        try:
+            return parse_conditions(self.conditions, self.rule_type)
+        except Exception:
+            return self.conditions
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "id": self.id,

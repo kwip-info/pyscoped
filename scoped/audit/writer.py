@@ -19,6 +19,7 @@ from scoped.audit.models import TraceEntry, compute_hash
 from scoped.exceptions import AuditSequenceCollisionError
 from scoped.storage._query import compile_for
 from scoped.storage._schema import audit_trail
+from scoped.ids import TraceId
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, generate_id, now_utc
 
@@ -108,7 +109,7 @@ class AuditWriter:
             for attempt in range(_MAX_SEQUENCE_RETRIES + 1):
                 self._reseed_if_stale()
 
-                entry_id = generate_id()
+                entry_id = TraceId.generate()
                 ts = now_utc()
                 seq = self._sequence + 1
 
@@ -190,7 +191,7 @@ class AuditWriter:
                 try:
                     with self._backend.transaction() as txn:
                         for entry_kwargs in entries:
-                            entry_id = generate_id()
+                            entry_id = TraceId.generate()
                             seq = self._sequence + 1
 
                             action = entry_kwargs["action"]

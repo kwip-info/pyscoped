@@ -241,13 +241,13 @@ class ScopesNamespace:
             with client.as_principal(alice):
                 client.scopes.add_member(team, bob, role="editor")
         """
-        from scoped.tenancy.models import ScopeRole
+        from scoped.tenancy.models import coerce_role
 
         actor = _resolve_principal_id(granted_by)
         return self._svc.scopes.add_member(
             _to_id(scope),
             principal_id=_to_id(principal),
-            role=ScopeRole(role),
+            role=coerce_role(role),
             granted_by=actor,
         )
 
@@ -352,14 +352,14 @@ class ScopesNamespace:
             with client.as_principal(alice):
                 client.scopes.project(invoice, engineering_team)
         """
-        from scoped.tenancy.models import AccessLevel
+        from scoped.tenancy.models import coerce_access_level
 
         actor = _resolve_principal_id(projected_by)
         return self._svc.projections.project(
             scope_id=_to_id(scope),
             object_id=_to_id(obj),
             projected_by=actor,
-            access_level=AccessLevel(access_level),
+            access_level=coerce_access_level(access_level),
         )
 
     def unproject(
