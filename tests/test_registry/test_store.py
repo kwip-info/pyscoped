@@ -6,7 +6,7 @@ from scoped.registry.base import Registry
 from scoped.registry.kinds import CustomKind, RegistryKind
 from scoped.registry.sqlite_store import SQLiteRegistryStore
 from scoped.registry.store import InMemoryRegistryStore
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 from scoped.types import Lifecycle
 
 

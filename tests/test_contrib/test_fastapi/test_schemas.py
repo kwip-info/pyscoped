@@ -16,7 +16,7 @@ from scoped.contrib.fastapi.schemas import (
 )
 from scoped.identity.principal import PrincipalStore
 from scoped.objects.manager import ScopedManager
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 from scoped.tenancy.lifecycle import ScopeLifecycle
 
 

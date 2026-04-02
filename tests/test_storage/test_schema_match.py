@@ -11,7 +11,7 @@ import sqlalchemy as sa
 import pytest
 
 from scoped.storage._schema import metadata as sa_metadata
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 
 
 @pytest.fixture

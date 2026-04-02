@@ -11,7 +11,7 @@ import pytest
 from scoped.audit.writer import AuditWriter
 from scoped.identity.principal import PrincipalStore
 from scoped.objects.manager import ScopedManager
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 from scoped.sync.agent import SyncAgent
 from scoped.sync.config import SyncConfig
 from scoped.sync.models import SyncBatchAck, SyncStatus, SyncStateSnapshot

@@ -6,7 +6,7 @@ can interact with the framework through a standard protocol.
 Usage::
 
     from scoped.contrib.mcp.server import create_scoped_server
-    from scoped.storage.sqlite import SQLiteBackend
+    from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 
     backend = SQLiteBackend("app.db")
     backend.initialize()

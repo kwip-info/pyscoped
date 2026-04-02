@@ -21,19 +21,24 @@ def rule_store(sqlite_backend):
     return RuleStore(sqlite_backend)
 
 
+_seq_counter = 0
+
+
 def _insert_audit_entries(backend, *, action, actor_id="admin", scope_id=None, count=1):
     """Insert fake audit trail entries for rate-limit testing."""
+    global _seq_counter
     from scoped.types import generate_id
 
     ts = now_utc().isoformat()
     for _ in range(count):
+        _seq_counter += 1
         backend.execute(
             "INSERT INTO audit_trail "
             "(id, sequence, actor_id, action, target_type, target_id, "
             "scope_id, timestamp, metadata_json, hash, previous_hash) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                generate_id(), 0, actor_id, action,
+                generate_id(), _seq_counter, actor_id, action,
                 "test", generate_id(), scope_id, ts,
                 "{}", "fakehash", "",
             ),

@@ -5,7 +5,7 @@ import pytest
 from scoped.identity.context import ScopedContext
 from scoped.identity.principal import Principal, PrincipalStore
 from scoped.objects.manager import ScopedManager
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 from scoped.storage.tenant_router import TenantResolutionError, TenantRouter
 from scoped.types import Lifecycle, Metadata, generate_id, now_utc
 

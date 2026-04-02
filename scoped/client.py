@@ -476,33 +476,38 @@ def _create_backend(database_url: str | None) -> StorageBackend:
     """Parse a database URL and return the appropriate backend.
 
     Supports:
-        - ``None`` → in-memory SQLite
-        - ``"sqlite:///path/to/db"`` → SQLite file
-        - ``"sqlite:///:memory:"`` → in-memory SQLite
-        - ``"postgresql://..."`` or ``"postgres://..."`` → PostgreSQL
+        - ``None`` → in-memory SQLite (via SQLAlchemy)
+        - ``"sqlite:///path/to/db"`` → SQLite file (via SQLAlchemy)
+        - ``"sqlite:///:memory:"`` → in-memory SQLite (via SQLAlchemy)
+        - ``"postgresql://..."`` or ``"postgres://..."`` → PostgreSQL (via SQLAlchemy)
 
     The backend is returned un-initialized — the caller must call
     ``backend.initialize()``.
+
+    .. versionchanged:: 0.7.0
+        Now returns SQLAlchemy Core-backed backends (``SASQLiteBackend``,
+        ``SAPostgresBackend``) instead of the legacy ``SQLiteBackend`` /
+        ``PostgresBackend``.
     """
     if database_url is None:
-        from scoped.storage.sqlite import SQLiteBackend
+        from scoped.storage.sa_sqlite import SASQLiteBackend
 
-        return SQLiteBackend(":memory:")
+        return SASQLiteBackend(":memory:")
 
     if database_url.startswith("sqlite"):
-        from scoped.storage.sqlite import SQLiteBackend
+        from scoped.storage.sa_sqlite import SASQLiteBackend
 
         # Parse path from sqlite:///path or sqlite:///:memory:
         if ":///" in database_url:
             path = database_url.split(":///", 1)[1]
         else:
             path = ":memory:"
-        return SQLiteBackend(path or ":memory:")
+        return SASQLiteBackend(path or ":memory:")
 
     if database_url.startswith(("postgresql://", "postgres://")):
-        from scoped.storage.postgres import PostgresBackend
+        from scoped.storage.sa_postgres import SAPostgresBackend
 
-        return PostgresBackend(database_url)
+        return SAPostgresBackend(database_url)
 
     raise ValueError(
         f"Unsupported database URL scheme: {database_url.split('://')[0]}://. "

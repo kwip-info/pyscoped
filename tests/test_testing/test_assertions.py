@@ -7,7 +7,7 @@ import pytest
 from scoped.audit.writer import AuditWriter
 from scoped.identity.principal import PrincipalStore
 from scoped.objects.manager import ScopedManager
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 from scoped.testing.assertions import (
     assert_audit_recorded,
     assert_hash_chain_valid,

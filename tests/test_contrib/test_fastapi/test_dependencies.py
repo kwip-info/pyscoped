@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from scoped.contrib.fastapi.dependencies import get_principal, get_scoped_context, get_services
 from scoped.contrib.fastapi.middleware import ScopedContextMiddleware
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 
 
 @pytest.fixture

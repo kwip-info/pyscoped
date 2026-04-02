@@ -2,7 +2,7 @@
 
 import pytest
 
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 
 
 class TestSQLiteBackend:

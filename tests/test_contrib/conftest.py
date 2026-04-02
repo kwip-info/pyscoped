@@ -6,7 +6,7 @@ import pytest
 
 from scoped.client import ScopedClient
 from scoped.contrib._base import build_services
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 
 
 @pytest.fixture

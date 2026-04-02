@@ -15,7 +15,7 @@ from scoped._type_adapters import (
 )
 from scoped._type_registry import TypeRegistry, _registry
 from scoped.objects.models import ObjectVersion, compute_checksum
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 from scoped.types import ScopedSerializable
 
 

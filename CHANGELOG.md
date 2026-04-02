@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.1 (2026-04-02)
+
+### Changed
+- **Default backends switched** — `scoped.init()` and `ScopedClient(database_url=...)` now create `SASQLiteBackend`/`SAPostgresBackend` instead of the legacy backends
+- **`StorageBackend.engine` property** — Optional property returning the SQLAlchemy engine for SA-backed backends (`None` for legacy backends)
+
+### Deprecated
+- **`SQLiteBackend`** — Use `SASQLiteBackend` instead. Emits `DeprecationWarning` on construction. Will be removed in v1.0
+- **`PostgresBackend`** — Use `SAPostgresBackend` instead. Emits `DeprecationWarning` on construction. Will be removed in v1.0
+
 ## 0.7.0 (2026-04-02)
 
 ### Added

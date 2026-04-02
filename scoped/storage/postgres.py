@@ -73,6 +73,10 @@ class PostgresTransaction(StorageTransaction):
 class PostgresBackend(StorageBackend):
     """PostgreSQL storage backend with connection pooling.
 
+    .. deprecated:: 0.7.0
+        Use :class:`~scoped.storage.sa_postgres.SAPostgresBackend` instead.
+        This backend will be removed in v1.0.
+
     Args:
         dsn: PostgreSQL connection string
              (e.g. ``"postgresql://user:pass@localhost/mydb"``).
@@ -97,6 +101,14 @@ class PostgresBackend(StorageBackend):
         enable_rls: bool = False,
         pool_kwargs: dict[str, Any] | None = None,
     ) -> None:
+        import warnings
+
+        warnings.warn(
+            "PostgresBackend is deprecated — use SAPostgresBackend instead. "
+            "PostgresBackend will be removed in v1.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._dsn = dsn
         self._pool_min_size = pool_min_size
         self._pool_max_size = pool_max_size

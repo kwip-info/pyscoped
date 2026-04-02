@@ -7,7 +7,6 @@ import pytest
 from scoped.registry.base import Registry, reset_global_registry
 from scoped.registry.kinds import CustomKind
 from scoped.storage.sa_sqlite import SASQLiteBackend
-from scoped.storage.sqlite import SQLiteBackend
 
 
 @pytest.fixture
@@ -20,8 +19,8 @@ def registry():
 
 @pytest.fixture
 def sqlite_backend():
-    """In-memory SQLite backend, initialized with schema."""
-    backend = SQLiteBackend(":memory:")
+    """In-memory SQLite backend (SA Core), initialized with schema."""
+    backend = SASQLiteBackend(":memory:")
     backend.initialize()
     yield backend
     backend.close()
@@ -62,15 +61,10 @@ def sa_sqlite_backend():
     backend.close()
 
 
-@pytest.fixture(params=["sqlite", "sa_sqlite", "postgres"])
+@pytest.fixture(params=["sa_sqlite", "postgres"])
 def storage_backend(request):
-    """Parametrized backend fixture — runs tests on SQLite, SA SQLite, and Postgres."""
-    if request.param == "sqlite":
-        backend = SQLiteBackend(":memory:")
-        backend.initialize()
-        yield backend
-        backend.close()
-    elif request.param == "sa_sqlite":
+    """Parametrized backend fixture — runs tests on SA SQLite and Postgres."""
+    if request.param == "sa_sqlite":
         backend = SASQLiteBackend(":memory:")
         backend.initialize()
         yield backend

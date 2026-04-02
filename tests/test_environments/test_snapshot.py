@@ -75,8 +75,7 @@ class TestCapture:
 
     def test_capture_nonexistent_env(self, snapshots, principals):
         """Capturing a nonexistent env fails due to FK constraint."""
-        import sqlite3
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(Exception, match="(?i)integrity|foreign key"):
             snapshots.capture("nonexistent", created_by=principals.id)
 
 

@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from scoped.contrib.fastapi.middleware import ScopedContextMiddleware
 from scoped.contrib.fastapi.router import router as scoped_router
 from scoped.identity.context import ScopedContext
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 
 
 @pytest.fixture

@@ -8,7 +8,7 @@ mcp = pytest.importorskip("mcp")
 
 from scoped.client import ScopedClient
 from scoped.contrib.mcp.server import create_scoped_server
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 
 
 @pytest.fixture

@@ -88,12 +88,11 @@ class TestAuditChain:
 
 
 class TestMigrationState:
-    def test_passes_without_migration_table(self, sqlite_backend):
+    def test_passes_with_or_without_migration_table(self, sqlite_backend):
         checker = HealthChecker(sqlite_backend)
         check = checker.check_migration_state()
 
         assert check.passed
-        assert "applied directly" in check.detail
 
 
 class TestCheckAll:

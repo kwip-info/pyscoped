@@ -55,12 +55,24 @@ class SQLiteBackend(StorageBackend):
     """
     SQLite storage backend.
 
+    .. deprecated:: 0.7.0
+        Use :class:`~scoped.storage.sa_sqlite.SASQLiteBackend` instead.
+        This backend will be removed in v1.0.
+
     Args:
         path: Database file path, or ":memory:" for in-memory.
         pragmas: Optional dict of PRAGMA settings.
     """
 
     def __init__(self, path: str = ":memory:", pragmas: dict[str, str] | None = None) -> None:
+        import warnings
+
+        warnings.warn(
+            "SQLiteBackend is deprecated — use SASQLiteBackend instead. "
+            "SQLiteBackend will be removed in v1.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._path = path
         self._pragmas = pragmas or {
             "journal_mode": "wal",

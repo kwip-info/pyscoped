@@ -20,7 +20,7 @@ from __future__ import annotations
 import pytest
 
 from scoped.manifest._services import ScopedServices, build_services
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend as SQLiteBackend
 from scoped.tenancy.models import ScopeRole
 
 

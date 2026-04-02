@@ -6,9 +6,9 @@ All entities are created in dependency order, with full compliance by constructi
 Usage::
 
     from scoped.manifest import ManifestLoader
-    from scoped.storage.sqlite import SQLiteBackend
+    from scoped.storage.sa_sqlite import SASQLiteBackend
 
-    backend = SQLiteBackend("app.db")
+    backend = SASQLiteBackend("app.db")
     backend.initialize()
 
     loader = ManifestLoader(backend)

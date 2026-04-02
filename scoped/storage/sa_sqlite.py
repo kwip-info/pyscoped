@@ -172,6 +172,30 @@ class SASQLiteBackend(StorageBackend):
 
         sa_metadata.create_all(self._engine)
 
+        # FTS5 virtual tables and composite indexes can't be represented
+        # as SA Table objects.  Create them via raw DDL after the schema.
+        _POST_CREATE_DDL = [
+            # FTS5 (m0005)
+            "CREATE VIRTUAL TABLE IF NOT EXISTS search_index_fts "
+            "USING fts5(content, content_rowid='rowid')",
+            # Composite indexes (m0012)
+            "CREATE INDEX IF NOT EXISTS idx_projections_scope_lifecycle "
+            "ON scope_projections(scope_id, lifecycle)",
+            "CREATE INDEX IF NOT EXISTS idx_memberships_scope_lifecycle "
+            "ON scope_memberships(scope_id, lifecycle)",
+            "CREATE INDEX IF NOT EXISTS idx_memberships_principal_lifecycle "
+            "ON scope_memberships(principal_id, lifecycle)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_action_timestamp "
+            "ON audit_trail(action, timestamp)",
+            # Audit sequence uniqueness (m0014)
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_sequence "
+            "ON audit_trail(sequence)",
+        ]
+        with self._engine.connect() as conn:
+            for ddl in _POST_CREATE_DDL:
+                conn.execute(sa.text(ddl))
+            conn.commit()
+
     def transaction(self) -> _SASQLiteTransaction:
         conn = self.engine.connect()
         return _SASQLiteTransaction(conn)

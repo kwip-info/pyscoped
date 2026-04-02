@@ -8,7 +8,10 @@ auto-commit.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import sqlalchemy as sa
 
 
 class StorageTransaction(ABC):
@@ -74,6 +77,15 @@ class StorageBackend(ABC):
     def dialect(self) -> str:
         """Return the SQL dialect identifier (e.g. ``'sqlite'``, ``'postgres'``)."""
         return "generic"
+
+    @property
+    def engine(self) -> sa.engine.Engine | None:
+        """Return the SQLAlchemy engine, if available.
+
+        SA-backed backends (``SASQLiteBackend``, ``SAPostgresBackend``)
+        return their engine instance.  Legacy backends return ``None``.
+        """
+        return None
 
     @abstractmethod
     def initialize(self) -> None:

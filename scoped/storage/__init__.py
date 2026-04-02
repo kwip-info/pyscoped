@@ -15,7 +15,7 @@ from scoped.storage.migrations import (
     MigrationRunner,
     MigrationStatus,
 )
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend
 from scoped.storage.tiering import (
     RetentionPolicy,
     StorageTier,
@@ -43,7 +43,8 @@ __all__ = [
     "StorageBackend",
     "StorageTier",
     "StorageTransaction",
-    "SQLiteBackend",
+    "SASQLiteBackend",
+    "SAPostgresBackend",
     "TierAssignment",
     "TierManager",
     "TierTransitionCandidate",
@@ -51,10 +52,19 @@ __all__ = [
 
 
 def __getattr__(name: str):
+    if name == "SAPostgresBackend":
+        from scoped.storage.sa_postgres import SAPostgresBackend
+
+        return SAPostgresBackend
     if name == "PostgresBackend":
         from scoped.storage.postgres import PostgresBackend
 
         return PostgresBackend
+    if name == "SQLiteBackend":
+        # Deprecated alias — emits warning on construction
+        from scoped.storage.sqlite import SQLiteBackend
+
+        return SQLiteBackend
     if name == "S3BlobBackend":
         from scoped.storage.blobs_s3 import S3BlobBackend
 

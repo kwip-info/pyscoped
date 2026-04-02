@@ -346,8 +346,11 @@ class TestMigrationDiscovery:
         """The 0001 initial schema migration should create all framework tables."""
         runner = MigrationRunner(sqlite_backend)
         # Use a fresh backend that hasn't had schema created yet
+        import warnings
         from scoped.storage.sqlite import SQLiteBackend
-        fresh = SQLiteBackend(":memory:")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            fresh = SQLiteBackend(":memory:")
         fresh.initialize()  # just sets up connection + pragmas, creates schema
 
         # Now test with a truly fresh backend (no schema)
@@ -379,10 +382,13 @@ class TestInitialMigration:
         from scoped.storage.migrations.versions.m0001_initial_schema import InitialSchema
 
         # Use a backend with only the migrations table
+        import warnings
         from scoped.storage.sqlite import SQLiteBackend
         import sqlite3
 
-        backend = SQLiteBackend(":memory:")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            backend = SQLiteBackend(":memory:")
         # Manually initialize just the connection (skip schema creation)
         backend._conn = sqlite3.connect(":memory:", check_same_thread=False)
         backend._conn.execute("PRAGMA foreign_keys = on")
@@ -407,10 +413,13 @@ class TestInitialMigration:
     def test_initial_migration_rollback(self, sqlite_backend):
         """Verify that rolling back the initial migration drops all tables."""
         from scoped.storage.migrations.versions.m0001_initial_schema import InitialSchema
+        import warnings
         from scoped.storage.sqlite import SQLiteBackend
         import sqlite3
 
-        backend = SQLiteBackend(":memory:")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            backend = SQLiteBackend(":memory:")
         backend._conn = sqlite3.connect(":memory:", check_same_thread=False)
         backend._conn.execute("PRAGMA foreign_keys = on")
 
