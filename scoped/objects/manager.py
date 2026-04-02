@@ -39,10 +39,14 @@ class ScopedManager:
         *,
         audit_writer: Any | None = None,
         rule_engine: Any | None = None,
+        quota_checker: Any | None = None,
+        rate_limit_checker: Any | None = None,
     ) -> None:
         self._backend = backend
         self._audit = audit_writer
         self._rule_engine = rule_engine
+        self._quota_checker = quota_checker
+        self._rate_limit_checker = rate_limit_checker
 
     # ------------------------------------------------------------------
     # Rule enforcement
@@ -92,14 +96,36 @@ class ScopedManager:
         data: dict[str, Any],
         registry_entry_id: str | None = None,
         change_reason: str = "created",
+        scope_id: str | None = None,
     ) -> tuple[ScopedObject, ObjectVersion]:
         """Create a new scoped object with its first version.
 
         Returns (object, version_1).
+        Quota checks run inside the write transaction to prevent TOCTOU races.
         """
         self._check_rules(
             action="create", principal_id=owner_id, object_type=object_type,
         )
+
+        # Rate limit check (approximate, outside txn — acceptable for soft limits)
+        if self._rate_limit_checker is not None:
+            from scoped.exceptions import RateLimitExceededError
+
+            rl_result = self._rate_limit_checker.check(
+                action="create", principal_id=owner_id, scope_id=scope_id,
+            )
+            if rl_result is not None and not rl_result.allowed:
+                raise RateLimitExceededError(
+                    f"Rate limit exceeded for create: "
+                    f"{rl_result.current_count}/{rl_result.max_count}",
+                    context={
+                        "rule_id": rl_result.rule_id,
+                        "current_count": rl_result.current_count,
+                        "max_count": rl_result.max_count,
+                        "window_seconds": rl_result.window_seconds,
+                    },
+                )
+
         ts = now_utc()
         obj_id = generate_id()
         ver_id = generate_id()
@@ -125,8 +151,30 @@ class ScopedManager:
             checksum=checksum,
         )
 
-        self._persist_object(obj)
-        self._persist_version(ver)
+        with self._backend.transaction() as txn:
+            # Quota check inside transaction for TOCTOU safety
+            if self._quota_checker is not None:
+                from scoped.exceptions import QuotaExceededError
+
+                result = self._quota_checker.check_in_txn(
+                    txn, object_type=object_type, scope_id=scope_id,
+                )
+                if result is not None and not result.allowed:
+                    txn.rollback()
+                    raise QuotaExceededError(
+                        f"Quota exceeded for {object_type}: "
+                        f"{result.current_count}/{result.max_count}",
+                        context={
+                            "rule_id": result.rule_id,
+                            "current_count": result.current_count,
+                            "max_count": result.max_count,
+                            "object_type": object_type,
+                        },
+                    )
+
+            self._persist_object_in_txn(txn, obj)
+            self._persist_version_in_txn(txn, ver)
+            txn.commit()
 
         if self._audit:
             self._audit.record(
@@ -358,11 +406,13 @@ class ScopedManager:
             checksum=checksum,
         )
 
-        self._persist_version(ver)
-        self._backend.execute(
-            "UPDATE scoped_objects SET current_version = ? WHERE id = ?",
-            (new_version_num, object_id),
-        )
+        with self._backend.transaction() as txn:
+            self._persist_version_in_txn(txn, ver)
+            txn.execute(
+                "UPDATE scoped_objects SET current_version = ? WHERE id = ?",
+                (new_version_num, object_id),
+            )
+            txn.commit()
 
         # Return updated object
         updated_obj = ScopedObject(
@@ -429,15 +479,17 @@ class ScopedManager:
         cur_ver = self.get_version(object_id, obj.current_version)
         before_data = cur_ver.data if cur_ver else None
 
-        self._backend.execute(
-            "UPDATE scoped_objects SET lifecycle = ? WHERE id = ?",
-            (Lifecycle.ARCHIVED.name, object_id),
-        )
-        self._backend.execute(
-            "INSERT INTO tombstones (id, object_id, tombstoned_at, tombstoned_by, reason) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (tomb.id, tomb.object_id, tomb.tombstoned_at.isoformat(), tomb.tombstoned_by, tomb.reason),
-        )
+        with self._backend.transaction() as txn:
+            txn.execute(
+                "UPDATE scoped_objects SET lifecycle = ? WHERE id = ?",
+                (Lifecycle.ARCHIVED.name, object_id),
+            )
+            txn.execute(
+                "INSERT INTO tombstones (id, object_id, tombstoned_at, tombstoned_by, reason) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (tomb.id, tomb.object_id, tomb.tombstoned_at.isoformat(), tomb.tombstoned_by, tomb.reason),
+            )
+            txn.commit()
 
         if self._audit:
             self._audit.record(
@@ -543,15 +595,27 @@ class ScopedManager:
             "INSERT INTO scoped_objects "
             "(id, object_type, owner_id, registry_entry_id, current_version, created_at, lifecycle) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                obj.id,
-                obj.object_type,
-                obj.owner_id,
-                obj.registry_entry_id,
-                obj.current_version,
-                obj.created_at.isoformat(),
-                obj.lifecycle.name,
-            ),
+            self._object_params(obj),
+        )
+
+    def _persist_object_in_txn(self, txn: Any, obj: ScopedObject) -> None:
+        txn.execute(
+            "INSERT INTO scoped_objects "
+            "(id, object_type, owner_id, registry_entry_id, current_version, created_at, lifecycle) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            self._object_params(obj),
+        )
+
+    @staticmethod
+    def _object_params(obj: ScopedObject) -> tuple[Any, ...]:
+        return (
+            obj.id,
+            obj.object_type,
+            obj.owner_id,
+            obj.registry_entry_id,
+            obj.current_version,
+            obj.created_at.isoformat(),
+            obj.lifecycle.name,
         )
 
     def _persist_version(self, ver: ObjectVersion) -> None:
@@ -559,16 +623,28 @@ class ScopedManager:
             "INSERT INTO object_versions "
             "(id, object_id, version, data_json, created_at, created_by, change_reason, checksum) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                ver.id,
-                ver.object_id,
-                ver.version,
-                json.dumps(ver.data, sort_keys=True, default=str),
-                ver.created_at.isoformat(),
-                ver.created_by,
-                ver.change_reason,
-                ver.checksum,
-            ),
+            self._version_params(ver),
+        )
+
+    def _persist_version_in_txn(self, txn: Any, ver: ObjectVersion) -> None:
+        txn.execute(
+            "INSERT INTO object_versions "
+            "(id, object_id, version, data_json, created_at, created_by, change_reason, checksum) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            self._version_params(ver),
+        )
+
+    @staticmethod
+    def _version_params(ver: ObjectVersion) -> tuple[Any, ...]:
+        return (
+            ver.id,
+            ver.object_id,
+            ver.version,
+            json.dumps(ver.data, sort_keys=True, default=str),
+            ver.created_at.isoformat(),
+            ver.created_by,
+            ver.change_reason,
+            ver.checksum,
         )
 
     def _load_object(self, object_id: str) -> ScopedObject | None:

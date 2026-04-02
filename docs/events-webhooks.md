@@ -290,14 +290,13 @@ ne.create_rule(
     recipient_ids=["admin-1"],
 )
 
-# Register a bus listener that drives both pipelines
+# Register a bus listener that drives both pipelines.
+# on_any() receives ALL event types — no need to register per-type.
 def fan_out(event):
     wd.deliver_pending()
     ne.process_event(event)
 
-bus.on(EventType.OBJECT_CREATED, fan_out)
-bus.on(EventType.OBJECT_UPDATED, fan_out)
-bus.on(EventType.OBJECT_DELETED, fan_out)
+bus.on_any(fan_out)
 
 # Now emit -- listener handles the rest
 bus.emit(

@@ -27,6 +27,8 @@ from scoped.types import ActionType, Lifecycle, generate_id, now_utc
 # Type alias for in-process event listeners
 EventListener = Callable[[Event], None]
 
+_WILDCARD = "*"
+
 
 class EventBus:
     """Central event dispatcher.
@@ -62,6 +64,16 @@ class EventBus:
         """Remove an in-process listener."""
         key = event_type.value if isinstance(event_type, EventType) else event_type
         listeners = self._listeners.get(key, [])
+        if listener in listeners:
+            listeners.remove(listener)
+
+    def on_any(self, listener: EventListener) -> None:
+        """Register an in-process listener that receives ALL event types."""
+        self._listeners.setdefault(_WILDCARD, []).append(listener)
+
+    def off_any(self, listener: EventListener) -> None:
+        """Remove a wildcard in-process listener."""
+        listeners = self._listeners.get(_WILDCARD, [])
         if listener in listeners:
             listeners.remove(listener)
 
@@ -105,8 +117,12 @@ class EventBus:
             if sub.webhook_endpoint_id:
                 self._queue_delivery(event, sub)
 
-        # In-process listeners
+        # In-process listeners (type-specific)
         for listener in self._listeners.get(event.event_type.value, []):
+            listener(event)
+
+        # In-process listeners (wildcard — receive all event types)
+        for listener in self._listeners.get(_WILDCARD, []):
             listener(event)
 
         # Audit trail

@@ -339,7 +339,8 @@ Exposes tools: create_principal, create_object, get_object, create_scope, list_a
 from scoped.events.bus import EventBus
 bus = EventBus(backend, audit_writer=writer)
 bus.emit(EventType.OBJECT_CREATED, actor_id="u1", target_type="Doc", target_id="d1")
-bus.on(EventType.OBJECT_CREATED, my_listener)  # In-process listeners
+bus.on(EventType.OBJECT_CREATED, my_listener)  # Type-specific listener
+bus.on_any(my_global_listener)                  # Wildcard — receives ALL event types
 ```
 
 ### Webhook delivery
@@ -359,13 +360,15 @@ engine.list_notifications(recipient_id="alice")
 engine.mark_read(notification_id)
 ```
 
+When using `ScopedServices`, the notification engine is automatically wired as a wildcard listener on the event bus. Accessing `services.notifications` triggers the wiring — any subsequent `services.events.emit()` call will automatically generate matching notifications.
+
 ## Scheduling and Jobs
 
 ```python
 from scoped.scheduling.scheduler import Scheduler
 from scoped.scheduling.queue import JobQueue
 
-scheduler = Scheduler(backend, audit_writer=writer)
+scheduler = Scheduler(backend, audit_writer=writer, cron_parser=my_cron_parser)
 queue = JobQueue(backend, executor=my_executor)  # (action_type, config) -> result_dict
 
 # Create schedule + action
@@ -425,7 +428,7 @@ runner.rollback_last()     # Undo most recent
 runner.get_status()        # List applied/pending
 ```
 
-13 migrations: initial schema, contracts, blobs, scope settings, search index, templates, tiering, events/webhooks, notifications, scheduling, sync state, composite indexes, row-level security.
+14 migrations: initial schema, contracts, blobs, scope settings, search index, templates, tiering, events/webhooks, notifications, scheduling, sync state, composite indexes, row-level security, audit sequence uniqueness.
 
 ## Exceptions
 
@@ -440,6 +443,9 @@ All inherit from `ScopedError`. Key exceptions:
 | `PrincipalNotFoundError` | Principal ID not found |
 | `NoContextError` | Operation requires ScopedContext but none active |
 | `TraceIntegrityError` | Audit hash chain broken |
+| `AuditSequenceCollisionError` | Multi-process sequence collision after retries |
+| `QuotaExceededError` | Resource creation would exceed quota (hard limit) |
+| `RateLimitExceededError` | Action exceeds rate limit (soft limit) |
 | `SecretAccessDeniedError` | Secret ref resolution denied |
 | `ConnectorPolicyViolation` | Object type blocked by connector policy |
 | `TenantResolutionError` | Cannot determine tenant (TenantRouter) |

@@ -8,12 +8,19 @@ go through here — nothing else touches the audit_trail table directly.
 from __future__ import annotations
 
 import json
+import logging
+import sqlite3
 import threading
 from typing import Any
 
 from scoped.audit.models import TraceEntry, compute_hash
+from scoped.exceptions import AuditSequenceCollisionError
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, generate_id, now_utc
+
+logger = logging.getLogger(__name__)
+
+_MAX_SEQUENCE_RETRIES = 3
 
 
 class AuditWriter:
@@ -88,50 +95,68 @@ class AuditWriter:
         This is the primary API.  It assigns a sequence number, computes
         the hash chain link, persists the entry, and returns it.
 
-        Re-seeds from the database to handle multi-process scenarios
-        where another process may have advanced the sequence.
+        Uses a database transaction with bounded retry to handle
+        multi-process sequence collisions (e.g. gunicorn workers).
         """
         with self._lock:
-            self._reseed_if_stale()
+            for attempt in range(_MAX_SEQUENCE_RETRIES + 1):
+                self._reseed_if_stale()
 
-            entry_id = generate_id()
-            ts = now_utc()
-            seq = self._sequence + 1
+                entry_id = generate_id()
+                ts = now_utc()
+                seq = self._sequence + 1
 
-            entry_hash = compute_hash(
-                entry_id=entry_id,
-                sequence=seq,
-                actor_id=actor_id,
-                action=action.value,
-                target_type=target_type,
-                target_id=target_id,
-                timestamp=ts.isoformat(),
-                previous_hash=self._last_hash,
-                algorithm=self._algorithm,
+                entry_hash = compute_hash(
+                    entry_id=entry_id,
+                    sequence=seq,
+                    actor_id=actor_id,
+                    action=action.value,
+                    target_type=target_type,
+                    target_id=target_id,
+                    timestamp=ts.isoformat(),
+                    previous_hash=self._last_hash,
+                    algorithm=self._algorithm,
+                )
+
+                entry = TraceEntry(
+                    id=entry_id,
+                    sequence=seq,
+                    actor_id=actor_id,
+                    action=action,
+                    target_type=target_type,
+                    target_id=target_id,
+                    timestamp=ts,
+                    hash=entry_hash,
+                    previous_hash=self._last_hash,
+                    scope_id=scope_id,
+                    before_state=before_state,
+                    after_state=after_state,
+                    metadata=metadata or {},
+                    parent_trace_id=parent_trace_id,
+                )
+
+                try:
+                    with self._backend.transaction() as txn:
+                        self._persist_in_txn(txn, entry)
+                        txn.commit()
+                except Exception as exc:
+                    if self._is_sequence_collision(exc) and attempt < _MAX_SEQUENCE_RETRIES:
+                        logger.warning(
+                            "Audit sequence collision at seq=%d, retrying (%d/%d)",
+                            seq, attempt + 1, _MAX_SEQUENCE_RETRIES,
+                        )
+                        continue
+                    raise
+
+                self._sequence = seq
+                self._last_hash = entry_hash
+                return entry
+
+            raise AuditSequenceCollisionError(
+                f"Failed to assign unique audit sequence after "
+                f"{_MAX_SEQUENCE_RETRIES} retries",
+                context={"last_attempted_sequence": seq},
             )
-
-            entry = TraceEntry(
-                id=entry_id,
-                sequence=seq,
-                actor_id=actor_id,
-                action=action,
-                target_type=target_type,
-                target_id=target_id,
-                timestamp=ts,
-                hash=entry_hash,
-                previous_hash=self._last_hash,
-                scope_id=scope_id,
-                before_state=before_state,
-                after_state=after_state,
-                metadata=metadata or {},
-                parent_trace_id=parent_trace_id,
-            )
-
-            self._persist(entry)
-            self._sequence = seq
-            self._last_hash = entry_hash
-
-        return entry
 
     def record_batch(
         self,
@@ -143,56 +168,80 @@ class AuditWriter:
         Each dict in ``entries`` should contain the same kwargs as
         ``record()``.  Useful for nested operations that produce
         multiple traces.
+
+        Retries on sequence collision with in-memory state rollback.
         """
-        results: list[TraceEntry] = []
         with self._lock:
-            self._reseed_if_stale()
-            ts = now_utc()
-            with self._backend.transaction() as txn:
-                for entry_kwargs in entries:
-                    entry_id = generate_id()
-                    seq = self._sequence + 1
+            for attempt in range(_MAX_SEQUENCE_RETRIES + 1):
+                self._reseed_if_stale()
+                ts = now_utc()
 
-                    action = entry_kwargs["action"]
-                    action_val = action.value if isinstance(action, ActionType) else action
+                # Save state for rollback on failure
+                saved_seq = self._sequence
+                saved_hash = self._last_hash
+                batch_results: list[TraceEntry] = []
 
-                    entry_hash = compute_hash(
-                        entry_id=entry_id,
-                        sequence=seq,
-                        actor_id=entry_kwargs["actor_id"],
-                        action=action_val,
-                        target_type=entry_kwargs["target_type"],
-                        target_id=entry_kwargs["target_id"],
-                        timestamp=ts.isoformat(),
-                        previous_hash=self._last_hash,
-                        algorithm=self._algorithm,
-                    )
+                try:
+                    with self._backend.transaction() as txn:
+                        for entry_kwargs in entries:
+                            entry_id = generate_id()
+                            seq = self._sequence + 1
 
-                    entry = TraceEntry(
-                        id=entry_id,
-                        sequence=seq,
-                        actor_id=entry_kwargs["actor_id"],
-                        action=action if isinstance(action, ActionType) else ActionType(action),
-                        target_type=entry_kwargs["target_type"],
-                        target_id=entry_kwargs["target_id"],
-                        timestamp=ts,
-                        hash=entry_hash,
-                        previous_hash=self._last_hash,
-                        scope_id=entry_kwargs.get("scope_id"),
-                        before_state=entry_kwargs.get("before_state"),
-                        after_state=entry_kwargs.get("after_state"),
-                        metadata=entry_kwargs.get("metadata", {}),
-                        parent_trace_id=entry_kwargs.get("parent_trace_id"),
-                    )
+                            action = entry_kwargs["action"]
+                            action_val = action.value if isinstance(action, ActionType) else action
 
-                    self._persist_in_txn(txn, entry)
-                    self._sequence = seq
-                    self._last_hash = entry_hash
-                    results.append(entry)
+                            entry_hash = compute_hash(
+                                entry_id=entry_id,
+                                sequence=seq,
+                                actor_id=entry_kwargs["actor_id"],
+                                action=action_val,
+                                target_type=entry_kwargs["target_type"],
+                                target_id=entry_kwargs["target_id"],
+                                timestamp=ts.isoformat(),
+                                previous_hash=self._last_hash,
+                                algorithm=self._algorithm,
+                            )
 
-                txn.commit()
+                            entry = TraceEntry(
+                                id=entry_id,
+                                sequence=seq,
+                                actor_id=entry_kwargs["actor_id"],
+                                action=action if isinstance(action, ActionType) else ActionType(action),
+                                target_type=entry_kwargs["target_type"],
+                                target_id=entry_kwargs["target_id"],
+                                timestamp=ts,
+                                hash=entry_hash,
+                                previous_hash=self._last_hash,
+                                scope_id=entry_kwargs.get("scope_id"),
+                                before_state=entry_kwargs.get("before_state"),
+                                after_state=entry_kwargs.get("after_state"),
+                                metadata=entry_kwargs.get("metadata", {}),
+                                parent_trace_id=entry_kwargs.get("parent_trace_id"),
+                            )
 
-        return results
+                            self._persist_in_txn(txn, entry)
+                            self._sequence = seq
+                            self._last_hash = entry_hash
+                            batch_results.append(entry)
+
+                        txn.commit()
+                    return batch_results
+                except Exception as exc:
+                    # Rollback in-memory state
+                    self._sequence = saved_seq
+                    self._last_hash = saved_hash
+                    if self._is_sequence_collision(exc) and attempt < _MAX_SEQUENCE_RETRIES:
+                        logger.warning(
+                            "Audit batch sequence collision, retrying (%d/%d)",
+                            attempt + 1, _MAX_SEQUENCE_RETRIES,
+                        )
+                        continue
+                    raise
+
+            raise AuditSequenceCollisionError(
+                f"Failed to assign unique audit sequence for batch after "
+                f"{_MAX_SEQUENCE_RETRIES} retries",
+            )
 
     @property
     def last_sequence(self) -> int:
@@ -244,3 +293,18 @@ class AuditWriter:
             entry.hash,
             entry.previous_hash,
         )
+
+    @staticmethod
+    def _is_sequence_collision(exc: Exception) -> bool:
+        """Check if an exception represents a UNIQUE constraint violation on sequence."""
+        if isinstance(exc, sqlite3.IntegrityError):
+            msg = str(exc).lower()
+            return "unique" in msg and "sequence" in msg
+        try:
+            import psycopg
+            if isinstance(exc, psycopg.errors.UniqueViolation):
+                msg = str(exc).lower()
+                return "uq_audit_sequence" in msg or "sequence" in msg
+        except ImportError:
+            pass
+        return False

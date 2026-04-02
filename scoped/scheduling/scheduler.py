@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import warnings
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -32,9 +34,16 @@ class Scheduler:
         Storage backend for persistence.
     """
 
-    def __init__(self, backend: StorageBackend, *, audit_writer: Any | None = None) -> None:
+    def __init__(
+        self,
+        backend: StorageBackend,
+        *,
+        audit_writer: Any | None = None,
+        cron_parser: Callable[[str, datetime], datetime] | None = None,
+    ) -> None:
         self._backend = backend
         self._audit = audit_writer
+        self._cron_parser = cron_parser
 
     # ------------------------------------------------------------------
     # Recurring schedules
@@ -295,13 +304,27 @@ class Scheduler:
                         seconds=schedule.interval_seconds,
                     )
                     self.advance_action(action.id, next_run)
+                elif schedule and schedule.cron_expression:
+                    if self._cron_parser is not None:
+                        next_run = self._cron_parser(
+                            schedule.cron_expression,
+                            action.next_run_at,
+                        )
+                    else:
+                        warnings.warn(
+                            f"No cron_parser provided to Scheduler. "
+                            f"Falling back to 1-hour interval for "
+                            f"cron expression '{schedule.cron_expression}'. "
+                            f"Pass a cron_parser callable to "
+                            f"Scheduler.__init__() to enable real "
+                            f"cron scheduling.",
+                            stacklevel=2,
+                        )
+                        next_run = action.next_run_at + timedelta(hours=1)
+                    self.advance_action(action.id, next_run)
                 else:
-                    # Cron schedules need external cron parsing — advance
-                    # by a placeholder; real cron parsing is application-level
-                    self.advance_action(
-                        action.id,
-                        action.next_run_at + timedelta(hours=1),
-                    )
+                    # Schedule has neither interval nor cron — archive
+                    self.archive_action(action.id)
             else:
                 # One-shot action — archive after enqueue
                 self.archive_action(action.id)

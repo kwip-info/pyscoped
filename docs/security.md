@@ -353,12 +353,23 @@ while True:
     seq += chunk_size
 ```
 
-### Thread safety
+### Thread and multi-process safety
 
 The `AuditWriter` uses a `threading.Lock` to protect sequence numbering and
-hash chaining. In multi-process deployments (e.g. gunicorn workers sharing a
-Postgres database), the writer re-seeds from the database under the lock to
-prevent sequence collisions.
+hash chaining within a single process.
+
+In multi-process deployments (e.g. gunicorn workers sharing a Postgres
+database), the writer re-seeds from the database under the lock before each
+write. Migration **m0014** adds a `UNIQUE` constraint on `audit_trail.sequence`
+as a database-level safety net. If a sequence collision occurs despite
+re-seeding (possible under high concurrency), the writer automatically retries
+up to 3 times with a fresh re-seed, raising `AuditSequenceCollisionError` only
+if all retries are exhausted.
+
+All write operations (object create/update/tombstone, scope archive/freeze,
+membership changes) use explicit database transactions to ensure atomicity.
+Audit entries are recorded **after** the business transaction commits, so a
+failed audit write never rolls back a successful business operation.
 
 ---
 

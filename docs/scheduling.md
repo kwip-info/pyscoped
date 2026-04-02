@@ -124,6 +124,26 @@ This is the recommended way to drive the scheduling pipeline in production.
 Call it on a fixed interval (e.g., every 30 seconds) from a background thread,
 a system cron job, or a Kubernetes CronJob.
 
+### Cron expression support
+
+The Scheduler accepts an optional `cron_parser` callable for evaluating cron
+expressions. Without one, cron-based schedules fall back to a 1-hour interval
+placeholder and emit a `UserWarning`.
+
+```python
+# Example using croniter (pip install croniter)
+from croniter import croniter
+
+def parse_cron(expr: str, dt: datetime) -> datetime:
+    return croniter(expr, dt).get_next(datetime)
+
+scheduler = Scheduler(backend=storage, cron_parser=parse_cron)
+```
+
+Any callable with the signature `(cron_expression: str, current_time: datetime) -> datetime`
+can be used. The framework does not bundle a cron parser to avoid the extra
+dependency.
+
 ## JobQueue
 
 The `JobQueue` provides persistent, ordered job execution with state tracking.

@@ -48,6 +48,13 @@ scoped/storage/
             m0005_search_index.py
             m0006_templates.py
             m0007_tiering_archival.py
+            m0008_events_webhooks.py
+            m0009_notifications.py
+            m0010_scheduling.py
+            m0011_sync_state.py
+            m0012_composite_indexes.py
+            m0013_row_level_security.py
+            m0014_audit_sequence_unique.py
 ```
 
 ## Usage

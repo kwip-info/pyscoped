@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.2 (2026-04-02)
+
+### Security
+- **SQL injection fix** — `QuotaChecker` now validates `count_column` and `scope_column` against an allowlist (`_ALLOWED_COLUMNS`) before interpolating into SQL. Previously only table names were validated. Also fixes `table == "objects"` comparison (should be `"scoped_objects"`)
+- **Webhook config** — noted as requiring encryption at rest (tracked for follow-up)
+
+### Fixed
+- **Registry thread safety** — all 13 read methods now acquire `RLock`. Listener callbacks execute outside the lock to prevent deadlocks. `archive()` performs index cleanup atomically under a single lock hold. `CustomKind._registered` is now protected by a module-level `threading.Lock`
+- **Transaction boundaries** — `archive_scope()`, `freeze_scope()`, `_add_membership()`, `update()`, and `tombstone()` now wrap multi-step operations in explicit database transactions. Audit entries are recorded after the business transaction commits
+- **Audit sequence collisions** — new migration **m0014** adds a `UNIQUE` constraint on `audit_trail.sequence`. `AuditWriter.record()` now uses a database transaction with bounded retry (3 attempts) on sequence collision. `record_batch()` saves and restores in-memory state on transaction failure. New `AuditSequenceCollisionError` exception
+- **Notification preferences** — replaced indirect `datetime_fromisoformat()` helper with direct `datetime.fromisoformat()` call
+- **Event-notification pipeline** — `NotificationEngine.process_event()` is now automatically wired as a wildcard listener on `EventBus` when `ScopedServices.notifications` is accessed. Previously the pipeline was disconnected
+
+### Added
+- **Quota enforcement in write path** — `ScopedManager` accepts optional `quota_checker` and `rate_limit_checker`. Quota checks run inside the write transaction (TOCTOU-safe). Rate limit checks run before the transaction (approximate, acceptable for soft limits). New `QuotaChecker.check_in_txn()` method
+- **Wildcard event listeners** — `EventBus.on_any(listener)` and `off_any(listener)` register listeners that receive all event types
+- **Pluggable cron parser** — `Scheduler` accepts an optional `cron_parser: Callable[[str, datetime], datetime]` for real cron expression evaluation. Without it, cron schedules fall back to a 1-hour placeholder with a `warnings.warn()`
+
 ## 0.6.1 (2026-04-02)
 
 ### Added

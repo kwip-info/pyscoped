@@ -353,61 +353,64 @@ class ScopeLifecycle:
     ) -> ScopeMembership:
         ts = now_utc()
 
-        # Check for previously revoked membership (UNIQUE constraint on scope_id, principal_id, role)
-        existing = self._backend.fetch_one(
-            "SELECT * FROM scope_memberships "
-            "WHERE scope_id = ? AND principal_id = ? AND role = ?",
-            (scope_id, principal_id, role.value),
-        )
-
-        if existing and existing["lifecycle"] == Lifecycle.ACTIVE.name:
-            # Already active — return existing membership
-            return membership_from_row(existing)
-
-        if existing:
-            # Reactivate the archived membership
-            self._backend.execute(
-                "UPDATE scope_memberships "
-                "SET lifecycle = ?, granted_at = ?, granted_by = ?, expires_at = ? "
+        # Read + conditional write in a single transaction to prevent races
+        with self._backend.transaction() as txn:
+            existing = txn.fetch_one(
+                "SELECT * FROM scope_memberships "
                 "WHERE scope_id = ? AND principal_id = ? AND role = ?",
-                (
-                    Lifecycle.ACTIVE.name, ts.isoformat(), granted_by,
-                    expires_at.isoformat() if expires_at else None,
-                    scope_id, principal_id, role.value,
-                ),
+                (scope_id, principal_id, role.value),
             )
-            mem = ScopeMembership(
-                id=existing["id"],
-                scope_id=scope_id,
-                principal_id=principal_id,
-                role=role,
-                granted_at=ts,
-                granted_by=granted_by,
-                expires_at=expires_at,
-            )
-        else:
-            # Fresh membership
-            mem_id = generate_id()
-            mem = ScopeMembership(
-                id=mem_id,
-                scope_id=scope_id,
-                principal_id=principal_id,
-                role=role,
-                granted_at=ts,
-                granted_by=granted_by,
-                expires_at=expires_at,
-            )
-            self._backend.execute(
-                "INSERT INTO scope_memberships "
-                "(id, scope_id, principal_id, role, granted_at, granted_by, expires_at, lifecycle) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    mem.id, mem.scope_id, mem.principal_id, mem.role.value,
-                    mem.granted_at.isoformat(), mem.granted_by,
-                    mem.expires_at.isoformat() if mem.expires_at else None,
-                    mem.lifecycle.name,
-                ),
-            )
+
+            if existing and existing["lifecycle"] == Lifecycle.ACTIVE.name:
+                # Already active — return existing membership
+                txn.commit()
+                return membership_from_row(existing)
+
+            if existing:
+                # Reactivate the archived membership
+                txn.execute(
+                    "UPDATE scope_memberships "
+                    "SET lifecycle = ?, granted_at = ?, granted_by = ?, expires_at = ? "
+                    "WHERE scope_id = ? AND principal_id = ? AND role = ?",
+                    (
+                        Lifecycle.ACTIVE.name, ts.isoformat(), granted_by,
+                        expires_at.isoformat() if expires_at else None,
+                        scope_id, principal_id, role.value,
+                    ),
+                )
+                mem = ScopeMembership(
+                    id=existing["id"],
+                    scope_id=scope_id,
+                    principal_id=principal_id,
+                    role=role,
+                    granted_at=ts,
+                    granted_by=granted_by,
+                    expires_at=expires_at,
+                )
+            else:
+                # Fresh membership
+                mem_id = generate_id()
+                mem = ScopeMembership(
+                    id=mem_id,
+                    scope_id=scope_id,
+                    principal_id=principal_id,
+                    role=role,
+                    granted_at=ts,
+                    granted_by=granted_by,
+                    expires_at=expires_at,
+                )
+                txn.execute(
+                    "INSERT INTO scope_memberships "
+                    "(id, scope_id, principal_id, role, granted_at, granted_by, expires_at, lifecycle) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        mem.id, mem.scope_id, mem.principal_id, mem.role.value,
+                        mem.granted_at.isoformat(), mem.granted_by,
+                        mem.expires_at.isoformat() if mem.expires_at else None,
+                        mem.lifecycle.name,
+                    ),
+                )
+            txn.commit()
 
         if self._audit:
             self._audit.record(
@@ -537,10 +540,12 @@ class ScopeLifecycle:
                 context={"scope_id": scope_id, "lifecycle": scope.lifecycle.name},
             )
 
-        self._backend.execute(
-            "UPDATE scopes SET lifecycle = ? WHERE id = ?",
-            (SCOPE_LIFECYCLE_FROZEN, scope_id),
-        )
+        with self._backend.transaction() as txn:
+            txn.execute(
+                "UPDATE scopes SET lifecycle = ? WHERE id = ?",
+                (SCOPE_LIFECYCLE_FROZEN, scope_id),
+            )
+            txn.commit()
 
         if self._audit:
             self._audit.record(
@@ -556,7 +561,11 @@ class ScopeLifecycle:
         return self.get_scope_or_raise(scope_id)
 
     def archive_scope(self, scope_id: str, *, archived_by: str) -> Scope:
-        """Archive (dissolve) a scope — archives all memberships and projections."""
+        """Archive (dissolve) a scope — archives all memberships and projections.
+
+        All three updates (memberships, projections, scope) are executed
+        atomically within a single transaction.
+        """
         scope = self.get_scope_or_raise(scope_id)
         if scope.is_archived:
             raise ScopeFrozenError(
@@ -566,25 +575,25 @@ class ScopeLifecycle:
 
         before_lifecycle = _lifecycle_to_db(scope.lifecycle)
 
-        # Archive all active memberships
-        self._backend.execute(
-            "UPDATE scope_memberships SET lifecycle = ? "
-            "WHERE scope_id = ? AND lifecycle = ?",
-            (Lifecycle.ARCHIVED.name, scope_id, Lifecycle.ACTIVE.name),
-        )
-
-        # Archive all active projections
-        self._backend.execute(
-            "UPDATE scope_projections SET lifecycle = ? "
-            "WHERE scope_id = ? AND lifecycle = ?",
-            (Lifecycle.ARCHIVED.name, scope_id, Lifecycle.ACTIVE.name),
-        )
-
-        # Archive the scope itself
-        self._backend.execute(
-            "UPDATE scopes SET lifecycle = ? WHERE id = ?",
-            (Lifecycle.ARCHIVED.name, scope_id),
-        )
+        with self._backend.transaction() as txn:
+            # Archive all active memberships
+            txn.execute(
+                "UPDATE scope_memberships SET lifecycle = ? "
+                "WHERE scope_id = ? AND lifecycle = ?",
+                (Lifecycle.ARCHIVED.name, scope_id, Lifecycle.ACTIVE.name),
+            )
+            # Archive all active projections
+            txn.execute(
+                "UPDATE scope_projections SET lifecycle = ? "
+                "WHERE scope_id = ? AND lifecycle = ?",
+                (Lifecycle.ARCHIVED.name, scope_id, Lifecycle.ACTIVE.name),
+            )
+            # Archive the scope itself
+            txn.execute(
+                "UPDATE scopes SET lifecycle = ? WHERE id = ?",
+                (Lifecycle.ARCHIVED.name, scope_id),
+            )
+            txn.commit()
 
         if self._audit:
             self._audit.record(

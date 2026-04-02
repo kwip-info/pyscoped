@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from scoped.notifications.models import (
@@ -51,7 +52,7 @@ class PreferenceManager:
                 principal_id=principal_id,
                 channel=channel,
                 enabled=enabled,
-                created_at=datetime_fromisoformat(existing["created_at"]),
+                created_at=datetime.fromisoformat(existing["created_at"]),
             )
 
         pref = NotificationPreference(
@@ -111,8 +112,3 @@ class PreferenceManager:
             "WHERE principal_id = ? AND channel = ? AND lifecycle = 'ACTIVE'",
             (principal_id, channel.value),
         )
-
-
-def datetime_fromisoformat(s: str):
-    from datetime import datetime
-    return datetime.fromisoformat(s)

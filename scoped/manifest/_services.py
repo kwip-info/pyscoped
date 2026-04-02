@@ -154,6 +154,9 @@ class ScopedServices:
         if self._notifications is None:
             from scoped.notifications.engine import NotificationEngine
             self._notifications = NotificationEngine(self.backend, audit_writer=self.audit)
+            # Wire event bus -> notification engine pipeline.
+            # Accessing self.events triggers lazy EventBus creation if needed.
+            self.events.on_any(self._notifications.process_event)
         return self._notifications
 
     @property

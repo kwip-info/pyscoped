@@ -124,10 +124,14 @@ class Registry:
         Callback receives (event_type, entry) where event_type is one of:
         "register", "update", "lifecycle_change".
         """
-        self._listeners.append(callback)
+        with self._lock:
+            self._listeners.append(callback)
 
     def _notify(self, event: str, entry: RegistryEntry) -> None:
-        for cb in self._listeners:
+        """Notify listeners. Must be called OUTSIDE ``self._lock``."""
+        with self._lock:
+            listeners = list(self._listeners)
+        for cb in listeners:
             cb(event, entry)
 
     # -- Registration --
@@ -186,8 +190,9 @@ class Registry:
             )
 
             self._index_entry(entry)
-            self._notify("register", entry)
-            return entry
+
+        self._notify("register", entry)
+        return entry
 
     def _index_entry(self, entry: RegistryEntry) -> None:
         """Add entry to all lookup indexes (idempotent)."""
@@ -209,64 +214,73 @@ class Registry:
 
     def get(self, entry_id: str) -> RegistryEntry:
         """Get entry by ID. Raises NotRegisteredError if not found."""
-        try:
-            return self._entries[entry_id]
-        except KeyError:
-            raise NotRegisteredError(
-                f"No registry entry with id: {entry_id}",
-                context={"id": entry_id},
-            )
+        with self._lock:
+            try:
+                return self._entries[entry_id]
+            except KeyError:
+                raise NotRegisteredError(
+                    f"No registry entry with id: {entry_id}",
+                    context={"id": entry_id},
+                )
 
     def get_by_urn(self, urn: URN | str) -> RegistryEntry:
         """Get entry by URN. Raises NotRegisteredError if not found."""
         urn_str = str(urn)
-        try:
-            return self._by_urn[urn_str]
-        except KeyError:
-            raise NotRegisteredError(
-                f"No registry entry with URN: {urn_str}",
-                context={"urn": urn_str},
-            )
+        with self._lock:
+            try:
+                return self._by_urn[urn_str]
+            except KeyError:
+                raise NotRegisteredError(
+                    f"No registry entry with URN: {urn_str}",
+                    context={"urn": urn_str},
+                )
 
     def get_by_target(self, target: Any) -> RegistryEntry:
         """Get entry by the actual target object (class, function, etc.)."""
-        target_id = id(target)
-        if target_id not in self._by_target:
-            raise NotRegisteredError(
-                f"Target object is not registered: {target!r}",
-                context={"target_repr": repr(target)},
-            )
-        return self._entries[self._by_target[target_id]]
+        with self._lock:
+            target_id = id(target)
+            if target_id not in self._by_target:
+                raise NotRegisteredError(
+                    f"Target object is not registered: {target!r}",
+                    context={"target_repr": repr(target)},
+                )
+            return self._entries[self._by_target[target_id]]
 
     def find_by_urn(self, urn: URN | str) -> RegistryEntry | None:
         """Like get_by_urn but returns None instead of raising."""
-        return self._by_urn.get(str(urn))
+        with self._lock:
+            return self._by_urn.get(str(urn))
 
     def find_by_target(self, target: Any) -> RegistryEntry | None:
         """Like get_by_target but returns None instead of raising."""
-        entry_id = self._by_target.get(id(target))
-        return self._entries.get(entry_id) if entry_id else None
+        with self._lock:
+            entry_id = self._by_target.get(id(target))
+            return self._entries.get(entry_id) if entry_id else None
 
     # -- Query --
 
     def by_kind(self, kind: RegistryKind | CustomKind) -> list[RegistryEntry]:
         """Get all entries of a given kind."""
-        kind_name = kind.name if isinstance(kind, RegistryKind) else kind.name
-        entry_ids = self._by_kind.get(kind_name, [])
-        return [self._entries[eid] for eid in entry_ids]
+        with self._lock:
+            kind_name = kind.name if isinstance(kind, RegistryKind) else kind.name
+            entry_ids = self._by_kind.get(kind_name, [])
+            return [self._entries[eid] for eid in entry_ids]
 
     def by_namespace(self, namespace: str) -> list[RegistryEntry]:
         """Get all entries in a namespace."""
-        entry_ids = self._by_namespace.get(namespace, [])
-        return [self._entries[eid] for eid in entry_ids]
+        with self._lock:
+            entry_ids = self._by_namespace.get(namespace, [])
+            return [self._entries[eid] for eid in entry_ids]
 
     def by_tag(self, tag: str) -> list[RegistryEntry]:
         """Get all entries that have a specific tag."""
-        return [e for e in self._entries.values() if tag in e.tags]
+        with self._lock:
+            return [e for e in self._entries.values() if tag in e.tags]
 
     def by_lifecycle(self, lifecycle: Lifecycle) -> list[RegistryEntry]:
         """Get all entries in a specific lifecycle state."""
-        return [e for e in self._entries.values() if e.lifecycle == lifecycle]
+        with self._lock:
+            return [e for e in self._entries.values() if e.lifecycle == lifecycle]
 
     def query(
         self,
@@ -278,27 +292,28 @@ class Registry:
         predicate: Callable[[RegistryEntry], bool] | None = None,
     ) -> list[RegistryEntry]:
         """Flexible query with multiple optional filters."""
-        results: Iterator[RegistryEntry] = iter(self._entries.values())
+        with self._lock:
+            results: Iterator[RegistryEntry] = iter(self._entries.values())
 
-        if kind is not None:
-            kind_name = kind.name
-            results = (e for e in results if (
-                e.kind.name if isinstance(e.kind, RegistryKind) else e.kind.name
-            ) == kind_name)
+            if kind is not None:
+                kind_name = kind.name
+                results = (e for e in results if (
+                    e.kind.name if isinstance(e.kind, RegistryKind) else e.kind.name
+                ) == kind_name)
 
-        if namespace is not None:
-            results = (e for e in results if e.namespace == namespace)
+            if namespace is not None:
+                results = (e for e in results if e.namespace == namespace)
 
-        if tag is not None:
-            results = (e for e in results if tag in e.tags)
+            if tag is not None:
+                results = (e for e in results if tag in e.tags)
 
-        if lifecycle is not None:
-            results = (e for e in results if e.lifecycle == lifecycle)
+            if lifecycle is not None:
+                results = (e for e in results if e.lifecycle == lifecycle)
 
-        if predicate is not None:
-            results = (e for e in results if predicate(e))
+            if predicate is not None:
+                results = (e for e in results if predicate(e))
 
-        return list(results)
+            return list(results)
 
     # -- Lifecycle transitions --
 
@@ -310,31 +325,39 @@ class Registry:
         via previous_entry_id linkage).
         """
         with self._lock:
-            old = self.get(entry_id)
-            old.previous_entry_id = None  # will be set on the new entry
-            old_version = old.entry_version
+            entry = self._entries.get(entry_id)
+            if entry is None:
+                raise NotRegisteredError(
+                    f"No registry entry with id: {entry_id}",
+                    context={"id": entry_id},
+                )
+            entry.previous_entry_id = None
+            old_version = entry.entry_version
 
-            # Update in place (the entry_id stays the same, version increments)
-            old.lifecycle = new_lifecycle
-            old.entry_version = old_version + 1
+            entry.lifecycle = new_lifecycle
+            entry.entry_version = old_version + 1
 
-            self._notify("lifecycle_change", old)
-            return old
+        self._notify("lifecycle_change", entry)
+        return entry
 
     # -- Bulk operations --
 
     def all(self) -> list[RegistryEntry]:
         """Return all entries."""
-        return list(self._entries.values())
+        with self._lock:
+            return list(self._entries.values())
 
     def count(self) -> int:
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
     def contains_urn(self, urn: URN | str) -> bool:
-        return str(urn) in self._by_urn
+        with self._lock:
+            return str(urn) in self._by_urn
 
     def contains_target(self, target: Any) -> bool:
-        return id(target) in self._by_target
+        with self._lock:
+            return id(target) in self._by_target
 
     # -- Removal (soft — transitions to ARCHIVED) --
 
@@ -344,15 +367,28 @@ class Registry:
         Frees the URN slot and removes from kind/namespace indexes so the
         entry doesn't appear in active queries or block new registrations.
         """
-        entry = self.transition(entry_id, Lifecycle.ARCHIVED)
-        # Free URN slot
-        self._by_urn.pop(str(entry.urn), None)
-        # Remove from kind and namespace indexes
-        kind_name = entry.kind.name if isinstance(entry.kind, RegistryKind) else entry.kind.name
-        kind_list = self._by_kind.get(kind_name, [])
-        self._by_kind[kind_name] = [eid for eid in kind_list if eid != entry_id]
-        ns_list = self._by_namespace.get(entry.namespace, [])
-        self._by_namespace[entry.namespace] = [eid for eid in ns_list if eid != entry_id]
+        with self._lock:
+            entry = self._entries.get(entry_id)
+            if entry is None:
+                raise NotRegisteredError(
+                    f"No registry entry with id: {entry_id}",
+                    context={"id": entry_id},
+                )
+            entry.previous_entry_id = None
+            old_version = entry.entry_version
+            entry.lifecycle = Lifecycle.ARCHIVED
+            entry.entry_version = old_version + 1
+
+            # Free URN slot
+            self._by_urn.pop(str(entry.urn), None)
+            # Remove from kind and namespace indexes
+            kind_name = entry.kind.name if isinstance(entry.kind, RegistryKind) else entry.kind.name
+            kind_list = self._by_kind.get(kind_name, [])
+            self._by_kind[kind_name] = [eid for eid in kind_list if eid != entry_id]
+            ns_list = self._by_namespace.get(entry.namespace, [])
+            self._by_namespace[entry.namespace] = [eid for eid in ns_list if eid != entry_id]
+
+        self._notify("lifecycle_change", entry)
         return entry
 
     # -- Reset (testing only) --

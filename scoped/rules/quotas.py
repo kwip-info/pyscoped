@@ -33,7 +33,21 @@ from dataclasses import dataclass
 from typing import Any
 
 from scoped.rules.models import Rule, RuleType
-from scoped.storage.interface import StorageBackend
+from scoped.storage.interface import StorageBackend, StorageTransaction
+
+# Allowlists for SQL interpolation — prevents injection via rule conditions.
+_ALLOWED_TABLES = frozenset({
+    "scoped_objects", "scopes", "environments", "secrets",
+    "contracts", "rules", "integrations", "plugins",
+})
+
+_ALLOWED_COLUMNS = frozenset({
+    "id", "object_type", "owner_id", "registry_entry_id",
+    "current_version", "created_at", "lifecycle", "name",
+    "description", "parent_scope_id", "scope_id",
+    "classification", "state", "ephemeral", "kind",
+    "integration_type", "role",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +61,8 @@ class QuotaConfig:
 
     @classmethod
     def from_rule(cls, rule: Rule) -> QuotaConfig | None:
+        from scoped.exceptions import RuleEvaluationError
+
         cfg = rule.conditions.get("quota")
         if cfg is None:
             return None
@@ -56,12 +72,26 @@ class QuotaConfig:
         if isinstance(object_type, list):
             object_type = object_type[0] if object_type else None
 
+        count_table = cfg.get("count_table", "scoped_objects")
+        count_column = cfg.get("count_column", "object_type")
+        scope_column = cfg.get("scope_column")
+
+        # Defense-in-depth: reject invalid table/column names at parse time.
+        # Returns None (skip this rule) rather than raising, for consistency
+        # with how the checker handles unrecognised object types.
+        if count_table not in _ALLOWED_TABLES:
+            return None
+        if count_column not in _ALLOWED_COLUMNS:
+            return None
+        if scope_column is not None and scope_column not in _ALLOWED_COLUMNS:
+            return None
+
         return cls(
             max_count=cfg["max_count"],
-            count_table=cfg.get("count_table", "scoped_objects"),
-            count_column=cfg.get("count_column", "object_type"),
+            count_table=count_table,
+            count_column=count_column,
             count_value=cfg.get("count_value", object_type or ""),
-            scope_column=cfg.get("scope_column"),
+            scope_column=scope_column,
         )
 
 
@@ -184,29 +214,33 @@ class QuotaChecker:
             return object_type in allowed
         return object_type == allowed
 
-    def _count_resources(
-        self,
+    @staticmethod
+    def _build_count_query(
         config: QuotaConfig,
         *,
         scope_id: str | None,
-    ) -> int:
-        """Count existing resources matching the quota config."""
-        # Allowlist of tables we can count against to prevent injection
-        _ALLOWED_TABLES = {
-            "scoped_objects", "scopes", "environments", "secrets",
-            "contracts", "rules", "integrations", "plugins",
-        }
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Build the count SQL and params.
+
+        Returns ``("", ())`` sentinel if table/column validation fails
+        (caller should return 0).
+        """
         table = config.count_table
         if table not in _ALLOWED_TABLES:
-            return 0
+            return "", ()
+
+        if config.count_column not in _ALLOWED_COLUMNS:
+            return "", ()
 
         clauses = [f"{config.count_column} = ?"]
         params: list[Any] = [config.count_value]
 
         if scope_id is not None and config.scope_column:
+            if config.scope_column not in _ALLOWED_COLUMNS:
+                return "", ()
             clauses.append(f"{config.scope_column} = ?")
             params.append(scope_id)
-        elif scope_id is not None and table == "objects":
+        elif scope_id is not None and table == "scoped_objects":
             clauses.append("scope_id = ?")
             params.append(scope_id)
 
@@ -215,8 +249,65 @@ class QuotaChecker:
         params.append("ACTIVE")
 
         where = " AND ".join(clauses)
-        row = self._backend.fetch_one(
-            f"SELECT COUNT(*) AS cnt FROM {table} WHERE {where}",
-            tuple(params),
-        )
+        sql = f"SELECT COUNT(*) AS cnt FROM {table} WHERE {where}"
+        return sql, tuple(params)
+
+    def _count_resources(
+        self,
+        config: QuotaConfig,
+        *,
+        scope_id: str | None,
+    ) -> int:
+        """Count existing resources matching the quota config."""
+        sql, params = self._build_count_query(config, scope_id=scope_id)
+        if not sql:
+            return 0
+        row = self._backend.fetch_one(sql, params)
         return row["cnt"] if row else 0
+
+    def _count_resources_in_txn(
+        self,
+        txn: StorageTransaction,
+        config: QuotaConfig,
+        *,
+        scope_id: str | None,
+    ) -> int:
+        """Count existing resources inside an active transaction."""
+        sql, params = self._build_count_query(config, scope_id=scope_id)
+        if not sql:
+            return 0
+        row = txn.fetch_one(sql, params)
+        return row["cnt"] if row else 0
+
+    def check_in_txn(
+        self,
+        txn: StorageTransaction,
+        *,
+        object_type: str,
+        scope_id: str | None = None,
+    ) -> QuotaResult | None:
+        """Like ``check()`` but counts inside an active transaction.
+
+        Use this inside a write transaction to eliminate TOCTOU race
+        conditions — the count reflects uncommitted rows in the same txn.
+        """
+        for rule in self._rules:
+            if not self._type_matches(rule, object_type):
+                continue
+
+            config = QuotaConfig.from_rule(rule)
+            if config is None:
+                continue
+
+            count = self._count_resources_in_txn(txn, config, scope_id=scope_id)
+
+            if count >= config.max_count:
+                return QuotaResult(
+                    allowed=False,
+                    current_count=count,
+                    max_count=config.max_count,
+                    rule_id=rule.id,
+                    object_type=object_type,
+                )
+
+        return None

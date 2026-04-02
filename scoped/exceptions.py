@@ -120,6 +120,15 @@ class TraceIntegrityError(AuditError):
     """Raised when audit trail integrity check fails (tamper detected)."""
 
 
+class AuditSequenceCollisionError(AuditError):
+    """Raised when the assigned audit sequence number is already taken.
+
+    This indicates a multi-process race condition. The writer will
+    automatically retry with a re-seeded sequence up to a bounded
+    number of attempts before raising this error.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Temporal / Rollback
 # ---------------------------------------------------------------------------

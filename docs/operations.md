@@ -73,6 +73,7 @@ applying further migrations.
 | `m0011` | Events, subscriptions, webhooks, notifications |
 | `m0012` | Schedules, actions, jobs |
 | `m0013` | Sync state and federation |
+| `m0014` | Audit sequence UNIQUE constraint (multi-process safety) |
 
 ## Sync agent
 

@@ -79,6 +79,15 @@ Simplified form (auto-detects table/column from `object_type`):
 
 **Key class:** `QuotaChecker` — counts current resources, returns `QuotaResult` with `allowed`, `current_count`, `max_count`, `remaining`.
 
+`count_table` must be one of: `scoped_objects`, `scopes`, `environments`,
+`secrets`, `contracts`, `rules`, `integrations`, `plugins`. `count_column` and
+`scope_column` must be in the validated column allowlist. Invalid values cause
+the rule to be silently skipped (returns `None` from `QuotaConfig.from_rule()`).
+
+When used with `ScopedManager`, quota checks run **inside the write
+transaction** via `check_in_txn()` to prevent TOCTOU race conditions under
+concurrent load.
+
 ### FEATURE_FLAG — Capability Gating
 
 Feature-flag rules gate capabilities at scope, principal, or environment level with optional percentage-based rollout.

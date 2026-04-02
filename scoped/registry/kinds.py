@@ -5,6 +5,7 @@ Every registered construct has a kind. Applications can extend with custom kinds
 
 from __future__ import annotations
 
+import threading
 from enum import Enum, auto
 
 
@@ -66,12 +67,17 @@ class RegistryKind(Enum):
     CUSTOM = auto()         # Application-defined kind
 
 
+_custom_kind_lock = threading.Lock()
+
+
 class CustomKind:
     """
     Application-defined registry kind.
 
     Use when the built-in RegistryKind values don't cover your construct type.
     Custom kinds must be registered themselves before use.
+
+    Thread-safe: all class-level operations are protected by a module lock.
     """
 
     _registered: dict[str, CustomKind] = {}
@@ -93,22 +99,26 @@ class CustomKind:
 
     @classmethod
     def define(cls, name: str, description: str = "") -> CustomKind:
-        """Define and register a new custom kind."""
-        if name in cls._registered:
-            return cls._registered[name]
-        kind = cls(name, description)
-        cls._registered[name] = kind
-        return kind
+        """Define and register a new custom kind (idempotent, thread-safe)."""
+        with _custom_kind_lock:
+            if name in cls._registered:
+                return cls._registered[name]
+            kind = cls(name, description)
+            cls._registered[name] = kind
+            return kind
 
     @classmethod
     def get(cls, name: str) -> CustomKind | None:
-        return cls._registered.get(name)
+        with _custom_kind_lock:
+            return cls._registered.get(name)
 
     @classmethod
     def all(cls) -> dict[str, CustomKind]:
-        return dict(cls._registered)
+        with _custom_kind_lock:
+            return dict(cls._registered)
 
     @classmethod
     def reset(cls) -> None:
         """Clear all custom kinds. Used in testing."""
-        cls._registered.clear()
+        with _custom_kind_lock:
+            cls._registered.clear()
