@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.3 (2026-04-02)
+
+### Added
+- **Config inheritance transparency** — `ResolvedSetting.resolution_chain` shows all ancestor values encountered during hierarchy traversal, ordered root-to-leaf. Each entry is a `(scope_id, value)` tuple. Populated by both `ConfigResolver.resolve()` and `resolve_all()`. Enables UIs and debugging tools to show exactly where a setting comes from and what it overrides
+- **Blob streaming** — `BlobBackend.store_stream(blob_id, fp)` and `retrieve_stream(storage_path)` for streaming binary content without loading entire blobs into memory. `InMemoryBlobBackend` implements both (single chunk). `LocalBlobBackend` reads/writes in 64KB chunks. `BlobManager.store_stream()` computes incremental SHA-256 during upload. `BlobManager.read_stream()` returns an `Iterator[bytes]` with isolation enforcement
+
 ## 0.9.2 (2026-04-02)
 
 ### Quality

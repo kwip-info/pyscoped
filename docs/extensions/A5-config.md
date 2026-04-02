@@ -88,6 +88,29 @@ upload_limit = config.resolve_setting(team_scope_id, "max_upload_mb")  # 50
 theme = config.resolve_setting(team_scope_id, "theme", default="light")  # "light"
 ```
 
+## Resolution Chain
+
+`ConfigResolver.resolve()` returns a `ResolvedSetting` with a `resolution_chain`
+field that shows every ancestor value encountered during hierarchy traversal,
+ordered root-to-leaf:
+
+```python
+from scoped.tenancy.config import ConfigResolver
+
+resolver = ConfigResolver(backend)
+result = resolver.resolve(team_scope_id, "max_upload_mb")
+
+result.value              # 50 (closest to queried scope wins)
+result.source_scope_id    # team_scope_id
+result.inherited          # False (set directly on this scope)
+result.resolution_chain   # [(org_scope_id, 100), (team_scope_id, 50)]
+```
+
+This enables UIs and debugging tools to show exactly where a setting comes
+from and what values it overrides at each level of the hierarchy.
+
+`resolve_all()` also populates `resolution_chain` for every key.
+
 ## Invariants
 
 1. Inheritance walks up the scope hierarchy — child overrides take precedence.

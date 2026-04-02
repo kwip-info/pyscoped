@@ -83,20 +83,41 @@ from scoped.objects.blobs import BlobManager
 
 mgr = BlobManager(backend, blob_backend)
 
-# Store binary content
-ref = mgr.store_blob(
-    content=b"file contents here",
-    object_id=my_object_id,
+# Store binary content (in-memory)
+ref = mgr.store(
+    data=b"file contents here",
+    filename="doc.txt",
     content_type="text/plain",
-    principal_id=user_id,
+    owner_id=user_id,
 )
 
 # Read it back
-content = mgr.read_blob(ref.id)
+content = mgr.read(ref.id, principal_id=user_id)
 
 # Get version history
-versions = mgr.get_blob_versions(my_object_id)
+versions = mgr.list_versions(ref.id, principal_id=user_id)
 ```
+
+### Streaming
+
+For large blobs, use streaming to avoid loading entire content into memory:
+
+```python
+# Stream upload — incremental SHA-256, 64KB chunked write
+with open("large-video.mp4", "rb") as fp:
+    ref = mgr.store_stream(
+        fp=fp, filename="large-video.mp4",
+        content_type="video/mp4", owner_id=user_id,
+    )
+
+# Stream download — Iterator[bytes]
+for chunk in mgr.read_stream(ref.id, principal_id=user_id):
+    output.write(chunk)
+```
+
+Backend streaming support:
+- `InMemoryBlobBackend` — reads entire stream into memory (single chunk yield)
+- `LocalBlobBackend` — true 64KB chunked read/write
 
 ## Invariants
 

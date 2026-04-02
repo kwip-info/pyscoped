@@ -12,11 +12,13 @@ Two implementations are provided:
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import shutil
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 
 class BlobBackend(ABC):
@@ -44,6 +46,22 @@ class BlobBackend(ABC):
     @abstractmethod
     def exists(self, storage_path: str) -> bool:
         """Check if a blob exists at the given path."""
+
+    def store_stream(self, blob_id: str, fp: BinaryIO) -> str:
+        """Store binary data from a file-like object and return a storage path.
+
+        Default implementation reads into memory and delegates to ``store()``.
+        Backends can override for true streaming support.
+        """
+        return self.store(blob_id, fp.read())
+
+    def retrieve_stream(self, storage_path: str) -> Iterator[bytes]:
+        """Retrieve binary data as an iterator of chunks.
+
+        Default implementation loads into memory and yields a single chunk.
+        Backends can override for true streaming support.
+        """
+        yield self.retrieve(storage_path)
 
     @staticmethod
     def compute_content_hash(data: bytes) -> str:
@@ -75,6 +93,16 @@ class InMemoryBlobBackend(BlobBackend):
 
     def exists(self, storage_path: str) -> bool:
         return storage_path in self._store
+
+    def store_stream(self, blob_id: str, fp: BinaryIO) -> str:
+        path = f"mem://{blob_id}"
+        self._store[path] = fp.read()
+        return path
+
+    def retrieve_stream(self, storage_path: str) -> Iterator[bytes]:
+        if storage_path not in self._store:
+            raise FileNotFoundError(f"Blob not found: {storage_path}")
+        yield self._store[storage_path]
 
     @property
     def count(self) -> int:
@@ -121,6 +149,30 @@ class LocalBlobBackend(BlobBackend):
 
     def exists(self, storage_path: str) -> bool:
         return (self._root / storage_path).exists()
+
+    def store_stream(self, blob_id: str, fp: BinaryIO) -> str:
+        """Store from a file-like object using 64KB chunked writes."""
+        path = self._blob_path(blob_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as out:
+            while True:
+                chunk = fp.read(65536)
+                if not chunk:
+                    break
+                out.write(chunk)
+        return str(path.relative_to(self._root))
+
+    def retrieve_stream(self, storage_path: str) -> Iterator[bytes]:
+        """Yield 64KB chunks from a stored blob."""
+        full_path = self._root / storage_path
+        if not full_path.exists():
+            raise FileNotFoundError(f"Blob not found: {storage_path}")
+        with open(full_path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                yield chunk
 
     def _blob_path(self, blob_id: str) -> Path:
         """Shard blobs into subdirectories: ab/cd/abcdef..."""

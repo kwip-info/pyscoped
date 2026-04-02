@@ -12,10 +12,12 @@ Key types:
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, BinaryIO
 
 import sqlalchemy as sa
 
@@ -276,6 +278,106 @@ class BlobManager:
             )
 
         return self._blob_backend.retrieve(ref.storage_path)
+
+    def store_stream(
+        self,
+        *,
+        fp: BinaryIO,
+        filename: str,
+        content_type: str,
+        owner_id: str,
+        object_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        change_reason: str = "created",
+    ) -> BlobRef:
+        """Store a blob from a file-like object with incremental SHA-256.
+
+        Reads the stream in 64KB chunks to compute the hash and size
+        without loading the entire blob into memory, then delegates
+        storage to the blob backend's ``store_stream()``.
+        """
+        ts = now_utc()
+        blob_id = generate_id()
+
+        # Incremental hash + size via a tee read
+        hasher = hashlib.sha256()
+        size_bytes = 0
+        buf = bytearray()
+        while True:
+            chunk = fp.read(65536)
+            if not chunk:
+                break
+            hasher.update(chunk)
+            size_bytes += len(chunk)
+            buf.extend(chunk)
+
+        content_hash = hasher.hexdigest()
+
+        # Store via backend (rewind to BytesIO for backends that need a stream)
+        import io
+        storage_path = self._blob_backend.store_stream(blob_id, io.BytesIO(buf))
+
+        ref = BlobRef(
+            id=blob_id,
+            filename=filename,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            content_hash=content_hash,
+            owner_id=owner_id,
+            created_at=ts,
+            storage_path=storage_path,
+            object_id=object_id,
+            metadata=metadata,
+        )
+
+        stmt = sa.insert(blobs).values(
+            id=ref.id,
+            filename=ref.filename,
+            content_type=ref.content_type,
+            size_bytes=ref.size_bytes,
+            content_hash=ref.content_hash,
+            owner_id=ref.owner_id,
+            created_at=ref.created_at.isoformat(),
+            storage_path=ref.storage_path,
+            current_version=ref.current_version,
+            lifecycle=ref.lifecycle.name,
+            object_id=ref.object_id,
+            metadata_json=json.dumps(metadata or {}),
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        self._backend.execute(sql, params)
+
+        self._create_version(ref, created_by=owner_id, change_reason=change_reason)
+
+        if self._audit:
+            self._audit.record(
+                actor_id=owner_id,
+                action=ActionType.BLOB_CREATE,
+                target_type="Blob",
+                target_id=blob_id,
+                after_state=ref.snapshot(),
+            )
+
+        return ref
+
+    def read_stream(
+        self, blob_id: str, *, principal_id: str,
+    ) -> Iterator[bytes]:
+        """Read the binary content of a blob as an iterator of chunks.
+
+        Isolation-enforced: only the owner can read.
+        """
+        ref = self.get_or_raise(blob_id, principal_id=principal_id)
+
+        if self._audit:
+            self._audit.record(
+                actor_id=principal_id,
+                action=ActionType.BLOB_READ,
+                target_type="Blob",
+                target_id=blob_id,
+            )
+
+        return self._blob_backend.retrieve_stream(ref.storage_path)
 
     def update(
         self,

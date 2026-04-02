@@ -558,6 +558,49 @@ result = retention.apply(policy)         # Delete old + compact state columns
 
 14 migrations: initial schema, contracts, blobs, scope settings, search index, templates, tiering, events/webhooks, notifications, scheduling, sync state, composite indexes, row-level security, audit sequence uniqueness.
 
+## Config Inheritance Transparency
+
+Per-scope settings inherit from parent scopes. `ConfigResolver.resolve()` returns a `ResolvedSetting` with a `resolution_chain` showing all ancestor values:
+
+```python
+from scoped.tenancy.config import ConfigResolver
+
+resolver = ConfigResolver(backend)
+
+# Root sets theme=dark, child overrides to light
+result = resolver.resolve(child_scope_id, "theme")
+result.value                # "light" (winner = closest to queried scope)
+result.inherited            # False (set directly on child)
+result.resolution_chain     # [(root_id, "dark"), (child_id, "light")]
+
+# resolve_all() also populates chains
+all_settings = resolver.resolve_all(child_scope_id)
+all_settings["theme"].resolution_chain  # [(root_id, "dark"), (child_id, "light")]
+```
+
+## Blob Streaming
+
+Store and read binary content without loading entire blobs into memory:
+
+```python
+from scoped.objects.blobs import BlobManager
+
+# Stream upload with incremental SHA-256
+with open("large.bin", "rb") as fp:
+    ref = manager.store_stream(
+        fp=fp, filename="large.bin",
+        content_type="application/octet-stream", owner_id=alice.id,
+    )
+
+# Stream download (Iterator[bytes])
+for chunk in manager.read_stream(ref.id, principal_id=alice.id):
+    output.write(chunk)
+```
+
+Backend implementations:
+- `InMemoryBlobBackend` — single-chunk (for tests)
+- `LocalBlobBackend` — 64KB chunked read/write
+
 ## Exceptions
 
 All inherit from `ScopedError`. Key exceptions:

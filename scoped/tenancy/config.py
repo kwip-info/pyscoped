@@ -66,12 +66,19 @@ class ScopedSetting:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedSetting:
-    """Result of resolving a setting through the scope hierarchy."""
+    """Result of resolving a setting through the scope hierarchy.
+
+    ``resolution_chain`` shows all ancestor values encountered during
+    hierarchy traversal, ordered from root to leaf.  Each entry is a
+    ``(scope_id, value)`` tuple.  The winning value is always the
+    **last** entry (closest to the queried scope).
+    """
 
     key: str
     value: Any
     source_scope_id: str
     inherited: bool  # True if resolved from an ancestor, not the queried scope
+    resolution_chain: list[tuple[str, Any]] = field(default_factory=list)
 
 
 def setting_from_row(row: dict[str, Any]) -> ScopedSetting:
@@ -368,19 +375,14 @@ class ConfigResolver:
         """Resolve a setting, walking up the scope hierarchy.
 
         Returns None if the key is not set anywhere in the hierarchy.
+        The ``resolution_chain`` shows every ancestor that has a value
+        for this key, ordered root-to-leaf.
         """
+        # First pass: collect the scope chain (target → root)
+        chain_ids: list[str] = []
         current = scope_id
-        for depth in range(self._max_depth + 1):
-            setting = self._store.get(current, key)
-            if setting is not None:
-                return ResolvedSetting(
-                    key=key,
-                    value=setting.value,
-                    source_scope_id=current,
-                    inherited=(current != scope_id),
-                )
-
-            # Walk up
+        for _ in range(self._max_depth + 1):
+            chain_ids.append(current)
             row = self._backend.fetch_one(
                 "SELECT parent_scope_id FROM scopes WHERE id = ?",
                 (current,),
@@ -389,7 +391,25 @@ class ConfigResolver:
                 break
             current = row["parent_scope_id"]
 
-        return None
+        # Second pass: collect all values root-to-leaf
+        resolution_chain: list[tuple[str, Any]] = []
+        for sid in reversed(chain_ids):
+            setting = self._store.get(sid, key)
+            if setting is not None:
+                resolution_chain.append((sid, setting.value))
+
+        if not resolution_chain:
+            return None
+
+        # Winner is the closest to the queried scope (last in chain)
+        winner_scope, winner_value = resolution_chain[-1]
+        return ResolvedSetting(
+            key=key,
+            value=winner_value,
+            source_scope_id=winner_scope,
+            inherited=(winner_scope != scope_id),
+            resolution_chain=resolution_chain,
+        )
 
     def resolve_all(
         self,
@@ -397,7 +417,9 @@ class ConfigResolver:
     ) -> dict[str, ResolvedSetting]:
         """Resolve all settings visible to a scope (own + inherited).
 
-        Child overrides win over parent values.
+        Child overrides win over parent values.  Each ``ResolvedSetting``
+        includes a ``resolution_chain`` showing all ancestor values for
+        that key, ordered root-to-leaf.
         """
         # Collect scope chain from target up to root
         chain: list[str] = []
@@ -412,16 +434,22 @@ class ConfigResolver:
                 break
             current = row["parent_scope_id"]
 
-        # Walk from root to leaf so child overrides parent
+        # Walk from root to leaf, collecting all values per key
+        chains: dict[str, list[tuple[str, Any]]] = {}
         result: dict[str, ResolvedSetting] = {}
+
         for sid in reversed(chain):
             settings = self._store.list_settings(sid)
             for s in settings:
+                if s.key not in chains:
+                    chains[s.key] = []
+                chains[s.key].append((sid, s.value))
                 result[s.key] = ResolvedSetting(
                     key=s.key,
                     value=s.value,
                     source_scope_id=sid,
                     inherited=(sid != scope_id),
+                    resolution_chain=list(chains[s.key]),
                 )
 
         return result
