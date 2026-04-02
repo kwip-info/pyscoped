@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.6 (2026-04-02)
+
+### Added
+- **Archive streaming (NDJSON)** — `Exporter.stream_export(object_ids, principal_id=)` and `stream_export_by_type(object_type, principal_id=, batch_size=100)` yield NDJSON lines (one manifest header + one line per object with all versions). Memory usage is O(single_object). `Importer.stream_import(lines, principal_id=)` consumes an `Iterator[str]`, recognizes manifest lines, supports type filtering. `stream_export_by_type` paginates object IDs in configurable batches
+
 ## 0.9.5 (2026-04-02)
 
 ### Added

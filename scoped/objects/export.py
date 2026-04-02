@@ -8,6 +8,7 @@ JSON-serializable package that can be imported into another Scoped instance.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -249,3 +250,110 @@ class Exporter:
         rows = self._backend.fetch_all(sql, params)
         object_ids = [r["id"] for r in rows]
         return self.export_objects(object_ids, principal_id=principal_id)
+
+    # ------------------------------------------------------------------
+    # Streaming export (NDJSON)
+    # ------------------------------------------------------------------
+
+    def stream_export(
+        self,
+        object_ids: list[str],
+        *,
+        principal_id: str,
+    ) -> Iterator[str]:
+        """Export objects as a stream of NDJSON lines.
+
+        Yields one JSON line per object (including all its versions).
+        First line is always a manifest header with ``_type: "manifest"``.
+        Memory usage is O(single_object) not O(all_objects).
+        """
+        ts = now_utc()
+        manifest_line = json.dumps({
+            "_type": "manifest",
+            "format_version": FORMAT_VERSION,
+            "exported_at": ts.isoformat(),
+            "exported_by": principal_id,
+        })
+        yield manifest_line
+
+        for oid in object_ids:
+            line = self._export_object_line(oid, principal_id)
+            if line is not None:
+                yield line
+
+    def stream_export_by_type(
+        self,
+        object_type: str,
+        *,
+        principal_id: str,
+        batch_size: int = 100,
+    ) -> Iterator[str]:
+        """Export all objects of a type as a stream of NDJSON lines.
+
+        Object IDs are fetched in pages of ``batch_size`` to avoid
+        loading all IDs at once.
+        """
+        ts = now_utc()
+        manifest_line = json.dumps({
+            "_type": "manifest",
+            "format_version": FORMAT_VERSION,
+            "exported_at": ts.isoformat(),
+            "exported_by": principal_id,
+        })
+        yield manifest_line
+
+        offset = 0
+        while True:
+            stmt = sa.select(scoped_objects.c.id).where(
+                (scoped_objects.c.object_type == object_type)
+                & (scoped_objects.c.owner_id == principal_id)
+            ).limit(batch_size).offset(offset)
+            sql, params = compile_for(stmt, self._backend.dialect)
+            rows = self._backend.fetch_all(sql, params)
+            if not rows:
+                break
+            for row in rows:
+                line = self._export_object_line(row["id"], principal_id)
+                if line is not None:
+                    yield line
+            offset += batch_size
+
+    def _export_object_line(self, object_id: str, principal_id: str) -> str | None:
+        """Fetch a single object + versions and return as a JSON line.
+
+        Returns None if the object doesn't exist or isn't owned by principal.
+        """
+        obj_stmt = sa.select(scoped_objects).where(
+            (scoped_objects.c.id == object_id)
+            & (scoped_objects.c.owner_id == principal_id)
+        )
+        sql, params = compile_for(obj_stmt, self._backend.dialect)
+        obj_row = self._backend.fetch_one(sql, params)
+        if obj_row is None:
+            return None
+
+        ver_stmt = sa.select(object_versions).where(
+            object_versions.c.object_id == object_id,
+        ).order_by(object_versions.c.version)
+        sql, params = compile_for(ver_stmt, self._backend.dialect)
+        version_rows = self._backend.fetch_all(sql, params)
+
+        obj_dict = {
+            "id": obj_row["id"],
+            "object_type": obj_row["object_type"],
+            "owner_id": obj_row["owner_id"],
+            "created_at": obj_row["created_at"],
+            "lifecycle": obj_row["lifecycle"],
+            "versions": [
+                {
+                    "version": vr["version"],
+                    "data": json.loads(vr["data_json"]),
+                    "created_at": vr["created_at"],
+                    "created_by": vr["created_by"],
+                    "change_reason": vr["change_reason"],
+                    "checksum": vr["checksum"],
+                }
+                for vr in version_rows
+            ],
+        }
+        return json.dumps(obj_dict)
