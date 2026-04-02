@@ -4,6 +4,7 @@ Rules modify what the scoping engine allows.  Deny-overrides model:
 any DENY wins over any number of ALLOWs.  Default-deny when no rules match.
 """
 
+from scoped.rules.cache import RuleCache
 from scoped.rules.compiler import CompiledRuleSet, RuleCompiler
 from scoped.rules.engine import RuleEngine, RuleStore
 from scoped.rules.features import FeatureFlagConfig, FeatureFlagEngine, FeatureFlagResult
@@ -49,6 +50,7 @@ __all__ = [
     "RedactionStrategy",
     "Rule",
     "RuleBinding",
+    "RuleCache",
     "RuleCompiler",
     "RuleEffect",
     "RuleEngine",

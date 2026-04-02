@@ -79,6 +79,8 @@ class ScopedServices:
         if self._rule_engine is None:
             from scoped.rules.engine import RuleEngine
             self._rule_engine = RuleEngine(self.backend, audit_writer=self.audit)
+            if self._rule_engine._cache is not None:
+                self.rules.set_cache(self._rule_engine._cache)
         return self._rule_engine
 
     @property

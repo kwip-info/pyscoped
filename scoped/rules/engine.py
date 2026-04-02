@@ -6,7 +6,10 @@ Evaluates rules for (principal, action, target, scope) tuples.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from scoped.rules.cache import RuleCache
 
 import sqlalchemy as sa
 
@@ -53,6 +56,11 @@ class RuleStore:
     ) -> None:
         self._backend = backend
         self._audit = audit_writer
+        self._cache: Any | None = None
+
+    def set_cache(self, cache: Any) -> None:
+        """Set the shared rule cache (called by ScopedServices wiring)."""
+        self._cache = cache
 
     # ------------------------------------------------------------------
     # Rule CRUD
@@ -116,6 +124,9 @@ class RuleStore:
                 target_id=rule_id,
                 after_state=rule.snapshot(),
             )
+
+        if self._cache is not None:
+            self._cache.invalidate()
 
         return rule
 
@@ -193,6 +204,9 @@ class RuleStore:
                 after_state=rule.snapshot(),
             )
 
+        if self._cache is not None:
+            self._cache.invalidate()
+
         return rule
 
     def archive_rule(self, rule_id: str, *, archived_by: str) -> Rule:
@@ -224,6 +238,9 @@ class RuleStore:
                 target_id=rule_id,
                 after_state={"lifecycle": "ARCHIVED"},
             )
+
+        if self._cache is not None:
+            self._cache.invalidate()
 
         return rule
 
@@ -304,6 +321,9 @@ class RuleStore:
         sql, params = compile_for(stmt, self._backend.dialect)
         self._backend.execute(sql, params)
 
+        if self._cache is not None:
+            self._cache.invalidate()
+
         return binding
 
     def unbind_rule(
@@ -333,6 +353,10 @@ class RuleStore:
         ).values(lifecycle=Lifecycle.ARCHIVED.name)
         sql, params = compile_for(stmt2, self._backend.dialect)
         self._backend.execute(sql, params)
+
+        if self._cache is not None:
+            self._cache.invalidate()
+
         return True
 
     def get_bindings(
@@ -381,10 +405,15 @@ class RuleEngine:
         backend: StorageBackend,
         *,
         audit_writer: Any | None = None,
+        cache_ttl: float | None = None,
     ) -> None:
         self._backend = backend
         self._compiler = RuleCompiler(backend)
         self._audit = audit_writer
+        self._cache: RuleCache | None = None
+        if cache_ttl is not None:
+            from scoped.rules.cache import RuleCache
+            self._cache = RuleCache(cache_ttl)
 
     def evaluate(
         self,
@@ -485,6 +514,12 @@ class RuleEngine:
         target_id: str,
     ) -> list[Rule]:
         """Load active rules bound to a target."""
+        cache_key = f"{target_type.value}:{target_id}"
+        if self._cache is not None:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         stmt = sa.select(rules).select_from(
             rules.join(rule_bindings, rules.c.id == rule_bindings.c.rule_id)
         ).where(
@@ -495,7 +530,12 @@ class RuleEngine:
         )
         sql, params = compile_for(stmt, self._backend.dialect)
         rows = self._backend.fetch_all(sql, params)
-        return [rule_from_row(r) for r in rows]
+        result = [rule_from_row(r) for r in rows]
+
+        if self._cache is not None:
+            self._cache.put(cache_key, result)
+
+        return result
 
     @staticmethod
     def _matches_conditions(

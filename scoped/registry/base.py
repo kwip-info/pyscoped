@@ -75,6 +75,15 @@ class RegistryEntry:
         }
 
 
+def _paginate(items: list, limit: int | None, offset: int) -> list:
+    """Apply offset/limit pagination to an in-memory list."""
+    if offset:
+        items = items[offset:]
+    if limit is not None:
+        items = items[:limit]
+    return items
+
+
 # ---------------------------------------------------------------------------
 # Registry — the global construct registry
 # ---------------------------------------------------------------------------
@@ -259,28 +268,56 @@ class Registry:
 
     # -- Query --
 
-    def by_kind(self, kind: RegistryKind | CustomKind) -> list[RegistryEntry]:
+    def by_kind(
+        self,
+        kind: RegistryKind | CustomKind,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[RegistryEntry]:
         """Get all entries of a given kind."""
         with self._lock:
             kind_name = kind.name if isinstance(kind, RegistryKind) else kind.name
             entry_ids = self._by_kind.get(kind_name, [])
-            return [self._entries[eid] for eid in entry_ids]
+            entries = [self._entries[eid] for eid in entry_ids]
+            return _paginate(entries, limit, offset)
 
-    def by_namespace(self, namespace: str) -> list[RegistryEntry]:
+    def by_namespace(
+        self,
+        namespace: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[RegistryEntry]:
         """Get all entries in a namespace."""
         with self._lock:
             entry_ids = self._by_namespace.get(namespace, [])
-            return [self._entries[eid] for eid in entry_ids]
+            entries = [self._entries[eid] for eid in entry_ids]
+            return _paginate(entries, limit, offset)
 
-    def by_tag(self, tag: str) -> list[RegistryEntry]:
+    def by_tag(
+        self,
+        tag: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[RegistryEntry]:
         """Get all entries that have a specific tag."""
         with self._lock:
-            return [e for e in self._entries.values() if tag in e.tags]
+            entries = [e for e in self._entries.values() if tag in e.tags]
+            return _paginate(entries, limit, offset)
 
-    def by_lifecycle(self, lifecycle: Lifecycle) -> list[RegistryEntry]:
+    def by_lifecycle(
+        self,
+        lifecycle: Lifecycle,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[RegistryEntry]:
         """Get all entries in a specific lifecycle state."""
         with self._lock:
-            return [e for e in self._entries.values() if e.lifecycle == lifecycle]
+            entries = [e for e in self._entries.values() if e.lifecycle == lifecycle]
+            return _paginate(entries, limit, offset)
 
     def query(
         self,
@@ -290,6 +327,8 @@ class Registry:
         tag: str | None = None,
         lifecycle: Lifecycle | None = None,
         predicate: Callable[[RegistryEntry], bool] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[RegistryEntry]:
         """Flexible query with multiple optional filters."""
         with self._lock:
@@ -313,7 +352,7 @@ class Registry:
             if predicate is not None:
                 results = (e for e in results if predicate(e))
 
-            return list(results)
+            return _paginate(list(results), limit, offset)
 
     # -- Lifecycle transitions --
 
@@ -342,10 +381,16 @@ class Registry:
 
     # -- Bulk operations --
 
-    def all(self) -> list[RegistryEntry]:
+    def all(
+        self,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[RegistryEntry]:
         """Return all entries."""
         with self._lock:
-            return list(self._entries.values())
+            entries = list(self._entries.values())
+            return _paginate(entries, limit, offset)
 
     def count(self) -> int:
         with self._lock:

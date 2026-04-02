@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0 (2026-04-02)
+
+### Added
+- **Pagination on all unbounded queries** — `Registry.by_kind()`, `by_namespace()`, `by_tag()`, `by_lifecycle()`, `all()`, `query()` now accept `limit`/`offset`. `ScopeLifecycle.list_scopes()` default changed from `None` to `1000`. `RollbackExecutor._collect_descendants()` bounded by `max_depth=100`
+- **Rule engine caching** — `RuleEngine(cache_ttl=60.0)` enables TTL-based in-memory cache for rule lookups. `RuleCache` is thread-safe with `get()`/`put()`/`invalidate()`/`stats()`. Shared between `RuleStore` and `RuleEngine` via `ScopedServices` wiring. Cache invalidated on all mutations (create/update/archive/bind/unbind)
+- **Audit chain optimization** — `verify_chain()` now selects only 9 hash-relevant columns instead of `SELECT *`, eliminating I/O for `before_state`/`after_state`/`metadata_json`. New `VerificationEntry` lightweight dataclass. `AuditNamespace.verify(chunk_size=5000)` parameter exposed
+- **Audit retention** — `AuditRetention` class with `apply(policy)`, `estimate(policy)`, `compact()`. `RetentionPolicy` supports `max_age_days`, `max_entries`, `compact_before_state`, `compact_after_state`. Compaction nulls state columns while preserving hash chain integrity
+
 ## 0.8.1 (2026-04-02)
 
 ### Added

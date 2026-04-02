@@ -394,17 +394,24 @@ class RollbackExecutor:
             sql, params = compile_for(stmt, self._backend.dialect)
             self._backend.execute(sql, params)
 
-    def _collect_descendants(self, parent_id: str) -> list[TraceEntry]:
-        """BFS to collect all descendant trace entries."""
+    def _collect_descendants(
+        self,
+        parent_id: str,
+        *,
+        max_depth: int = 100,
+    ) -> list[TraceEntry]:
+        """BFS to collect descendant trace entries, bounded by max_depth."""
         descendants: list[TraceEntry] = []
-        queue = [parent_id]
+        queue: list[tuple[str, int]] = [(parent_id, 0)]
 
         while queue:
-            current = queue.pop(0)
+            current, depth = queue.pop(0)
+            if depth >= max_depth:
+                continue
             children = self._query.children(current)
             for child in children:
                 descendants.append(child)
-                queue.append(child.id)
+                queue.append((child.id, depth + 1))
 
         return descendants
 

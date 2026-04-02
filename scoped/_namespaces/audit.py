@@ -199,6 +199,7 @@ class AuditNamespace:
         *,
         from_sequence: int = 1,
         to_sequence: int | None = None,
+        chunk_size: int = 5000,
     ) -> ChainVerification:
         """Verify the integrity of the audit hash chain.
 
@@ -211,6 +212,9 @@ class AuditNamespace:
             from_sequence: Start verification from this sequence number.
             to_sequence: End verification at this sequence number.
                          If omitted, verifies through the latest entry.
+            chunk_size: Number of entries to process per database query.
+                        Larger values use more memory but fewer round-trips.
+                        Default: 5000.
 
         Returns:
             A ``ChainVerification`` object with ``.valid`` (bool),
@@ -225,4 +229,5 @@ class AuditNamespace:
         return self._audit_query.verify_chain(
             from_sequence=from_sequence,
             to_sequence=to_sequence,
+            chunk_size=chunk_size,
         )

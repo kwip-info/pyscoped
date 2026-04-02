@@ -8,6 +8,7 @@ Visibility filtering (rule-based) will be layered on once Layer 5
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +20,40 @@ from scoped.storage._query import compile_for
 from scoped.storage._schema import audit_trail
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType
+
+
+# ---------------------------------------------------------------------------
+# Lightweight entry for hash-chain verification (avoids loading state columns)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class VerificationEntry:
+    """Lightweight entry with only hash-verification fields."""
+
+    id: str
+    sequence: int
+    actor_id: str
+    action: str
+    target_type: str
+    target_id: str
+    timestamp: str  # ISO string, not parsed
+    hash: str
+    previous_hash: str
+
+
+# Columns needed for hash verification — excludes before_state, after_state,
+# metadata_json, scope_id, and parent_trace_id to reduce I/O.
+_VERIFY_COLUMNS = [
+    audit_trail.c.id,
+    audit_trail.c.sequence,
+    audit_trail.c.actor_id,
+    audit_trail.c.action,
+    audit_trail.c.target_type,
+    audit_trail.c.target_id,
+    audit_trail.c.timestamp,
+    audit_trail.c.hash,
+    audit_trail.c.previous_hash,
+]
 
 
 class AuditQuery:
@@ -170,7 +205,9 @@ class AuditQuery:
         matches the preceding entry's ``hash``.
 
         Processes entries in chunks of ``chunk_size`` to bound memory
-        usage on large audit trails.
+        usage on large audit trails.  Only fetches the columns needed
+        for hash verification (excludes ``before_state``,
+        ``after_state``, ``metadata_json``).
 
         Returns a ``ChainVerification`` result.
         """
@@ -181,7 +218,7 @@ class AuditQuery:
         current_from = from_sequence
 
         while True:
-            stmt = sa.select(audit_trail).where(
+            stmt = sa.select(*_VERIFY_COLUMNS).where(
                 audit_trail.c.sequence >= current_from,
             )
             if to_sequence is not None:
@@ -194,21 +231,23 @@ class AuditQuery:
             if not rows:
                 break
 
-            entries = [self._row_to_entry(r) for r in rows]
+            entries = [self._row_to_verification_entry(r) for r in rows]
 
             for i, entry in enumerate(entries):
                 if first_seq is None:
                     first_seq = entry.sequence
 
-                # Recompute hash
+                # Recompute hash — VerificationEntry stores action as
+                # raw string and timestamp as ISO string, so no
+                # conversion is needed.
                 expected = compute_hash(
                     entry_id=entry.id,
                     sequence=entry.sequence,
                     actor_id=entry.actor_id,
-                    action=entry.action.value,
+                    action=entry.action,
                     target_type=entry.target_type,
                     target_id=entry.target_id,
-                    timestamp=entry.timestamp.isoformat(),
+                    timestamp=entry.timestamp,
                     previous_hash=entry.previous_hash,
                     algorithm=self._algorithm,
                 )
@@ -276,6 +315,21 @@ class AuditQuery:
             after_state=json.loads(after) if isinstance(after, str) else after,
             metadata=json.loads(meta) if isinstance(meta, str) else (meta or {}),
             parent_trace_id=row.get("parent_trace_id"),
+        )
+
+    @staticmethod
+    def _row_to_verification_entry(row: dict[str, Any]) -> VerificationEntry:
+        """Convert a pruned-column row to a lightweight VerificationEntry."""
+        return VerificationEntry(
+            id=row["id"],
+            sequence=row["sequence"],
+            actor_id=row["actor_id"],
+            action=row["action"],
+            target_type=row["target_type"],
+            target_id=row["target_id"],
+            timestamp=row["timestamp"],
+            hash=row["hash"],
+            previous_hash=row.get("previous_hash", ""),
         )
 
 

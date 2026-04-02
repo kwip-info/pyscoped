@@ -132,7 +132,7 @@ class ScopeLifecycle:
         parent_scope_id: str | None = None,
         include_archived: bool = False,
         order_by: str = "created_at",
-        limit: int | None = None,
+        limit: int = 1000,
         offset: int = 0,
     ) -> list[Scope]:
         """List scopes with optional filtering, ordering, and pagination.

@@ -292,6 +292,15 @@ client.services.rules.bind_rule(rule.id, target_type=BindingTargetType.OBJECT_TY
 scoped.objects.create("invoice", data={...})
 ```
 
+### Rule engine caching
+```python
+# Opt-in TTL-based cache (default: no cache)
+engine = RuleEngine(backend, cache_ttl=60.0)  # 60s TTL
+# Subsequent evaluate() calls use cached rules — 0 DB queries on cache hit
+# Cache auto-invalidated on create_rule/update_rule/archive_rule/bind_rule/unbind_rule
+print(engine._cache.stats())  # {"hits": 42, "misses": 3, "hit_rate": 0.93, ...}
+```
+
 ### Rule evaluation debugging
 ```python
 explanation = engine.evaluate_with_explanation(
@@ -508,6 +517,17 @@ runner.discover()          # Auto-discover from scoped.storage.migrations.versio
 runner.apply_all()         # Apply pending
 runner.rollback_last()     # Undo most recent
 runner.get_status()        # List applied/pending
+```
+
+### Audit retention
+```python
+from scoped.audit.retention import AuditRetention, RetentionPolicy
+
+retention = AuditRetention(backend)
+policy = RetentionPolicy(max_age_days=90, compact_after_state=True)
+estimate = retention.estimate(policy)    # How many entries would be affected
+result = retention.apply(policy)         # Delete old + compact state columns
+# Hash chain integrity preserved after compaction (hashes don't depend on state)
 ```
 
 14 migrations: initial schema, contracts, blobs, scope settings, search index, templates, tiering, events/webhooks, notifications, scheduling, sync state, composite indexes, row-level security, audit sequence uniqueness.
