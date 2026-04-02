@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.4 (2026-04-02)
+
+### Added
+- **CI/CD pipeline** — GitHub Actions workflow with 4 jobs: `lint` (ruff on Python 3.13), `test` (pytest matrix across 3.11/3.12/3.13 with SQLite), `test-postgres` (Postgres 16 service container on 3.13), `build` (wheel + sdist with artifact upload). Concurrency groups cancel stale runs. Build gates on lint + test passing
+
 ## 0.9.3 (2026-04-02)
 
 ### Added
