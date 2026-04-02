@@ -11,6 +11,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from scoped.logging import get_logger
 from scoped.exceptions import (
     AccessDeniedError,
     IsolationViolationError,
@@ -28,6 +29,9 @@ from scoped.storage._schema import object_versions, scoped_objects, tombstones
 from scoped.storage.interface import StorageBackend
 from scoped.ids import ObjectId, VersionId
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+
+
+_logger = get_logger("objects.manager")
 
 
 class ScopedManager:
@@ -224,6 +228,10 @@ class ScopedManager:
             change_reason=change_reason,
             checksum=checksum,
             _object_type=object_type,
+        )
+
+        _logger.info(
+            "object.create", object_type=object_type, owner_id=owner_id,
         )
 
         with self._backend.transaction() as txn:
@@ -463,6 +471,11 @@ class ScopedManager:
                 context={"object_id": object_id},
             )
 
+        _logger.info(
+            "object.update", object_id=object_id, principal_id=principal_id,
+            object_type=obj.object_type,
+        )
+
         # Get previous version data for audit before_state
         prev_ver = self.get_version(object_id, obj.current_version)
         before_data = prev_ver.data if prev_ver else None
@@ -544,6 +557,11 @@ class ScopedManager:
                 f"Object {object_id} is already tombstoned",
                 context={"object_id": object_id},
             )
+
+        _logger.info(
+            "object.tombstone", object_id=object_id, principal_id=principal_id,
+            object_type=obj.object_type,
+        )
 
         ts = now_utc()
         tomb_id = generate_id()

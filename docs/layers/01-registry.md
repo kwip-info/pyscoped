@@ -25,6 +25,8 @@ Examples:
 
 URNs are immutable identifiers. They never change once assigned. If a construct is versioned (its registry entry is updated), the version component increments.
 
+**Validation:** URNs are validated at construction time. `kind`, `namespace`, and `name` must be non-empty strings, and `version` must be >= 1. Invalid URNs raise `ValueError` immediately — no invalid URN can enter the system.
+
 ### Registry Entry
 
 A `RegistryEntry` contains:

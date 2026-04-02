@@ -64,6 +64,16 @@ class URN:
     name: str
     version: int = 1
 
+    def __post_init__(self) -> None:
+        if not self.kind:
+            raise ValueError("URN kind must be non-empty")
+        if not self.namespace:
+            raise ValueError("URN namespace must be non-empty")
+        if not self.name:
+            raise ValueError("URN name must be non-empty")
+        if self.version < 1:
+            raise ValueError(f"URN version must be >= 1, got {self.version}")
+
     def __str__(self) -> str:
         return f"scoped:{self.kind}:{self.namespace}:{self.name}:{self.version}"
 

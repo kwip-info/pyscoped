@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
 import sqlalchemy as sa
 
+from scoped.logging import get_logger
+
 from scoped.rules.compiler import CompiledRuleSet, RuleCompiler
 from scoped.rules.models import (
     BindingTargetType,
@@ -34,6 +36,9 @@ from scoped.storage._schema import rule_bindings, rule_versions, rules
 from scoped.ids import BindingId, RuleId, VersionId
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+
+
+_logger = get_logger("rules.engine")
 
 
 def _value_matches(expected: Any, actual: Any) -> bool:
@@ -490,6 +495,11 @@ class RuleEngine:
             matching_rules=tuple(matching),
             deny_rules=deny_rules,
             allow_rules=allow_rules,
+        )
+
+        _logger.debug(
+            "rules.evaluate", action=action, allowed=allowed,
+            rules_matched=len(matching), deny_count=len(deny_rules),
         )
 
         if self._audit:

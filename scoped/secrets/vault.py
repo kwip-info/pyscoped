@@ -11,6 +11,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from scoped.logging import get_logger
 from scoped.exceptions import (
     SecretAccessDeniedError,
     SecretNotFoundError,
@@ -38,6 +39,9 @@ from scoped.storage._schema import (
 )
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+
+
+_logger = get_logger("secrets.vault")
 
 
 class SecretVault:
@@ -146,6 +150,11 @@ class SecretVault:
         )
         sql, params = compile_for(stmt, self._backend.dialect)
         self._backend.execute(sql, params)
+
+        _logger.info(
+            "secret.create", secret_id=sid, owner_id=owner_id,
+            classification=classification,
+        )
 
         if self._audit is not None:
             self._audit.record(
@@ -266,6 +275,11 @@ class SecretVault:
         )
         sql, params = compile_for(stmt, self._backend.dialect)
         self._backend.execute(sql, params)
+
+        _logger.info(
+            "secret.rotate", secret_id=secret_id, rotated_by=rotated_by,
+            new_version=new_version,
+        )
 
         if self._audit is not None:
             self._audit.record(
@@ -497,6 +511,10 @@ class SecretVault:
             accessor_id=accessor_id, access_type="resolve",
             result=AccessResult.SUCCESS,
             scope_id=scope_id, environment_id=environment_id,
+        )
+
+        _logger.info(
+            "secret.resolve", secret_id=ref.secret_id, accessor_id=accessor_id,
         )
 
         if self._audit is not None:

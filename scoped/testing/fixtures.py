@@ -74,6 +74,21 @@ def sample_object(scoped_services):
 
 
 @pytest.fixture
+def scoped_txn(scoped_backend):
+    """Wrap each test in a transaction that rolls back at teardown.
+
+    Useful for integration tests that need a clean database state
+    without recreating the schema every time.
+    """
+    txn = scoped_backend.transaction()
+    yield txn
+    try:
+        txn.rollback()
+    except Exception:
+        pass  # Already committed or rolled back
+
+
+@pytest.fixture
 def sample_scope(scoped_services):
     """Factory fixture: call ``sample_scope(owner, name, members)`` to create scopes."""
 

@@ -21,6 +21,7 @@ import urllib.error
 from datetime import datetime
 from typing import Any
 
+from scoped.logging import get_logger
 from scoped.exceptions import (
     SyncAuthenticationError,
     SyncBatchRejectedError,
@@ -35,6 +36,9 @@ from scoped.sync.models import (
     SyncVerifyResponse,
     PingResponse,
 )
+
+
+_logger = get_logger("sync.transport")
 
 
 class ManagementPlaneClient:
@@ -76,6 +80,9 @@ class ManagementPlaneClient:
 
         The batch body is signed with HMAC-SHA256.
         """
+        _logger.info(
+            "sync.push_batch", entry_count=len(batch.entries),
+        )
         data = self._request("POST", "/sync/batch", body=batch, sign=True)
         return SyncBatchAck.model_validate(data)
 

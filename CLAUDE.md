@@ -181,6 +181,24 @@ grant_ref(secret_id, principal, *, granted_by=None) -> SecretRef
 resolve(ref_token, *, accessor_id=None) -> str   # Decrypted plaintext
 ```
 
+## URN (Universal Resource Name)
+
+Every registered construct gets a URN: `scoped:<kind>:<namespace>:<name>:<version>`. URNs are validated at construction:
+- `kind`, `namespace`, `name` must be non-empty
+- `version` must be >= 1
+- Invalid URNs raise `ValueError` immediately
+
+```python
+from scoped.types import URN
+
+urn = URN(kind="model", namespace="myapp", name="User", version=1)
+str(urn)  # "scoped:model:myapp:User:1"
+URN.parse("scoped:model:myapp:User:1")  # round-trips
+
+URN(kind="", namespace="ns", name="X")   # ValueError: kind must be non-empty
+URN(kind="m", namespace="ns", name="X", version=0)  # ValueError: version must be >= 1
+```
+
 ## Data Models
 
 ### Principal
@@ -499,6 +517,14 @@ logger.info("Processing complete", count=5)
 ```
 JSON output with timestamp, level, message, principal_id (from context), and custom fields. Configure via `SCOPED_LOG_LEVEL` env var.
 
+Six core modules emit structured logs automatically:
+- `scoped.objects.manager` — create, update, tombstone (INFO)
+- `scoped.audit.writer` — record (DEBUG)
+- `scoped.rules.engine` — evaluate (DEBUG)
+- `scoped.secrets.vault` — create, rotate, resolve (INFO, never logs values)
+- `scoped.tenancy.lifecycle` — create_scope, freeze, archive (INFO)
+- `scoped.sync.transport` — push_batch (INFO)
+
 ## OpenTelemetry
 
 ```python
@@ -566,6 +592,40 @@ class MyTest(ScopedTestCase):
 ```
 
 pytest fixtures via conftest: `sqlite_backend`, `sa_sqlite_backend`, `storage_backend` (parametrized SQLite + SA SQLite + Postgres), `registry`.
+
+### Exportable fixtures (`scoped.testing.fixtures`)
+- `scoped_backend` — in-memory SQLite backend
+- `scoped_services` — fully-wired `ScopedServices`
+- `scoped_txn` — wraps test in a transaction, rolls back at teardown
+- `alice`, `bob` — pre-built test principals
+- `sample_object(owner, type, data)`, `sample_scope(owner, name, members)` — factory fixtures
+
+### Assertion helpers (`scoped.testing.assertions`)
+```python
+from scoped.testing.assertions import (
+    assert_access_denied,    # Verify fn raises AccessDeniedError
+    assert_can_read,         # Verify principal can read object
+    assert_cannot_read,      # Verify principal cannot read object
+    assert_trace_exists,     # Verify audit entry with flexible criteria
+    assert_isolated,         # Verify owner-private isolation
+    assert_audit_recorded,   # Verify specific audit entry
+    assert_version_count,    # Verify object version count
+    assert_hash_chain_valid, # Verify audit hash chain
+    assert_tombstoned,       # Verify object is soft-deleted
+    assert_secret_never_leaked,  # Verify secret not in audit
+)
+```
+
+### Backend markers (`scoped.testing.markers`)
+```python
+from scoped.testing.markers import sqlite_only, postgres_only
+
+@sqlite_only
+def test_fts5_search(): ...
+
+@postgres_only
+def test_rls_policies(): ...
+```
 
 ## Typed IDs
 

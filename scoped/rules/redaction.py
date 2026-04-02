@@ -26,7 +26,6 @@ Strategies:
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -100,7 +99,7 @@ class RedactionEngine:
         scope_id: str | None = None,
     ) -> RedactionResult:
         """Apply all matching redaction rules to *data* and return the result."""
-        result = copy.deepcopy(data)
+        result = dict(data)
         redacted: list[str] = []
         applied_rule_ids: list[str] = []
 

@@ -17,6 +17,7 @@ import sqlalchemy as sa
 
 from scoped.audit.models import TraceEntry, compute_hash
 from scoped.exceptions import AuditSequenceCollisionError
+from scoped.logging import get_logger
 from scoped.storage._query import compile_for
 from scoped.storage._schema import audit_trail
 from scoped.ids import TraceId
@@ -24,6 +25,7 @@ from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, generate_id, now_utc
 
 logger = logging.getLogger(__name__)
+_logger = get_logger("audit.writer")
 
 _MAX_SEQUENCE_RETRIES = 3
 
@@ -157,6 +159,10 @@ class AuditWriter:
 
                 self._sequence = seq
                 self._last_hash = entry_hash
+                _logger.debug(
+                    "audit.record", sequence=seq, action=action.value,
+                    actor_id=actor_id, target_type=target_type,
+                )
                 return entry
 
             raise AuditSequenceCollisionError(

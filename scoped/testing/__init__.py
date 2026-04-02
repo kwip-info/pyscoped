@@ -4,11 +4,15 @@ Validates all framework invariants — at test time (static) and at runtime.
 """
 
 from scoped.testing.assertions import (
+    assert_access_denied,
     assert_audit_recorded,
+    assert_can_read,
+    assert_cannot_read,
     assert_hash_chain_valid,
     assert_isolated,
     assert_secret_never_leaked,
     assert_tombstoned,
+    assert_trace_exists,
     assert_version_count,
     assert_visible,
 )
@@ -54,11 +58,15 @@ __all__ = [
     "get_layers_for_invariant",
     "get_registry_layers",
     "get_audit_layers",
+    "assert_access_denied",
     "assert_audit_recorded",
+    "assert_can_read",
+    "assert_cannot_read",
     "assert_hash_chain_valid",
     "assert_isolated",
     "assert_secret_never_leaked",
     "assert_tombstoned",
+    "assert_trace_exists",
     "assert_version_count",
     "assert_visible",
 ]

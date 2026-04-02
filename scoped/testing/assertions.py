@@ -11,7 +11,7 @@ reusable way::
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from scoped.storage.interface import StorageBackend
 
@@ -119,6 +119,94 @@ def assert_tombstoned(backend: StorageBackend, object_id: str) -> None:
     assert obj_row is not None and obj_row["lifecycle"] == "ARCHIVED", (
         f"Object {object_id} lifecycle should be ARCHIVED after tombstone"
     )
+
+
+def assert_access_denied(fn: Callable, *args: Any, **kwargs: Any) -> None:
+    """Assert that calling *fn* raises ``AccessDeniedError``.
+
+    Uses plain ``assert`` for pytest introspection.
+    """
+    from scoped.exceptions import AccessDeniedError
+
+    exc = None
+    try:
+        fn(*args, **kwargs)
+    except AccessDeniedError as e:
+        exc = e
+    assert exc is not None, (
+        f"Expected AccessDeniedError from {fn.__name__}, but no exception was raised"
+    )
+
+
+def assert_can_read(
+    backend: StorageBackend,
+    object_id: str,
+    principal_id: str,
+) -> None:
+    """Assert that *principal_id* can read *object_id* via ScopedManager."""
+    from scoped.objects.manager import ScopedManager
+
+    mgr = ScopedManager(backend)
+    result = mgr.get(object_id, principal_id=principal_id)
+    assert result is not None, (
+        f"Principal {principal_id} should be able to read object {object_id}"
+    )
+
+
+def assert_cannot_read(
+    backend: StorageBackend,
+    object_id: str,
+    principal_id: str,
+) -> None:
+    """Assert that *principal_id* cannot read *object_id* via ScopedManager."""
+    from scoped.objects.manager import ScopedManager
+
+    mgr = ScopedManager(backend)
+    result = mgr.get(object_id, principal_id=principal_id)
+    assert result is None, (
+        f"Principal {principal_id} should NOT be able to read object {object_id}"
+    )
+
+
+def assert_trace_exists(
+    backend: StorageBackend,
+    *,
+    actor_id: str | None = None,
+    action: str | None = None,
+    target_id: str | None = None,
+    target_type: str | None = None,
+) -> None:
+    """Assert that at least one audit trail entry matches all given criteria.
+
+    More flexible than ``assert_audit_recorded`` — all parameters are optional.
+    """
+    conditions = []
+    params: list[Any] = []
+    if actor_id is not None:
+        conditions.append("actor_id = ?")
+        params.append(actor_id)
+    if action is not None:
+        conditions.append("LOWER(action) = LOWER(?)")
+        params.append(action)
+    if target_id is not None:
+        conditions.append("target_id = ?")
+        params.append(target_id)
+    if target_type is not None:
+        conditions.append("target_type = ?")
+        params.append(target_type)
+
+    where = " AND ".join(conditions) if conditions else "1 = 1"
+    row = backend.fetch_one(
+        f"SELECT id FROM audit_trail WHERE {where}",
+        tuple(params),
+    )
+    criteria = {
+        k: v for k, v in
+        [("actor_id", actor_id), ("action", action),
+         ("target_id", target_id), ("target_type", target_type)]
+        if v is not None
+    }
+    assert row is not None, f"No audit entry found matching {criteria}"
 
 
 def assert_secret_never_leaked(

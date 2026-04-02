@@ -33,7 +33,7 @@ Redaction rules declare which fields of an object type should be masked, replace
 }
 ```
 
-**Key class:** `RedactionEngine` — collects matching redaction rules, applies strategies to object data, returns redacted copy (never mutates original).
+**Key class:** `RedactionEngine` — collects matching redaction rules, applies strategies to object data, returns redacted copy (never mutates original). Uses shallow copy internally (`dict(data)`) since redaction only assigns new values to top-level keys.
 
 ### RATE_LIMIT — Action Throttling
 

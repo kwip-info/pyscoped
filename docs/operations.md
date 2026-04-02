@@ -192,6 +192,22 @@ export SCOPED_LOG_LEVEL=DEBUG    # DEBUG, INFO, WARNING, ERROR, AUDIT
 The default level is `INFO`. The `AUDIT` level is always emitted regardless of
 this setting.
 
+### Built-in instrumentation
+
+Six core modules emit structured logs automatically — no configuration needed:
+
+| Module | Logger name | Events (level) |
+|--------|-------------|----------------|
+| `scoped.objects.manager` | `pyscoped.objects.manager` | create, update, tombstone (INFO) |
+| `scoped.audit.writer` | `pyscoped.audit.writer` | record (DEBUG) |
+| `scoped.rules.engine` | `pyscoped.rules.engine` | evaluate (DEBUG) |
+| `scoped.secrets.vault` | `pyscoped.secrets.vault` | create, rotate, resolve (INFO) |
+| `scoped.tenancy.lifecycle` | `pyscoped.tenancy.lifecycle` | create_scope, freeze, archive (INFO) |
+| `scoped.sync.transport` | `pyscoped.sync.transport` | push_batch (INFO) |
+
+Secret values are **never** included in log output. The vault logs operation
+metadata only (secret ID, actor, version number).
+
 ### Auto-enrichment
 
 When a principal context is active, every log entry is automatically enriched

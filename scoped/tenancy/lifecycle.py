@@ -7,6 +7,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from scoped.logging import get_logger
 from scoped.exceptions import (
     AccessDeniedError,
     ScopeFrozenError,
@@ -26,6 +27,9 @@ from scoped.tenancy.models import (
     scope_from_row,
 )
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+
+
+_logger = get_logger("tenancy.lifecycle")
 
 
 class ScopeLifecycle:
@@ -89,6 +93,10 @@ class ScopeLifecycle:
             principal_id=owner_id,
             role=ScopeRole.OWNER,
             granted_by=owner_id,
+        )
+
+        _logger.info(
+            "scope.create", scope_id=scope_id, owner_id=owner_id, name=name,
         )
 
         if self._audit:
@@ -575,6 +583,8 @@ class ScopeLifecycle:
             txn.execute(sql, params)
             txn.commit()
 
+        _logger.info("scope.freeze", scope_id=scope_id, frozen_by=frozen_by)
+
         if self._audit:
             self._audit.record(
                 actor_id=frozen_by,
@@ -632,6 +642,8 @@ class ScopeLifecycle:
             txn.execute(sql, params)
 
             txn.commit()
+
+        _logger.info("scope.archive", scope_id=scope_id, archived_by=archived_by)
 
         if self._audit:
             self._audit.record(

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.2 (2026-04-02)
+
+### Quality
+
+- **URN validation at construction** — `URN.__post_init__()` now validates that `kind`, `namespace`, and `name` are non-empty and `version >= 1`. Invalid URNs raise `ValueError` immediately. `URN.parse()` inherits the same validation
+- **Redaction performance** — `RedactionEngine.apply()` uses shallow copy (`dict(data)`) instead of `copy.deepcopy(data)`. Safe because redaction only assigns new values to top-level keys, never mutates nested objects
+- **Structured logging in core modules** — Six key modules now emit structured JSON logs via `get_logger()`: `objects.manager` (create/update/tombstone), `audit.writer` (record), `rules.engine` (evaluate), `secrets.vault` (create/rotate/resolve — never logs values), `tenancy.lifecycle` (create_scope/freeze/archive), `sync.transport` (push_batch)
+- **Pytest-native testing helpers** — New assertion functions: `assert_access_denied(fn)`, `assert_can_read(backend, oid, pid)`, `assert_cannot_read(backend, oid, pid)`, `assert_trace_exists(backend, **criteria)`. New markers: `@sqlite_only`, `@postgres_only` (registered in `pyproject.toml`). New `scoped_txn` fixture for transactional test isolation
+
 ## 0.9.1 (2026-04-02)
 
 ### Security

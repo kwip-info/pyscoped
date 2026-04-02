@@ -125,6 +125,112 @@ def test_register_type(registry):
     assert registry.is_registered("Document")
 ```
 
+## Assertion helpers
+
+pyscoped provides domain-specific assertion functions in `scoped.testing.assertions`
+that produce clear, actionable error messages when they fail.
+
+### Isolation and visibility
+
+```python
+from scoped.testing.assertions import (
+    assert_isolated,
+    assert_can_read,
+    assert_cannot_read,
+    assert_visible,
+)
+
+# Verify owner-private isolation (owner can see, other cannot)
+assert_isolated(backend, object_id=doc.id, owner_id=alice.id, other_id=bob.id)
+
+# Individual visibility checks
+assert_can_read(backend, doc.id, alice.id)
+assert_cannot_read(backend, doc.id, bob.id)
+```
+
+### Access control
+
+```python
+from scoped.testing.assertions import assert_access_denied
+
+# Verify that a function raises AccessDeniedError
+assert_access_denied(lambda: manager.update(obj_id, principal_id=bob_id, data={}))
+```
+
+### Audit trail
+
+```python
+from scoped.testing.assertions import (
+    assert_audit_recorded,
+    assert_trace_exists,
+    assert_hash_chain_valid,
+)
+
+# Exact match
+assert_audit_recorded(backend, actor_id=alice.id, action="create", target_id=doc.id)
+
+# Flexible criteria (all parameters optional)
+assert_trace_exists(backend, actor_id=alice.id)
+assert_trace_exists(backend, action="delete", target_type="invoice")
+
+# Verify the entire hash chain
+assert_hash_chain_valid(backend)
+```
+
+### Object state
+
+```python
+from scoped.testing.assertions import (
+    assert_version_count,
+    assert_tombstoned,
+    assert_secret_never_leaked,
+)
+
+assert_version_count(backend, doc.id, expected=3)
+assert_tombstoned(backend, doc.id)
+assert_secret_never_leaked(backend, secret_id)
+```
+
+## Backend markers
+
+Use markers from `scoped.testing.markers` to run tests only against specific
+backends. Register them in `pyproject.toml`:
+
+```toml
+[tool.pytest.ini_options]
+markers = [
+    "sqlite_only: Run only with SQLite backend",
+    "postgres_only: Run only with PostgreSQL backend",
+]
+```
+
+Then decorate tests:
+
+```python
+from scoped.testing.markers import sqlite_only, postgres_only
+
+@sqlite_only
+def test_fts5_virtual_table():
+    ...  # FTS5 is SQLite-specific
+
+@postgres_only
+def test_rls_policies():
+    ...  # RLS is PostgreSQL-specific
+```
+
+## Transactional fixture
+
+The `scoped_txn` fixture wraps each test in a database transaction that rolls
+back at teardown. This is faster than recreating the schema for each test:
+
+```python
+from scoped.testing.fixtures import scoped_txn
+
+def test_with_rollback(scoped_backend, scoped_txn):
+    # Any writes here are rolled back after the test
+    ...
+```
+
 ## Recommended patterns
 
 ### Fixture-first
