@@ -39,9 +39,9 @@ bug that bypasses `ScopedManager`, the database rejects unauthorized access.
 **Step 1:** Enable RLS on the backend.
 
 ```python
-from scoped.storage.postgres import PostgresBackend
+from scoped.storage.sa_postgres import SASAPostgresBackend
 
-backend = PostgresBackend(
+backend = SAPostgresBackend(
     "postgresql://user:pass@localhost:5432/myapp",
     enable_rls=True,
 )
@@ -63,7 +63,7 @@ specialized policies for memberships, projections, and notifications.
 
 ### How SET/RESET works per connection
 
-When `enable_rls=True`, the `PostgresBackend` injects the current principal
+When `enable_rls=True`, the `SAPostgresBackend` injects the current principal
 ID into every database connection before executing queries:
 
 ```
@@ -73,7 +73,7 @@ ID into every database connection before executing queries:
 │      scoped.objects.list()                       │
 │                                                   │
 │  ┌─────────────────────────────────────────────┐ │
-│  │  PostgresBackend                             │ │
+│  │  SAPostgresBackend                             │ │
 │  │  1. Get connection from pool                 │ │
 │  │  2. SET app.current_principal_id = 'alice'   │ │
 │  │  3. Execute: SELECT * FROM scoped_objects    │ │
@@ -91,7 +91,7 @@ The backend uses two approaches depending on the context:
 **Explicit transactions** use `SET LOCAL`:
 
 ```python
-# PostgresBackend.transaction()
+# SAPostgresBackend.transaction()
 txn = backend.transaction()
 # Internally: SET LOCAL app.current_principal_id = 'alice'
 # SET LOCAL is scoped to the transaction — automatically reset on COMMIT/ROLLBACK
@@ -105,7 +105,7 @@ txn = backend.transaction()
 **Autocommit operations** use session-level `SET`:
 
 ```python
-# PostgresBackend.execute(), fetch_one(), fetch_all()
+# SAPostgresBackend.execute(), fetch_one(), fetch_all()
 # Internally:
 #   SET app.current_principal_id = 'alice'   (session-level)
 #   ... execute query ...
@@ -177,7 +177,7 @@ storage.
 
 ```python
 from scoped.storage.tenant_router import TenantRouter
-from scoped.storage.postgres import PostgresBackend
+from scoped.storage.sa_postgres import SASAPostgresBackend
 
 router = TenantRouter(
     tenant_resolver=my_tenant_resolver,
@@ -220,12 +220,11 @@ The factory creates a new storage backend for each tenant. It is called once
 per tenant (on first access) and the result is cached:
 
 ```python
-def make_backend(tenant_id: str) -> PostgresBackend:
+def make_backend(tenant_id: str) -> SAPostgresBackend:
     """Create a dedicated Postgres database connection for a tenant."""
-    return PostgresBackend(
+    return SAPostgresBackend(
         f"postgresql://app:password@db-host/{tenant_id}_db",
-        pool_min_size=2,
-        pool_max_size=10,
+        pool_size=5,
     )
 ```
 
@@ -273,12 +272,12 @@ When any storage operation is called on the router, it:
 
 ```python
 with scoped.as_principal(alice):
-    # Router resolves: alice.id -> "acme-corp" -> acme's PostgresBackend
+    # Router resolves: alice.id -> "acme-corp" -> acme's SAPostgresBackend
     scoped.objects.create("invoice", data={"amount": 500})
     # This INSERT goes to the acme-corp database
 
 with scoped.as_principal(bob):
-    # Router resolves: bob.id -> "globex-inc" -> globex's PostgresBackend
+    # Router resolves: bob.id -> "globex-inc" -> globex's SAPostgresBackend
     scoped.objects.create("invoice", data={"amount": 300})
     # This INSERT goes to the globex-inc database
 ```
@@ -305,16 +304,15 @@ tenant gets their own database AND row-level security within that database:
 
 ```python
 from scoped.storage.tenant_router import TenantRouter
-from scoped.storage.postgres import PostgresBackend
+from scoped.storage.sa_postgres import SASAPostgresBackend
 from scoped.storage.migrations.runner import MigrationRunner
 
-def make_rls_backend(tenant_id: str) -> PostgresBackend:
+def make_rls_backend(tenant_id: str) -> SAPostgresBackend:
     """Create an RLS-enabled backend for a tenant."""
-    backend = PostgresBackend(
+    backend = SAPostgresBackend(
         f"postgresql://app:password@db-host/{tenant_id}_db",
         enable_rls=True,
-        pool_min_size=2,
-        pool_max_size=10,
+        pool_size=5,
     )
     return backend  # Do NOT call initialize() — the router does it
 
@@ -346,11 +344,11 @@ Pass the `TenantRouter` as the `backend` parameter to `ScopedClient`:
 ```python
 import scoped
 from scoped.storage.tenant_router import TenantRouter
-from scoped.storage.postgres import PostgresBackend
+from scoped.storage.sa_postgres import SASAPostgresBackend
 
 router = TenantRouter(
     tenant_resolver=resolve_tenant,
-    backend_factory=lambda tid: PostgresBackend(
+    backend_factory=lambda tid: SAPostgresBackend(
         f"postgresql://app:pass@host/{tid}_db"
     ),
 )

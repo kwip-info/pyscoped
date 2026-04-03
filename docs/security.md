@@ -207,9 +207,9 @@ RLS requires two steps:
 1. **Enable the flag on the backend:**
 
 ```python
-from scoped.storage.postgres import PostgresBackend
+from scoped.storage.sa_postgres import SASAPostgresBackend
 
-backend = PostgresBackend(
+backend = SAPostgresBackend(
     "postgresql://user:pass@host/db",
     enable_rls=True,
 )
@@ -253,7 +253,7 @@ The backend uses two different approaches depending on the context:
 
 - **`SET LOCAL`** for explicit transactions. The variable is scoped to the
   transaction and automatically reset on commit or rollback. This is used in
-  `PostgresBackend.transaction()`.
+  `SAPostgresBackend.transaction()`.
 
 - **`SET`** (session-level) for autocommit operations. `SET LOCAL` is a no-op
   in autocommit mode, so the backend uses session-level `SET` and explicitly
@@ -300,7 +300,7 @@ from scoped.storage.tenant_router import TenantRouter
 
 router = TenantRouter(
     tenant_resolver=lambda principal_id: lookup_tenant(principal_id),
-    backend_factory=lambda tenant_id: PostgresBackend(
+    backend_factory=lambda tenant_id: SAPostgresBackend(
         f"postgresql://host/{tenant_id}_db", enable_rls=True
     ),
 )

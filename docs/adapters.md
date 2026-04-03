@@ -180,12 +180,12 @@ pip install pyscoped[fastapi]
 
 ```python
 from fastapi import FastAPI
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASASQLiteBackend
 from scoped.contrib.fastapi.middleware import ScopedContextMiddleware
 from scoped.contrib.fastapi.router import router as scoped_router
 
 # Initialize backend
-backend = SQLiteBackend("app.db")
+backend = SASQLiteBackend("app.db")
 backend.initialize()
 
 # Create app
@@ -356,7 +356,7 @@ scoped.init_app(app)
 
 On `init_app`, the extension:
 
-1. Creates a `SQLiteBackend` from configuration and calls `initialize()`.
+1. Creates a `SASQLiteBackend` from configuration and calls `initialize()`.
 2. Builds the full service set via `build_services()`.
 3. Registers `before_request` and `teardown_request` hooks for ScopedContext lifecycle.
 
@@ -457,10 +457,10 @@ This installs the [MCP SDK](https://github.com/modelcontextprotocol/python-sdk) 
 ### Basic Setup
 
 ```python
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASASQLiteBackend
 from scoped.contrib.mcp.server import create_scoped_server
 
-backend = SQLiteBackend("app.db")
+backend = SASQLiteBackend("app.db")
 backend.initialize()
 
 mcp = create_scoped_server(backend)
@@ -572,10 +572,10 @@ To use Scoped as an MCP server with Claude Desktop, add it to your configuration
 Where `myapp/mcp_server.py` is:
 
 ```python
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASASQLiteBackend
 from scoped.contrib.mcp.server import create_scoped_server
 
-backend = SQLiteBackend("scoped.db")
+backend = SASQLiteBackend("scoped.db")
 backend.initialize()
 
 server = create_scoped_server(backend)

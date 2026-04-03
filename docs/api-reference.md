@@ -102,15 +102,15 @@ class Metadata:
 ## Storage Backend
 
 ```
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend
 from scoped.storage.interface import StorageBackend, StorageTransaction
 ```
 
-### `SQLiteBackend`
+### `SASQLiteBackend`
 
 ```python
-class SQLiteBackend(StorageBackend):
-    def __init__(self, path: str = ":memory:", pragmas: dict[str, str] | None = None) -> None
+class SASQLiteBackend(StorageBackend):
+    def __init__(self, path: str = ":memory:") -> None
 ```
 
 | Method | Signature | Description |

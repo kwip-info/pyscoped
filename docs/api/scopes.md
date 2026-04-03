@@ -13,7 +13,7 @@ projection of objects into shared spaces.
 Access the namespace through the client:
 
 ```python
-from pyscoped import ScopedClient
+from scoped.client import ScopedClient
 
 client = ScopedClient(database_url="sqlite:///app.db")
 scopes = client.scopes
@@ -649,7 +649,7 @@ class ScopeProjection:
 ## Complete Example
 
 ```python
-from pyscoped import ScopedClient
+from scoped.client import ScopedClient
 
 with ScopedClient(database_url="sqlite:///app.db") as client:
     # Create principals

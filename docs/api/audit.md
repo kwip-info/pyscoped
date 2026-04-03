@@ -14,7 +14,7 @@ cryptographic hash linking it to the previous entry.
 Access the namespace through the client:
 
 ```python
-from pyscoped import ScopedClient
+from scoped.client import ScopedClient
 
 client = ScopedClient(database_url="sqlite:///app.db")
 audit = client.audit
@@ -168,7 +168,7 @@ A list of `TraceEntry` instances matching all provided filters.
 
 ```python
 from datetime import datetime, timedelta, timezone
-from pyscoped.audit import ActionType
+from scoped.types import ActionType
 
 # All object creations in the last 24 hours
 recent_creates = client.audit.query(
@@ -342,7 +342,7 @@ class ChainVerification:
 The `ActionType` enum defines all recognized audit actions.
 
 ```python
-from pyscoped.audit import ActionType
+from scoped.types import ActionType
 ```
 
 | Enum Value | String | Description |
@@ -378,8 +378,8 @@ from pyscoped.audit import ActionType
 
 ```python
 from datetime import datetime, timedelta, timezone
-from pyscoped import ScopedClient
-from pyscoped.audit import ActionType
+from scoped.client import ScopedClient
+from scoped.types import ActionType
 
 with ScopedClient(database_url="sqlite:///app.db") as client:
     # Set up some data to generate audit entries

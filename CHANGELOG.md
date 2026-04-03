@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.4 (2026-04-03)
+
+### Docs
+- **Deep documentation audit** — fixed 55+ stale references across 14 doc files:
+  - Replaced all `from pyscoped.*` imports with `from scoped.*` (the correct Python module name)
+  - Replaced all `import pyscoped` / `pyscoped.init()` with `import scoped` / `scoped.init()`
+  - Fixed `RuleDeniedError` → `AccessDeniedError` in objects API reference (exception never existed)
+  - Fixed `from scoped.audit import ActionType` → `from scoped.types import ActionType`
+  - Fixed `scoped.storage.tenant` → `scoped.storage.tenant_router` for TenantRouter import
+  - Replaced all `async def` signatures and `await` calls in storage API reference with sync equivalents (the entire storage layer is synchronous)
+  - Replaced `__aenter__`/`__aexit__` with `__enter__`/`__exit__` in StorageTransaction
+  - Updated all deprecated `SQLiteBackend` → `SASQLiteBackend` and `PostgresBackend` → `SAPostgresBackend` references in code examples across getting-started, multi-tenant, security, adapters, migrations, and API reference docs
+  - Updated constructor args from old `pool_min_size`/`pool_max_size` to `pool_size`/`max_overflow`
+  - Added deprecation notices for legacy backend sections in storage API reference
+
 ## 1.0.3 (2026-04-03)
 
 ### Docs

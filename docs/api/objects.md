@@ -14,7 +14,7 @@ projected into a scope they belong to.
 Access the namespace through the client:
 
 ```python
-from pyscoped import ScopedClient
+from scoped.client import ScopedClient
 
 client = ScopedClient(database_url="sqlite:///app.db")
 objects = client.objects
@@ -36,7 +36,7 @@ objects.create(
 ```
 
 Creates a new object and its initial version. Before the write is committed, any
-applicable DENY rules are evaluated; if a rule matches, `RuleDeniedError` is raised
+applicable DENY rules are evaluated; if a rule matches, `AccessDeniedError` is raised
 and the operation is rolled back.
 
 #### Parameters
@@ -57,7 +57,7 @@ its first version.
 
 | Exception | Condition |
 |---|---|
-| `RuleDeniedError` | A DENY rule blocks this principal from creating objects of this type. |
+| `AccessDeniedError` | A DENY rule blocks this principal from creating objects of this type. |
 | `ValidationError` | `object_type` is empty or `data` is not JSON-serializable. |
 
 #### Example
@@ -104,7 +104,7 @@ A list of `(ScopedObject, ObjectVersion)` tuples in the same order as `items`.
 
 | Exception | Condition |
 |---|---|
-| `RuleDeniedError` | A DENY rule blocks creation of any item in the batch. |
+| `AccessDeniedError` | A DENY rule blocks creation of any item in the batch. |
 | `ValidationError` | Any item is missing required keys or contains non-serializable data. |
 | `BatchError` | Wraps the underlying error with the index of the failing item. |
 
@@ -198,7 +198,7 @@ state and the version is the newly created record.
 | Exception | Condition |
 |---|---|
 | `ObjectNotFoundError` | The object does not exist or is not accessible to the principal. |
-| `RuleDeniedError` | A DENY rule blocks this principal from updating this object. |
+| `AccessDeniedError` | A DENY rule blocks this principal from updating this object. |
 
 #### Example
 
@@ -246,7 +246,7 @@ A `Tombstone` model instance.
 | Exception | Condition |
 |---|---|
 | `ObjectNotFoundError` | The object does not exist or is already deleted. |
-| `RuleDeniedError` | A DENY rule blocks deletion. |
+| `AccessDeniedError` | A DENY rule blocks deletion. |
 
 #### Example
 
@@ -359,11 +359,11 @@ for ver in history:
 
 Before every `create`, `update`, and `delete` operation, the objects namespace
 evaluates all DENY rules that match the acting principal, object type, and scope.
-If any rule matches, the operation is rejected with a `RuleDeniedError` and no data
+If any rule matches, the operation is rejected with a `AccessDeniedError` and no data
 is written.
 
 ```python
-from pyscoped.exceptions import RuleDeniedError
+from scoped.exceptions import AccessDeniedError
 
 try:
     client.objects.create(
@@ -371,7 +371,7 @@ try:
         data={"amount": 10000},
         owner_id=intern.id,
     )
-except RuleDeniedError as exc:
+except AccessDeniedError as exc:
     print(exc)
     # "DENY rule 'no-intern-financial' blocks create on 'financial_record'
     #  for principal 'intern-001'"
@@ -516,7 +516,7 @@ scoped.register_type("my_type", MyType)
 ## Complete Example
 
 ```python
-from pyscoped import ScopedClient
+from scoped.client import ScopedClient
 
 with ScopedClient(database_url="sqlite:///app.db") as client:
     admin = client.principals.create(display_name="Admin", kind="user")

@@ -1,6 +1,6 @@
 ---
 title: "Client & Initialization"
-description: "API reference for ScopedClient, the primary entry point for configuring and interacting with pyscoped."
+description: "API reference for ScopedClient, the primary entry point for configuring and interacting with scoped."
 category: "API Reference"
 ---
 
@@ -15,7 +15,7 @@ also use the module-level `init()` function for a simpler global-client pattern.
 ## ScopedClient
 
 ```python
-from pyscoped import ScopedClient
+from scoped.client import ScopedClient
 
 client = ScopedClient(
     database_url="sqlite:///app.db",
@@ -121,7 +121,7 @@ A context manager that yields the same `ScopedClient` with the principal bound.
 ### Example
 
 ```python
-from pyscoped import ScopedClient
+from scoped.client import ScopedClient
 
 client = ScopedClient(database_url="sqlite:///app.db")
 
@@ -209,7 +209,7 @@ Returns `True` if both sides are identical, `False` otherwise.
 ### Example
 
 ```python
-from pyscoped import ScopedClient, SyncConfig
+from scoped.client import ScopedClient, SyncConfig
 
 client = ScopedClient(
     database_url="sqlite:///local.db",
@@ -282,7 +282,7 @@ relationship = client.services.principal_service.create_relationship(
 ## Module-Level init Function
 
 ```python
-pyscoped.init(
+scoped.init(
     database_url: str | None = None,
     api_key: str | None = None,
     backend: StorageBackend | None = None,
@@ -291,7 +291,7 @@ pyscoped.init(
 ```
 
 Creates a `ScopedClient` and installs it as the global default. Subsequent access
-to `pyscoped.principals`, `pyscoped.objects`, and the other module-level namespace
+to `scoped.principals`, `scoped.objects`, and the other module-level namespace
 shortcuts will delegate to this client. The function is **thread-safe**; concurrent
 calls are serialized, and the first caller wins unless `force=True` is passed.
 
@@ -316,15 +316,15 @@ The newly created `ScopedClient` instance.
 ### Example
 
 ```python
-import pyscoped
+import scoped
 
-pyscoped.init(database_url="sqlite:///app.db")
+scoped.init(database_url="sqlite:///app.db")
 
 # Module-level access delegates to the global client
-user = pyscoped.principals.create(display_name="Alice", kind="user")
+user = scoped.principals.create(display_name="Alice", kind="user")
 
-with pyscoped.as_principal(user):
-    doc, v = pyscoped.objects.create(
+with scoped.as_principal(user):
+    doc, v = scoped.objects.create(
         object_type="note",
         data={"body": "Hello, world!"},
     )
@@ -334,28 +334,28 @@ with pyscoped.as_principal(user):
 
 ## Module-Level Namespace Access
 
-After calling `pyscoped.init()`, the following module-level attributes are available
+After calling `scoped.init()`, the following module-level attributes are available
 as convenient shortcuts:
 
 | Attribute | Equivalent |
 |---|---|
-| `pyscoped.principals` | `_global_client.principals` |
-| `pyscoped.objects` | `_global_client.objects` |
-| `pyscoped.scopes` | `_global_client.scopes` |
-| `pyscoped.audit` | `_global_client.audit` |
-| `pyscoped.secrets` | `_global_client.secrets` |
-| `pyscoped.as_principal(p)` | `_global_client.as_principal(p)` |
+| `scoped.principals` | `_global_client.principals` |
+| `scoped.objects` | `_global_client.objects` |
+| `scoped.scopes` | `_global_client.scopes` |
+| `scoped.audit` | `_global_client.audit` |
+| `scoped.secrets` | `_global_client.secrets` |
+| `scoped.as_principal(p)` | `_global_client.as_principal(p)` |
 
 Accessing any of these before calling `init()` raises `ClientNotInitializedError`.
 
 ```python
-import pyscoped
+import scoped
 
 # Raises ClientNotInitializedError
-# pyscoped.principals.list()
+# scoped.principals.list()
 
-pyscoped.init()
-pyscoped.principals.list()  # works
+scoped.init()
+scoped.principals.list()  # works
 ```
 
 ---
@@ -363,8 +363,8 @@ pyscoped.principals.list()  # works
 ## Full Lifecycle Example
 
 ```python
-import pyscoped
-from pyscoped import ScopedClient, SyncConfig
+import scoped
+from scoped.client import ScopedClient, SyncConfig
 
 # Option A: explicit client
 client = ScopedClient(
@@ -389,6 +389,6 @@ with client:
 # close() called automatically
 
 # Option B: global init
-pyscoped.init(database_url="sqlite:///local.db")
-pyscoped.principals.create(display_name="Bob", kind="user")
+scoped.init(database_url="sqlite:///local.db")
+scoped.principals.create(display_name="Bob", kind="user")
 ```

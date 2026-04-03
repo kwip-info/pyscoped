@@ -15,7 +15,7 @@ created by implementing the `StorageBackend` abstract class.
 ## StorageBackend (Abstract)
 
 ```python
-from pyscoped.storage import StorageBackend
+from scoped.storage import StorageBackend
 ```
 
 The base class that all storage backends must implement.
@@ -27,25 +27,25 @@ class StorageBackend(ABC):
     def dialect(self) -> str: ...
 
     @abstractmethod
-    async def initialize(self) -> None: ...
+    def initialize(self) -> None: ...
 
     @abstractmethod
     def transaction(self) -> StorageTransaction: ...
 
     @abstractmethod
-    async def execute(self, query: str, params: tuple = ()) -> None: ...
+    def execute(self, query: str, params: tuple = ()) -> Any: ...
 
     @abstractmethod
-    async def fetch_one(self, query: str, params: tuple = ()) -> dict | None: ...
+    def fetch_one(self, query: str, params: tuple = ()) -> dict | None: ...
 
     @abstractmethod
-    async def fetch_all(self, query: str, params: tuple = ()) -> list[dict]: ...
+    def fetch_all(self, query: str, params: tuple = ()) -> list[dict]: ...
 
     @abstractmethod
-    async def close(self) -> None: ...
+    def close(self) -> None: ...
 
     @abstractmethod
-    async def table_exists(self, table_name: str) -> bool: ...
+    def table_exists(self, table_name: str) -> bool: ...
 ```
 
 ### Methods
@@ -62,13 +62,13 @@ to emit dialect-appropriate SQL.
 
 | Backend | Dialect |
 |---|---|
-| `SQLiteBackend` | `"sqlite"` |
-| `PostgresBackend` | `"postgresql"` |
+| `SASQLiteBackend` | `"sqlite"` |
+| `SAPostgresBackend` | `"postgresql"` |
 
 #### initialize
 
 ```python
-async def initialize(self) -> None
+def initialize(self) -> None
 ```
 
 Performs one-time setup: creates tables, applies pending migrations, and configures
@@ -85,17 +85,17 @@ Returns a new `StorageTransaction` context manager. All operations within the
 transaction are atomic -- they either all commit or all roll back.
 
 ```python
-async with backend.transaction() as txn:
-    await txn.execute("INSERT INTO ...", (value,))
-    row = await txn.fetch_one("SELECT ...", (id,))
-    # auto-commits on successful exit
+with backend.transaction() as txn:
+    txn.execute("INSERT INTO ...", (value,))
+    row = txn.fetch_one("SELECT ...", (id,))
+    txn.commit()
 # auto-rolls back on exception
 ```
 
 #### execute
 
 ```python
-async def execute(self, query: str, params: tuple = ()) -> None
+def execute(self, query: str, params: tuple = ()) -> Any
 ```
 
 Executes a write query (INSERT, UPDATE, DELETE) outside of an explicit transaction.
@@ -109,7 +109,7 @@ The operation is auto-committed.
 #### fetch_one
 
 ```python
-async def fetch_one(self, query: str, params: tuple = ()) -> dict | None
+def fetch_one(self, query: str, params: tuple = ()) -> dict | None
 ```
 
 Executes a read query and returns the first row as a dictionary, or `None` if no
@@ -123,7 +123,7 @@ rows match.
 #### fetch_all
 
 ```python
-async def fetch_all(self, query: str, params: tuple = ()) -> list[dict]
+def fetch_all(self, query: str, params: tuple = ()) -> list[dict]
 ```
 
 Executes a read query and returns all matching rows as a list of dictionaries.
@@ -136,7 +136,7 @@ Executes a read query and returns all matching rows as a list of dictionaries.
 #### close
 
 ```python
-async def close(self) -> None
+def close(self) -> None
 ```
 
 Releases all resources held by the backend (file handles, connection pools). The
@@ -145,7 +145,7 @@ backend must not be used after calling `close()`.
 #### table_exists
 
 ```python
-async def table_exists(self, table_name: str) -> bool
+def table_exists(self, table_name: str) -> bool
 ```
 
 Returns `True` if the specified table exists in the database.
@@ -159,20 +159,21 @@ Returns `True` if the specified table exists in the database.
 ## StorageTransaction
 
 ```python
-from pyscoped.storage import StorageTransaction
+from scoped.storage import StorageTransaction
 ```
 
 A transaction context manager providing atomic, isolated database operations.
 
 ```python
 class StorageTransaction:
-    async def execute(self, query: str, params: tuple = ()) -> None: ...
-    async def fetch_one(self, query: str, params: tuple = ()) -> dict | None: ...
-    async def fetch_all(self, query: str, params: tuple = ()) -> list[dict]: ...
-    async def commit(self) -> None: ...
-    async def rollback(self) -> None: ...
-    async def __aenter__(self) -> StorageTransaction: ...
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None: ...
+    def execute(self, query: str, params: tuple = ()) -> Any: ...
+    def execute_many(self, query: str, params_seq: list[tuple]) -> None: ...
+    def fetch_one(self, query: str, params: tuple = ()) -> dict | None: ...
+    def fetch_all(self, query: str, params: tuple = ()) -> list[dict]: ...
+    def commit(self) -> None: ...
+    def rollback(self) -> None: ...
+    def __enter__(self) -> StorageTransaction: ...
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None: ...
 ```
 
 ### Methods
@@ -187,167 +188,40 @@ class StorageTransaction:
 
 ### Context Manager Protocol
 
-When used as an async context manager, the transaction auto-commits on successful
-exit and auto-rolls back if an exception propagates.
+When used as a context manager, the transaction auto-rolls back if an exception
+propagates. Callers are responsible for explicit `commit()`.
 
 ```python
-async with backend.transaction() as txn:
-    await txn.execute(
+with backend.transaction() as txn:
+    txn.execute(
         "INSERT INTO principals (id, display_name) VALUES (?, ?)",
         ("p-001", "Alice"),
     )
-    result = await txn.fetch_one(
+    result = txn.fetch_one(
         "SELECT * FROM principals WHERE id = ?", ("p-001",)
     )
-    # commits here
+    txn.commit()
 ```
 
 ---
 
-## SQLiteBackend
+## SQLiteBackend (deprecated)
 
-```python
-from pyscoped.storage.sqlite import SQLiteBackend
-```
+> **Deprecated since 0.7.0.** Use `SASQLiteBackend` instead.
 
-File-backed or in-memory SQLite storage. Suitable for development, testing, single-
-process applications, and embedded use cases.
-
-### Constructor
-
-```python
-SQLiteBackend(path: str = ":memory:")
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `path` | `str` | `":memory:"` | File path for the SQLite database. Use `":memory:"` for an in-memory database. |
-
-### Pragmas
-
-On initialization, the following SQLite pragmas are set for performance and
-reliability:
-
-| Pragma | Value | Purpose |
-|---|---|---|
-| `journal_mode` | `WAL` | Write-ahead logging for concurrent reads during writes. |
-| `synchronous` | `NORMAL` | Balance between durability and write performance. |
-| `foreign_keys` | `ON` | Enforce foreign key constraints. |
-| `busy_timeout` | `5000` | Wait up to 5 seconds for locks before returning SQLITE_BUSY. |
-| `cache_size` | `-64000` | 64 MB page cache. |
-
-### Example
-
-```python
-# In-memory (default)
-backend = SQLiteBackend()
-await backend.initialize()
-
-# File-backed
-backend = SQLiteBackend(path="/var/data/scoped.db")
-await backend.initialize()
-
-# Use with ScopedClient
-client = ScopedClient(database_url="sqlite:///app.db")
-# SQLiteBackend is created and initialized automatically
-
-# Or provide explicitly
-client = ScopedClient(backend=SQLiteBackend("/tmp/test.db"))
-```
+The legacy `SQLiteBackend` in `scoped.storage.sqlite` is still functional but emits
+a deprecation warning on import. See `SASQLiteBackend` below for the recommended
+replacement.
 
 ---
 
-## PostgresBackend
+## PostgresBackend (deprecated)
 
-```python
-from pyscoped.storage.postgres import PostgresBackend
-```
+> **Deprecated since 0.7.0.** Use `SAPostgresBackend` instead.
 
-Production-grade PostgreSQL storage with connection pooling and optional row-level
-security (RLS).
-
-### Constructor
-
-```python
-PostgresBackend(
-    dsn: str,
-    pool_min_size: int = 2,
-    pool_max_size: int = 10,
-    pool_timeout: float = 30.0,
-    enable_rls: bool = False,
-)
-```
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `dsn` | `str` | *required* | PostgreSQL connection string (e.g. `"postgresql://user:pass@host:5432/db"`). |
-| `pool_min_size` | `int` | `2` | Minimum number of connections in the pool. |
-| `pool_max_size` | `int` | `10` | Maximum number of connections in the pool. |
-| `pool_timeout` | `float` | `30.0` | Maximum seconds to wait for a connection from the pool before raising `PoolTimeoutError`. |
-| `enable_rls` | `bool` | `False` | Enable PostgreSQL row-level security policies. When `True`, the backend creates RLS policies that enforce principal-based isolation at the database level. |
-
-### Connection Pooling
-
-The `PostgresBackend` maintains a connection pool backed by `asyncpg`. Connections
-are acquired from the pool for each operation and returned automatically.
-
-```python
-backend = PostgresBackend(
-    dsn="postgresql://scoped:secret@db:5432/scoped_prod",
-    pool_min_size=5,
-    pool_max_size=20,
-    pool_timeout=10.0,
-)
-await backend.initialize()
-
-# Pool stats (via backend internals)
-print(backend._pool.get_size())      # current pool size
-print(backend._pool.get_idle_size()) # idle connections
-```
-
-### Row-Level Security (RLS)
-
-When `enable_rls=True`, the backend creates PostgreSQL RLS policies on all pyscoped
-tables. Each connection sets a session variable (`scoped.current_principal`) that the
-RLS policies reference, ensuring that queries only return rows the current principal
-is authorized to see.
-
-```python
-backend = PostgresBackend(
-    dsn="postgresql://scoped:secret@db:5432/scoped_prod",
-    enable_rls=True,
-)
-await backend.initialize()
-# RLS policies are now active
-
-# ScopedClient handles setting the session variable automatically
-client = ScopedClient(backend=backend)
-with client.as_principal(alice):
-    # SQL queries include: SET scoped.current_principal = 'alice-id'
-    docs = client.objects.list()  # only Alice's visible objects
-```
-
-### Example
-
-```python
-from pyscoped import ScopedClient
-from pyscoped.storage.postgres import PostgresBackend
-
-# Via URL (backend created automatically)
-client = ScopedClient(
-    database_url="postgresql://scoped:secret@localhost:5432/myapp",
-)
-
-# Explicit backend with custom pool settings
-backend = PostgresBackend(
-    dsn="postgresql://scoped:secret@db.internal:5432/prod",
-    pool_min_size=5,
-    pool_max_size=50,
-    pool_timeout=15.0,
-    enable_rls=True,
-)
-client = ScopedClient(backend=backend)
-```
+The legacy `PostgresBackend` in `scoped.storage.postgres` is still functional but
+emits a deprecation warning on import. See `SAPostgresBackend` below for the
+recommended replacement.
 
 ---
 
@@ -472,7 +346,7 @@ parameter should match `backend.dialect` (`"sqlite"`, `"postgres"`, or `"generic
 ## TenantRouter
 
 ```python
-from pyscoped.storage.tenant import TenantRouter
+from scoped.storage.tenant_router import TenantRouter
 ```
 
 Multi-tenant storage router that maps tenant identifiers to isolated backend
@@ -500,7 +374,7 @@ TenantRouter(
 #### provision_tenant
 
 ```python
-async def provision_tenant(self, tenant_id: str) -> StorageBackend
+def provision_tenant(self, tenant_id: str) -> StorageBackend
 ```
 
 Creates and initializes a backend for the given tenant. The backend is cached for
@@ -513,7 +387,7 @@ subsequent use. If the tenant already exists, the existing backend is returned.
 #### list_tenants
 
 ```python
-async def list_tenants(self) -> list[str]
+def list_tenants(self) -> list[str]
 ```
 
 Returns a list of all provisioned tenant IDs.
@@ -521,7 +395,7 @@ Returns a list of all provisioned tenant IDs.
 #### teardown_tenant
 
 ```python
-async def teardown_tenant(self, tenant_id: str) -> None
+def teardown_tenant(self, tenant_id: str) -> None
 ```
 
 Closes and removes the backend for the given tenant. The tenant's data is **not**
@@ -534,16 +408,16 @@ deleted from the underlying storage; this only releases the in-process resources
 ### Example
 
 ```python
-from pyscoped.storage.tenant import TenantRouter
-from pyscoped.storage.postgres import PostgresBackend
+from scoped.storage.tenant_router import TenantRouter
+from scoped.storage.sa_postgres import SAPostgresBackend
 
 def resolve_tenant(hostname: str) -> str:
     # Map subdomain to tenant ID
     return hostname.split(".")[0]
 
-def create_backend(tenant_id: str) -> PostgresBackend:
-    return PostgresBackend(
-        dsn=f"postgresql://scoped:secret@db:5432/tenant_{tenant_id}"
+def create_backend(tenant_id: str) -> SAPostgresBackend:
+    return SAPostgresBackend(
+        f"postgresql://scoped:secret@db:5432/tenant_{tenant_id}"
     )
 
 router = TenantRouter(
@@ -553,18 +427,18 @@ router = TenantRouter(
 )
 
 # Provision tenants
-await router.provision_tenant("acme")
-await router.provision_tenant("globex")
+router.provision_tenant("acme")
+router.provision_tenant("globex")
 
-tenants = await router.list_tenants()
+tenants = router.list_tenants()
 print(tenants)  # ["acme", "globex"]
 
 # Use with ScopedClient
-acme_backend = await router.provision_tenant("acme")
+acme_backend = router.provision_tenant("acme")
 acme_client = ScopedClient(backend=acme_backend)
 
 # Teardown
-await router.teardown_tenant("globex")
+router.teardown_tenant("globex")
 ```
 
 ---
@@ -572,7 +446,7 @@ await router.teardown_tenant("globex")
 ## Migration System
 
 ```python
-from pyscoped.storage.migrations import MigrationRunner
+from scoped.storage.migrations import MigrationRunner
 ```
 
 The migration system manages database schema evolution. Migrations are Python files
@@ -593,7 +467,7 @@ MigrationRunner(backend: StorageBackend)
 #### discover
 
 ```python
-async def discover(self, path: str | None = None) -> list[Migration]
+def discover(self, package_path: str | None = None) -> int
 ```
 
 Scans the migrations directory and returns all discovered migration files in order.
@@ -602,16 +476,16 @@ are appended.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `path` | `str \| None` | `None` | Additional directory to scan for custom migration files. |
+| `package_path` | `str \| None` | `None` | Dotted Python package path to scan for custom migrations. |
 
 #### Returns
 
-A list of `Migration` objects sorted by version number.
+The number of migrations discovered.
 
 #### apply_all
 
 ```python
-async def apply_all(self) -> list[str]
+def apply_all(self) -> list[str]
 ```
 
 Applies all pending (unapplied) migrations in order. Returns a list of applied
@@ -625,7 +499,7 @@ A list of migration ID strings that were applied.
 
 ```python
 runner = MigrationRunner(backend)
-applied = await runner.apply_all()
+applied = runner.apply_all()
 print(f"Applied {len(applied)} migrations: {applied}")
 # Applied 3 migrations: ['001_initial', '002_add_secrets', '003_add_rls']
 ```
@@ -633,7 +507,7 @@ print(f"Applied {len(applied)} migrations: {applied}")
 #### rollback_last
 
 ```python
-async def rollback_last(self) -> str | None
+def rollback_last(self) -> str | None
 ```
 
 Rolls back the most recently applied migration. Returns the migration ID that was
@@ -646,7 +520,7 @@ The rolled-back migration ID string, or `None`.
 #### Example
 
 ```python
-rolled_back = await runner.rollback_last()
+rolled_back = runner.rollback_last()
 if rolled_back:
     print(f"Rolled back: {rolled_back}")
 else:
@@ -656,7 +530,7 @@ else:
 #### get_status
 
 ```python
-async def get_status(self) -> list[MigrationStatus]
+def get_status(self) -> list[MigrationStatus]
 ```
 
 Returns the status of all known migrations (applied and pending).
@@ -677,7 +551,7 @@ class MigrationStatus:
 #### Example
 
 ```python
-statuses = await runner.get_status()
+statuses = runner.get_status()
 for s in statuses:
     status_label = "applied" if s.applied else "pending"
     print(f"  [{status_label}] {s.id}: {s.name}")
@@ -691,56 +565,52 @@ for s in statuses:
 ## Complete Example
 
 ```python
-import asyncio
-from pyscoped import ScopedClient
-from pyscoped.storage.sqlite import SQLiteBackend
-from pyscoped.storage.postgres import PostgresBackend
-from pyscoped.storage.migrations import MigrationRunner
+from scoped.client import ScopedClient
+from scoped.storage.sa_sqlite import SASQLiteBackend
+from scoped.storage.sa_postgres import SAPostgresBackend
+from scoped.storage.migrations import MigrationRunner
 
-async def main():
-    # --- SQLite for development ---
-    sqlite_backend = SQLiteBackend("/tmp/dev.db")
-    await sqlite_backend.initialize()
+# --- SQLite for development ---
+sqlite_backend = SASQLiteBackend("/tmp/dev.db")
+sqlite_backend.initialize()
 
-    assert sqlite_backend.dialect == "sqlite"
-    assert await sqlite_backend.table_exists("principals")
+assert sqlite_backend.dialect == "sqlite"
+assert sqlite_backend.table_exists("principals")
 
-    async with sqlite_backend.transaction() as txn:
-        await txn.execute(
-            "INSERT INTO principals (id, display_name, kind) VALUES (?, ?, ?)",
-            ("p-1", "Dev User", "user"),
-        )
-        row = await txn.fetch_one(
-            "SELECT * FROM principals WHERE id = ?", ("p-1",)
-        )
-        print(row["display_name"])  # "Dev User"
-
-    await sqlite_backend.close()
-
-    # --- PostgreSQL for production ---
-    pg_backend = PostgresBackend(
-        dsn="postgresql://scoped:secret@localhost:5432/prod",
-        pool_min_size=5,
-        pool_max_size=20,
-        enable_rls=True,
+with sqlite_backend.transaction() as txn:
+    txn.execute(
+        "INSERT INTO principals (id, display_name, kind) VALUES (?, ?, ?)",
+        ("p-1", "Dev User", "user"),
     )
-    await pg_backend.initialize()
+    row = txn.fetch_one(
+        "SELECT * FROM principals WHERE id = ?", ("p-1",)
+    )
+    print(row["display_name"])  # "Dev User"
+    txn.commit()
 
-    # Check migration status
-    runner = MigrationRunner(pg_backend)
-    statuses = await runner.get_status()
-    pending = [s for s in statuses if not s.applied]
-    if pending:
-        applied = await runner.apply_all()
-        print(f"Applied {len(applied)} migrations")
+sqlite_backend.close()
 
-    # Use with ScopedClient
-    client = ScopedClient(backend=pg_backend)
-    with client:
-        admin = client.principals.create(display_name="Admin", kind="user")
-        print(f"Created principal: {admin.id}")
+# --- PostgreSQL for production ---
+pg_backend = SAPostgresBackend(
+    "postgresql://scoped:secret@localhost:5432/prod",
+    pool_size=10,
+    enable_rls=True,
+)
+pg_backend.initialize()
 
-    await pg_backend.close()
+# Check migration status
+runner = MigrationRunner(pg_backend)
+statuses = runner.get_status()
+pending = [s for s in statuses if not s.applied]
+if pending:
+    applied = runner.apply_all()
+    print(f"Applied {len(applied)} migrations")
 
-asyncio.run(main())
+# Use with ScopedClient
+client = ScopedClient(backend=pg_backend)
+with client.as_principal(admin):
+    admin = client.principals.create(display_name="Admin", kind="user")
+    print(f"Created principal: {admin.id}")
+
+pg_backend.close()
 ```

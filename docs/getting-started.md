@@ -327,7 +327,7 @@ client = scoped.init(
 )
 ```
 
-This creates a PostgresBackend with psycopg v3 and a managed connection pool.
+This creates an SAPostgresBackend with psycopg v3 and a managed connection pool.
 The full schema is created automatically on first init.
 
 ### Connection pool tuning
@@ -335,12 +335,12 @@ The full schema is created automatically on first init.
 For advanced control, construct the backend directly:
 
 ```python
-from scoped.storage.postgres import PostgresBackend
+from scoped.storage.sa_postgres import SAPostgresBackend
 
-backend = PostgresBackend(
+backend = SAPostgresBackend(
     "postgresql://user:password@localhost:5432/myapp",
-    pool_min_size=5,
-    pool_max_size=20,
+    pool_size=10,
+    max_overflow=10,
     pool_timeout=30.0,
     enable_rls=True,   # Row-level security (see Security docs)
 )

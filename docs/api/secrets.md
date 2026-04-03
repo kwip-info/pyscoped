@@ -14,7 +14,7 @@ through opaque reference tokens.
 Access the namespace through the client:
 
 ```python
-from pyscoped import ScopedClient
+from scoped.client import ScopedClient
 
 client = ScopedClient(database_url="sqlite:///app.db")
 secrets = client.secrets
@@ -398,7 +398,7 @@ class SecretRef:
 
 ```python
 from datetime import datetime, timedelta, timezone
-from pyscoped import ScopedClient
+from scoped.client import ScopedClient
 
 with ScopedClient(database_url="sqlite:///app.db") as client:
     # Create principals

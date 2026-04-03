@@ -13,19 +13,19 @@ making this namespace foundational to the permission and audit model.
 Access the namespace through the client:
 
 ```python
-from pyscoped import ScopedClient
+from scoped.client import ScopedClient
 
 client = ScopedClient(database_url="sqlite:///app.db")
 principals = client.principals
 ```
 
-Or through the module-level shortcut after calling `pyscoped.init()`:
+Or through the module-level shortcut after calling `scoped.init()`:
 
 ```python
-import pyscoped
+import scoped
 
-pyscoped.init(database_url="sqlite:///app.db")
-principals = pyscoped.principals
+scoped.init(database_url="sqlite:///app.db")
+principals = scoped.principals
 ```
 
 ---
@@ -377,7 +377,7 @@ full attribution for compliance and debugging.
 ## Complete Example
 
 ```python
-from pyscoped import ScopedClient
+from scoped.client import ScopedClient
 
 with ScopedClient(database_url="sqlite:///app.db") as client:
     # Create principals of different kinds

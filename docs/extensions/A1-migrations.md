@@ -61,9 +61,9 @@ scoped/storage/
 
 ```python
 from scoped.storage.migrations.runner import MigrationRunner
-from scoped.storage.sqlite import SQLiteBackend
+from scoped.storage.sa_sqlite import SASQLiteBackend
 
-backend = SQLiteBackend("my.db")
+backend = SASQLiteBackend("my.db")
 runner = MigrationRunner(backend)
 runner.apply_all()
 print(runner.get_current_version())
