@@ -12,6 +12,8 @@ env/
 .pytest_cache/
 .ruff_cache/
 *.db
+*.db-shm
+*.db-wal
 *.sqlite3
 .DS_Store
 uv.lock
