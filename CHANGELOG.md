@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.2 (2026-04-03)
+
+### Fixed
+- **Django backend initialization** — `_initialize_backend()` now catches exceptions during `AppConfig.ready()`, tolerating fresh databases where tables don't exist yet (e.g., first Heroku deploy before migrations run)
+
 ## 1.0.1 (2026-04-02)
 
 ### Fixed

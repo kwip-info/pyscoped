@@ -66,10 +66,17 @@ def reset_backend():
 
 
 def _initialize_backend():
-    """Called from AppConfig.ready() — create Scoped tables and initialize client."""
-    backend = get_backend()
-    backend.initialize()
-    get_client()
+    """Called from AppConfig.ready() — create Scoped tables and initialize client.
+
+    Tolerates database errors during initial migration when tables
+    don't exist yet. The backend will be initialized on first use.
+    """
+    try:
+        backend = get_backend()
+        backend.initialize()
+        get_client()
+    except Exception:
+        pass
 
 
 # Lazy imports for convenience — avoids circular import at module load time.
