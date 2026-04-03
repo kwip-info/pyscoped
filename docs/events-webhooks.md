@@ -247,7 +247,7 @@ Nested `data` fields are accessible with bracket notation:
 A complete example that wires the event bus to both webhooks and notifications:
 
 ```python
-from scoped import Client
+from scoped.client import ScopedClient
 from scoped.events import (
     EventBus,
     EventType,
@@ -256,7 +256,7 @@ from scoped.events import (
     WebhookDelivery,
 )
 
-client = Client()
+client = ScopedClient()
 storage = client.storage
 
 bus = EventBus(backend=storage)

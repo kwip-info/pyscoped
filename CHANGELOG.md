@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.3 (2026-04-03)
+
+### Docs
+- Fixed "zero runtime dependencies" claims — pyscoped requires pydantic and sqlalchemy as core dependencies
+- Fixed `pip install scoped[django]` → `pip install pyscoped[django]` in API reference
+- Fixed `from scoped import Client` → `from scoped.client import ScopedClient` across 5 doc files (scheduling, operations, events-webhooks, connectors, testing)
+- Fixed `from scoped import current_client` → `scoped.scopes.list()` in testing docs
+- Fixed `from scoped import ScopedContext` / `Principal` → correct import paths in FastAPI docs
+- Fixed OTel import path `scoped.telemetry` → `scoped.contrib.otel` in operations docs
+
 ## 1.0.2 (2026-04-03)
 
 ### Fixed

@@ -1376,7 +1376,7 @@ Imports create new objects with new IDs. All imported objects are owned by the i
 
 ## Framework Adapters
 
-All adapters are optional. Install with extras: `pip install scoped[django]`, etc.
+All adapters are optional. Install with extras: `pip install pyscoped[django]`, etc.
 
 ### Django (`scoped.contrib.django`)
 

@@ -275,7 +275,7 @@ mcp.run()
 
 ## Storage
 
-The default backend is SQLite (zero dependencies, included). PostgreSQL is supported for production via `psycopg` v3 with connection pooling:
+The default backend is SQLite (no additional dependencies beyond pydantic and sqlalchemy). PostgreSQL is supported for production via `psycopg` v3 with connection pooling:
 
 ```bash
 pip install pyscoped[postgres]

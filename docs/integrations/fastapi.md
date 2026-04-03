@@ -155,7 +155,7 @@ Returns the current `ScopedContext` for the request.
 
 ```python
 from scoped.contrib.fastapi.dependencies import get_context
-from scoped import ScopedContext
+from scoped.identity.context import ScopedContext
 
 
 @app.get("/debug/context")
@@ -172,7 +172,7 @@ Returns the resolved principal object for the current request.
 
 ```python
 from scoped.contrib.fastapi.dependencies import get_principal
-from scoped import Principal
+from scoped.identity.principal import Principal
 
 
 @app.get("/me")

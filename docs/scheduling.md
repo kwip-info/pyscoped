@@ -250,7 +250,7 @@ as `FAILED` with an "unknown action_type" error.
 
 ```python
 from datetime import datetime, timezone
-from scoped import Client
+from scoped.client import ScopedClient
 from scoped.scheduling import (
     JobQueue,
     JobState,
@@ -258,7 +258,7 @@ from scoped.scheduling import (
     process_due_actions,
 )
 
-client = Client()
+client = ScopedClient()
 storage = client.storage
 
 # --- Setup ---

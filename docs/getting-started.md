@@ -16,7 +16,8 @@ lines of code.
 ## 1. Installation
 
 pyscoped is published on PyPI and imported as `scoped`. The core package has
-zero runtime dependencies — SQLite ships with Python.
+minimal runtime dependencies (pydantic and sqlalchemy). The default SQLite
+backend requires no additional packages — SQLite ships with Python.
 
 ```bash
 pip install pyscoped

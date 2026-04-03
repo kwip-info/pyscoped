@@ -260,10 +260,10 @@ schema_agreement = fp.negotiate_schema(
 ## End-to-end example
 
 ```python
-from scoped import Client
+from scoped.client import ScopedClient
 from scoped.connectors import ConnectorManager, FederationProtocol, PolicyType
 
-client = Client()
+client = ScopedClient()
 storage = client.storage
 cm = ConnectorManager(backend=storage)
 

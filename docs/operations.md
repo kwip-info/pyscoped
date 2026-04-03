@@ -221,10 +221,10 @@ instruments 21 core operations with spans and attributes.
 ### Enabling instrumentation
 
 ```python
-from scoped import Client
-from scoped.telemetry import instrument
+from scoped.client import ScopedClient
+from scoped.contrib.otel import instrument
 
-client = Client()
+client = ScopedClient()
 instrument(client)
 ```
 

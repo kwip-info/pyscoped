@@ -235,10 +235,10 @@ are maintained.
 
 ```python
 def test_with_fixtures(sqlite_backend):
-    from scoped import Client
+    from scoped.client import ScopedClient
     from scoped.testing.factory import ScopedFactory
 
-    client = Client(backend=sqlite_backend)
+    client = ScopedClient(backend=sqlite_backend)
     factory = ScopedFactory(client)
 
     scope = factory.scope(name="fixture-scope")
@@ -327,9 +327,9 @@ app.add_middleware(ScopedMiddleware, backend=sqlite_backend)
 
 @app.get("/scopes")
 def list_scopes():
-    from scoped import current_client
+    import scoped
 
-    return current_client().list_scopes()
+    return scoped.scopes.list()
 
 
 def test_list_scopes(sqlite_backend):
@@ -350,10 +350,10 @@ import pytest
 
 
 def test_deny_rule(sqlite_backend):
-    from scoped import Client
+    from scoped.client import ScopedClient
     from scoped.testing.factory import ScopedFactory
 
-    client = Client(backend=sqlite_backend)
+    client = ScopedClient(backend=sqlite_backend)
     factory = ScopedFactory(client)
 
     scope = factory.scope()
@@ -383,10 +383,10 @@ Verify that the audit chain maintains integrity after a sequence of operations:
 
 ```python
 def test_audit_chain_integrity(sqlite_backend):
-    from scoped import Client
+    from scoped.client import ScopedClient
     from scoped.testing.factory import ScopedFactory
 
-    client = Client(backend=sqlite_backend)
+    client = ScopedClient(backend=sqlite_backend)
     factory = ScopedFactory(client)
 
     scope = factory.scope()
