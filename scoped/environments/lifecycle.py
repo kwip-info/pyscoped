@@ -13,11 +13,17 @@ from typing import Any
 import sqlalchemy as sa
 
 from scoped.exceptions import (
+    AccessDeniedError,
     EnvironmentNotFoundError,
     EnvironmentStateError,
 )
 from scoped.storage._query import compile_for
-from scoped.storage._schema import environments, environment_templates
+from scoped.storage._schema import (
+    environment_objects,
+    environment_templates,
+    environments,
+    scoped_objects,
+)
 from scoped.storage.interface import StorageBackend
 from scoped.tenancy.lifecycle import ScopeLifecycle
 from scoped.types import ActionType, generate_id, now_utc
@@ -97,7 +103,12 @@ class EnvironmentLifecycle:
             metadata_json=json.dumps(meta),
         )
         sql, params = compile_for(stmt, self._backend.dialect)
-        self._backend.execute(sql, params)
+        try:
+            self._backend.execute(sql, params)
+        except Exception:
+            # Clean up orphaned scope if environment insert fails
+            self._scope_lifecycle.archive_scope(scope.id, archived_by=owner_id)
+            raise
 
         self._trace(
             actor_id=owner_id,
@@ -139,15 +150,37 @@ class EnvironmentLifecycle:
         return env
 
     def discard(self, env_id: str, *, actor_id: str) -> Environment:
-        """Discard the environment — archive its scope and contents.
+        """Discard the environment — archive its scope, tombstone created objects.
 
         Valid from COMPLETED or PROMOTED states.
+
+        Objects that were *created* inside the environment are
+        tombstoned (``lifecycle='ARCHIVED'``).  Projected objects are
+        left untouched since they belong to other contexts.
         """
+        # Read current state before transition so we can revert on failure
+        prev_env = self.get_or_raise(env_id)
+        prev_state = prev_env.state
+
         env = self._transition(env_id, EnvironmentState.DISCARDED, actor_id=actor_id)
 
-        # Archive the environment's scope (which archives memberships + projections)
-        if env.scope_id:
-            self._scope_lifecycle.archive_scope(env.scope_id, archived_by=actor_id)
+        try:
+            # Tombstone objects that were created inside this environment
+            self._tombstone_created_objects(env_id)
+
+            # Archive the environment's scope (which archives memberships + projections)
+            if env.scope_id:
+                self._scope_lifecycle.archive_scope(env.scope_id, archived_by=actor_id)
+        except Exception:
+            # Revert state transition on failure
+            stmt = (
+                sa.update(environments)
+                .where(environments.c.id == env_id)
+                .values(state=prev_state.value)
+            )
+            sql, params = compile_for(stmt, self._backend.dialect)
+            self._backend.execute(sql, params)
+            raise
 
         return env
 
@@ -289,6 +322,42 @@ class EnvironmentLifecycle:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _tombstone_created_objects(self, env_id: str) -> None:
+        """Archive all objects that were created inside the environment."""
+        stmt = (
+            sa.select(environment_objects.c.object_id)
+            .where(
+                environment_objects.c.environment_id == env_id,
+                environment_objects.c.origin == "created",
+            )
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        rows = self._backend.fetch_all(sql, params)
+
+        for row in rows:
+            upd = (
+                sa.update(scoped_objects)
+                .where(
+                    scoped_objects.c.id == row["object_id"],
+                    scoped_objects.c.lifecycle != "ARCHIVED",
+                )
+                .values(lifecycle="ARCHIVED")
+            )
+            sql, params = compile_for(upd, self._backend.dialect)
+            self._backend.execute(sql, params)
+
+    def _require_owner(self, env: Environment, actor_id: str) -> None:
+        """Raise if the actor is not the environment owner."""
+        if env.owner_id != actor_id:
+            raise AccessDeniedError(
+                f"Principal '{actor_id}' is not the owner of environment '{env.id}'",
+                context={
+                    "environment_id": env.id,
+                    "actor_id": actor_id,
+                    "owner_id": env.owner_id,
+                },
+            )
+
     def _transition(
         self,
         env_id: str,
@@ -298,6 +367,7 @@ class EnvironmentLifecycle:
     ) -> Environment:
         """Validate and execute a state transition."""
         env = self.get_or_raise(env_id)
+        self._require_owner(env, actor_id)
         before = env.snapshot()
 
         if not env.can_transition_to(target):

@@ -11,13 +11,14 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from scoped.exceptions import EnvironmentStateError
+from scoped.exceptions import AccessDeniedError, EnvironmentStateError
 from scoped.storage._query import compile_for
 from scoped.storage._schema import environment_objects, environments
 from scoped.storage.interface import StorageBackend
-from scoped.types import generate_id, now_utc
+from scoped.types import ActionType, generate_id, now_utc
 
 from scoped.environments.models import (
+    Environment,
     EnvironmentObject,
     EnvironmentState,
     ObjectOrigin,
@@ -31,8 +32,14 @@ from scoped._stability import experimental
 class EnvironmentContainer:
     """Manages the set of objects within an environment."""
 
-    def __init__(self, backend: StorageBackend) -> None:
+    def __init__(
+        self,
+        backend: StorageBackend,
+        *,
+        audit_writer: Any | None = None,
+    ) -> None:
         self._backend = backend
+        self._audit = audit_writer
 
     # ------------------------------------------------------------------
     # Add objects
@@ -43,14 +50,19 @@ class EnvironmentContainer:
         env_id: str,
         object_id: str,
         *,
+        actor_id: str | None = None,
         origin: ObjectOrigin = ObjectOrigin.CREATED,
     ) -> EnvironmentObject:
         """Track an object in the environment.
 
         Raises :class:`EnvironmentStateError` if the environment is
         not in an ACTIVE state.
+        Raises :class:`AccessDeniedError` if *actor_id* is not the
+        environment owner.
         """
-        self._require_active(env_id)
+        env = self._require_active(env_id)
+        if actor_id is not None:
+            self._require_owner(env, actor_id)
         ts = now_utc()
         eo_id = generate_id()
 
@@ -69,24 +81,55 @@ class EnvironmentContainer:
         )
         sql, params = compile_for(stmt, self._backend.dialect)
         self._backend.execute(sql, params)
+
+        if self._audit and actor_id:
+            self._audit.record(
+                actor_id=actor_id,
+                action=ActionType.LIFECYCLE_CHANGE,
+                target_type="environment_object",
+                target_id=eo.id,
+                scope_id=env.scope_id,
+                after_state=eo.snapshot(),
+                metadata={"origin": origin.value},
+            )
+
         return eo
 
-    def project_in(self, env_id: str, object_id: str) -> EnvironmentObject:
+    def project_in(
+        self,
+        env_id: str,
+        object_id: str,
+        *,
+        actor_id: str | None = None,
+    ) -> EnvironmentObject:
         """Project an external object into the environment (read-only reference)."""
-        return self.add_object(env_id, object_id, origin=ObjectOrigin.PROJECTED)
+        return self.add_object(
+            env_id, object_id, actor_id=actor_id, origin=ObjectOrigin.PROJECTED,
+        )
 
     # ------------------------------------------------------------------
     # Remove objects
     # ------------------------------------------------------------------
 
-    def remove_object(self, env_id: str, object_id: str) -> bool:
+    def remove_object(
+        self,
+        env_id: str,
+        object_id: str,
+        *,
+        actor_id: str | None = None,
+    ) -> bool:
         """Remove an object from the environment.
 
         Returns ``True`` if the object was removed, ``False`` if it
         was not in the environment.
         """
+        if actor_id is not None:
+            env = self._get_env(env_id)
+            if env is not None:
+                self._require_owner(env, actor_id)
+
         stmt = (
-            sa.select(environment_objects.c.id)
+            sa.select(environment_objects)
             .where(
                 environment_objects.c.environment_id == env_id,
                 environment_objects.c.object_id == object_id,
@@ -96,15 +139,33 @@ class EnvironmentContainer:
         row = self._backend.fetch_one(sql, params)
         if row is None:
             return False
-        stmt = (
+
+        before_state = env_object_from_row(row).snapshot()
+
+        del_stmt = (
             sa.delete(environment_objects)
             .where(
                 environment_objects.c.environment_id == env_id,
                 environment_objects.c.object_id == object_id,
             )
         )
-        sql, params = compile_for(stmt, self._backend.dialect)
+        sql, params = compile_for(del_stmt, self._backend.dialect)
         self._backend.execute(sql, params)
+
+        if self._audit and actor_id:
+            scope_id = None
+            env = self._get_env(env_id)
+            if env is not None:
+                scope_id = env.scope_id
+            self._audit.record(
+                actor_id=actor_id,
+                action=ActionType.LIFECYCLE_CHANGE,
+                target_type="environment_object",
+                target_id=row["id"],
+                scope_id=scope_id,
+                before_state=before_state,
+            )
+
         return True
 
     # ------------------------------------------------------------------
@@ -185,20 +246,36 @@ class EnvironmentContainer:
     # Internal
     # ------------------------------------------------------------------
 
-    def _require_active(self, env_id: str) -> None:
-        """Raise if environment is not active."""
-        stmt = sa.select(environments.c.state).where(environments.c.id == env_id)
+    def _get_env(self, env_id: str) -> Environment | None:
+        stmt = sa.select(environments).where(environments.c.id == env_id)
         sql, params = compile_for(stmt, self._backend.dialect)
         row = self._backend.fetch_one(sql, params)
-        if row is None:
+        return environment_from_row(row) if row else None
+
+    @staticmethod
+    def _require_owner(env: Environment, actor_id: str) -> None:
+        if env.owner_id != actor_id:
+            raise AccessDeniedError(
+                f"Principal '{actor_id}' is not the owner of environment '{env.id}'",
+                context={
+                    "environment_id": env.id,
+                    "actor_id": actor_id,
+                    "owner_id": env.owner_id,
+                },
+            )
+
+    def _require_active(self, env_id: str) -> Environment:
+        """Raise if environment is not active. Returns the environment."""
+        env = self._get_env(env_id)
+        if env is None:
             from scoped.exceptions import EnvironmentNotFoundError
             raise EnvironmentNotFoundError(
                 f"Environment '{env_id}' not found",
                 context={"environment_id": env_id},
             )
-        state = EnvironmentState(row["state"])
-        if state != EnvironmentState.ACTIVE:
+        if env.state != EnvironmentState.ACTIVE:
             raise EnvironmentStateError(
-                f"Environment is '{state.value}', must be 'active' to add objects",
-                context={"environment_id": env_id, "state": state.value},
+                f"Environment is '{env.state.value}', must be 'active' to add objects",
+                context={"environment_id": env_id, "state": env.state.value},
             )
+        return env

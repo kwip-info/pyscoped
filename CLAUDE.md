@@ -289,6 +289,80 @@ preview = executor.rollback_cascade(root_id, actor_id="alice", dry_run=True)
 result = executor.rollback_action(trace_id, actor_id="alice")
 ```
 
+## Environments (Layer 8)
+
+Ephemeral, isolated workspaces for tasks. Each environment gets an auto-created isolation scope. Objects are tracked by origin (created inside vs. projected from outside). All mutations are owner-enforced and audited.
+
+### Lifecycle
+
+State machine: `SPAWNING → ACTIVE ↔ SUSPENDED → COMPLETED → DISCARDED | PROMOTED → DISCARDED`
+
+```python
+from scoped.environments.lifecycle import EnvironmentLifecycle
+
+lifecycle = EnvironmentLifecycle(backend, audit_writer=writer)
+
+# Spawn creates an isolation scope automatically
+env = lifecycle.spawn(name="Review", owner_id=alice.id, metadata={"pr": 42})
+env = lifecycle.activate(env.id, actor_id=alice.id)  # SPAWNING → ACTIVE
+
+# Suspend / resume
+env = lifecycle.suspend(env.id, actor_id=alice.id)   # ACTIVE → SUSPENDED
+env = lifecycle.resume(env.id, actor_id=alice.id)     # SUSPENDED → ACTIVE
+
+# Complete and decide: promote or discard
+env = lifecycle.complete(env.id, actor_id=alice.id)   # ACTIVE → COMPLETED
+env = lifecycle.promote(env.id, actor_id=alice.id)    # COMPLETED → PROMOTED
+env = lifecycle.discard(env.id, actor_id=alice.id)    # → DISCARDED (archives scope, tombstones created objects)
+
+# Templates
+tmpl = lifecycle.create_template(name="Code Review", owner_id=alice.id, config={"mode": "review"})
+env = lifecycle.spawn_from_template(tmpl.id, owner_id=alice.id)
+```
+
+All state transitions require `actor_id == env.owner_id` — raises `AccessDeniedError` otherwise. Every transition emits an audit trail entry.
+
+### Object Container
+
+```python
+from scoped.environments.container import EnvironmentContainer
+
+container = EnvironmentContainer(backend, audit_writer=writer)
+
+# Track objects (environment must be ACTIVE)
+container.add_object(env.id, obj.id, actor_id=alice.id)                          # origin=CREATED
+container.project_in(env.id, external_obj.id, actor_id=alice.id)                 # origin=PROJECTED
+container.remove_object(env.id, obj.id, actor_id=alice.id)
+
+# Query
+container.list_objects(env.id, origin=ObjectOrigin.CREATED)
+container.get_created_object_ids(env.id)    # Promotion candidates
+container.contains(env.id, obj.id)
+container.count(env.id)
+```
+
+When `actor_id` is provided, ownership is enforced and audit entries are emitted. Discard cascade: objects with `origin=CREATED` are tombstoned; projected objects are left untouched.
+
+### Snapshots
+
+```python
+from scoped.environments.snapshot import SnapshotManager
+
+snapshots = SnapshotManager(backend, audit_writer=writer)
+
+# Capture full state (env record, objects, versions, memberships)
+snap = snapshots.capture(env.id, created_by=alice.id, name="v1")
+assert snapshots.verify(snap.id)  # SHA-256 checksum validation
+
+# Restore to a previous snapshot
+snapshots.restore(snap.id, restored_by=alice.id)
+# Resets current_version pointers + syncs environment_objects rows
+
+snapshots.list_snapshots(env.id)  # Newest first
+```
+
+Capture and restore both enforce owner access and emit audit records.
+
 ## Rules Engine (Layer 5)
 
 Deny-overrides model: ANY DENY = denied, at least one ALLOW + no DENY = allowed, no rules = allowed (when no rules are bound).

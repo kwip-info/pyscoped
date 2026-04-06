@@ -2,10 +2,17 @@
 
 import pytest
 
+from scoped.audit.writer import AuditWriter
+from scoped.environments.container import EnvironmentContainer
 from scoped.environments.lifecycle import EnvironmentLifecycle
-from scoped.environments.models import EnvironmentState
-from scoped.exceptions import EnvironmentNotFoundError, EnvironmentStateError
+from scoped.environments.models import EnvironmentState, ObjectOrigin
+from scoped.exceptions import (
+    AccessDeniedError,
+    EnvironmentNotFoundError,
+    EnvironmentStateError,
+)
 from scoped.identity.principal import PrincipalStore
+from scoped.objects.manager import ScopedManager
 
 
 @pytest.fixture
@@ -17,8 +24,23 @@ def principals(sqlite_backend, registry):
 
 
 @pytest.fixture
-def lifecycle(sqlite_backend):
-    return EnvironmentLifecycle(sqlite_backend)
+def writer(sqlite_backend):
+    return AuditWriter(sqlite_backend)
+
+
+@pytest.fixture
+def lifecycle(sqlite_backend, writer):
+    return EnvironmentLifecycle(sqlite_backend, audit_writer=writer)
+
+
+@pytest.fixture
+def objects(sqlite_backend):
+    return ScopedManager(sqlite_backend)
+
+
+@pytest.fixture
+def container(sqlite_backend, writer):
+    return EnvironmentContainer(sqlite_backend, audit_writer=writer)
 
 
 class TestSpawn:
@@ -265,3 +287,107 @@ class TestTemplates:
             tmpl.id, owner_id=alice.id, name="Custom Name",
         )
         assert env.name == "Custom Name"
+
+
+class TestAccessControl:
+
+    def test_non_owner_cannot_activate(self, lifecycle, principals):
+        alice, bob = principals
+        env = lifecycle.spawn(name="E", owner_id=alice.id)
+        with pytest.raises(AccessDeniedError):
+            lifecycle.activate(env.id, actor_id=bob.id)
+
+    def test_non_owner_cannot_suspend(self, lifecycle, principals):
+        alice, bob = principals
+        env = lifecycle.spawn(name="E", owner_id=alice.id)
+        lifecycle.activate(env.id, actor_id=alice.id)
+        with pytest.raises(AccessDeniedError):
+            lifecycle.suspend(env.id, actor_id=bob.id)
+
+    def test_non_owner_cannot_complete(self, lifecycle, principals):
+        alice, bob = principals
+        env = lifecycle.spawn(name="E", owner_id=alice.id)
+        lifecycle.activate(env.id, actor_id=alice.id)
+        with pytest.raises(AccessDeniedError):
+            lifecycle.complete(env.id, actor_id=bob.id)
+
+    def test_non_owner_cannot_discard(self, lifecycle, principals):
+        alice, bob = principals
+        env = lifecycle.spawn(name="E", owner_id=alice.id)
+        lifecycle.activate(env.id, actor_id=alice.id)
+        lifecycle.complete(env.id, actor_id=alice.id)
+        with pytest.raises(AccessDeniedError):
+            lifecycle.discard(env.id, actor_id=bob.id)
+
+    def test_non_owner_cannot_promote(self, lifecycle, principals):
+        alice, bob = principals
+        env = lifecycle.spawn(name="E", owner_id=alice.id)
+        lifecycle.activate(env.id, actor_id=alice.id)
+        lifecycle.complete(env.id, actor_id=alice.id)
+        with pytest.raises(AccessDeniedError):
+            lifecycle.promote(env.id, actor_id=bob.id)
+
+
+class TestDiscardCascade:
+
+    def test_discard_tombstones_created_objects(
+        self, lifecycle, container, objects, principals, sqlite_backend,
+    ):
+        alice, _ = principals
+        env = lifecycle.spawn(name="E", owner_id=alice.id)
+        lifecycle.activate(env.id, actor_id=alice.id)
+
+        obj, _ = objects.create(
+            object_type="Doc", owner_id=alice.id, data={"x": 1},
+        )
+        container.add_object(env.id, obj.id, origin=ObjectOrigin.CREATED)
+
+        lifecycle.complete(env.id, actor_id=alice.id)
+        lifecycle.discard(env.id, actor_id=alice.id)
+
+        row = sqlite_backend.fetch_one(
+            "SELECT lifecycle FROM scoped_objects WHERE id = ?", (obj.id,),
+        )
+        assert row["lifecycle"] == "ARCHIVED"
+
+    def test_discard_leaves_projected_objects_untouched(
+        self, lifecycle, container, objects, principals, sqlite_backend,
+    ):
+        alice, _ = principals
+        env = lifecycle.spawn(name="E", owner_id=alice.id)
+        lifecycle.activate(env.id, actor_id=alice.id)
+
+        obj, _ = objects.create(
+            object_type="Doc", owner_id=alice.id, data={"x": 1},
+        )
+        container.add_object(env.id, obj.id, origin=ObjectOrigin.PROJECTED)
+
+        lifecycle.complete(env.id, actor_id=alice.id)
+        lifecycle.discard(env.id, actor_id=alice.id)
+
+        row = sqlite_backend.fetch_one(
+            "SELECT lifecycle FROM scoped_objects WHERE id = ?", (obj.id,),
+        )
+        assert row["lifecycle"] == "ACTIVE"
+
+
+class TestAuditTrail:
+
+    def test_spawn_emits_audit(self, lifecycle, writer, principals, sqlite_backend):
+        alice, _ = principals
+        env = lifecycle.spawn(name="E", owner_id=alice.id)
+        rows = sqlite_backend.fetch_all(
+            "SELECT * FROM audit_trail WHERE target_id = ? AND action = 'env_spawn'",
+            (env.id,),
+        )
+        assert len(rows) == 1
+
+    def test_transition_emits_audit(self, lifecycle, writer, principals, sqlite_backend):
+        alice, _ = principals
+        env = lifecycle.spawn(name="E", owner_id=alice.id)
+        lifecycle.activate(env.id, actor_id=alice.id)
+        rows = sqlite_backend.fetch_all(
+            "SELECT * FROM audit_trail WHERE target_id = ? AND action = 'env_resume'",
+            (env.id,),
+        )
+        assert len(rows) == 1
