@@ -251,3 +251,32 @@ class TestSnapshotAudit:
             (),
         )
         assert len(rows) == 1
+
+
+class TestRetention:
+
+    def test_retain_max_snapshots(self, snapshots, active_env, principals):
+        alice, _ = principals
+        for i in range(5):
+            snapshots.capture(active_env.id, created_by=alice.id, name=f"v{i}")
+        assert len(snapshots.list_snapshots(active_env.id)) == 5
+
+        deleted = snapshots.apply_retention(active_env.id, max_snapshots=2)
+        assert deleted == 3
+        remaining = snapshots.list_snapshots(active_env.id)
+        assert len(remaining) == 2
+        # Newest kept
+        assert remaining[0].name == "v4"
+        assert remaining[1].name == "v3"
+
+    def test_retain_no_op_when_under_limit(self, snapshots, active_env, principals):
+        alice, _ = principals
+        snapshots.capture(active_env.id, created_by=alice.id)
+        deleted = snapshots.apply_retention(active_env.id, max_snapshots=10)
+        assert deleted == 0
+
+    def test_retain_no_params_deletes_nothing(self, snapshots, active_env, principals):
+        alice, _ = principals
+        snapshots.capture(active_env.id, created_by=alice.id)
+        deleted = snapshots.apply_retention(active_env.id)
+        assert deleted == 0

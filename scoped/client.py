@@ -70,6 +70,7 @@ import threading
 from typing import Any
 
 from scoped._namespaces.audit import AuditNamespace
+from scoped._namespaces.environments import EnvironmentsNamespace
 from scoped._namespaces.objects import ObjectsNamespace
 from scoped._namespaces.principals import PrincipalsNamespace
 from scoped._namespaces.scopes import ScopesNamespace
@@ -197,6 +198,7 @@ class ScopedClient:
         self._scopes_ns: ScopesNamespace | None = None
         self._audit_ns: AuditNamespace | None = None
         self._secrets_ns: SecretsNamespace | None = None
+        self._environments_ns: EnvironmentsNamespace | None = None
 
     # -- Namespace properties ----------------------------------------------
 
@@ -234,6 +236,13 @@ class ScopedClient:
         if self._secrets_ns is None:
             self._secrets_ns = SecretsNamespace(self._services)
         return self._secrets_ns
+
+    @property
+    def environments(self) -> EnvironmentsNamespace:
+        """Ephemeral workspaces — spawn, manage, snapshot, and restore."""
+        if self._environments_ns is None:
+            self._environments_ns = EnvironmentsNamespace(self._services)
+        return self._environments_ns
 
     # -- Context management ------------------------------------------------
 

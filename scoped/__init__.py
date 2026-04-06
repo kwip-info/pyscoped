@@ -18,7 +18,7 @@ Quick start::
 See ``scoped.client`` for full documentation.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 from scoped.client import ScopedClient, init  # noqa: F401
 
@@ -33,11 +33,12 @@ def __getattr__(name: str):
     - ``scoped.scopes`` — tenancy, sharing, and access control
     - ``scoped.audit`` — query the tamper-evident audit trail
     - ``scoped.secrets`` — encrypted vault with zero-trust access
+    - ``scoped.environments`` — ephemeral workspaces
     - ``scoped.as_principal(p)`` — set the acting principal
     - ``scoped.services`` — raw ScopedServices escape hatch
     """
     _namespace_names = {
-        "principals", "objects", "scopes", "audit", "secrets",
+        "principals", "objects", "scopes", "audit", "secrets", "environments",
     }
     if name in _namespace_names:
         from scoped.client import _get_default_client

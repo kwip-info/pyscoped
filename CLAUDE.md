@@ -89,7 +89,7 @@ client_b = scoped.ScopedClient(database_url="sqlite:///b.db")
 
 ## Namespace API Reference
 
-After `scoped.init()`, all namespaces are available at module level: `scoped.principals`, `scoped.objects`, `scoped.scopes`, `scoped.audit`, `scoped.secrets`. Or via client instance: `client.principals`, etc.
+After `scoped.init()`, all namespaces are available at module level: `scoped.principals`, `scoped.objects`, `scoped.scopes`, `scoped.audit`, `scoped.secrets`, `scoped.environments`. Or via client instance: `client.principals`, etc.
 
 All actor parameters (`owner_id`, `principal_id`, `granted_by`, etc.) are **inferred from the active ScopedContext** when omitted. All parameters accepting objects also accept string IDs.
 
@@ -359,9 +359,38 @@ snapshots.restore(snap.id, restored_by=alice.id)
 # Resets current_version pointers + syncs environment_objects rows
 
 snapshots.list_snapshots(env.id)  # Newest first
+
+# Retention — prune old snapshots
+snapshots.apply_retention(env.id, max_snapshots=5)       # Keep newest 5
+snapshots.apply_retention(env.id, max_age_days=30)       # Delete older than 30 days
 ```
 
 Capture and restore both enforce owner access and emit audit records.
+
+### Namespace API
+
+After `scoped.init()`, environments are available at `scoped.environments` with context-aware defaults:
+
+```python
+with scoped.as_principal(alice):
+    env = scoped.environments.spawn("Review", metadata={"pr": 42})
+    scoped.environments.activate(env)
+
+    scoped.environments.add_object(env, obj)
+    snap = scoped.environments.capture(env, name="v1")
+
+    scoped.environments.complete(env)
+    scoped.environments.restore(snap.id)
+    scoped.environments.discard(env)
+```
+
+### Rule engine integration
+
+Rules can be bound to specific environments via `BindingTargetType.ENVIRONMENT`. The container evaluates rules before `add_object()` when a `rule_engine` is provided (automatic via `ScopedServices`).
+
+### Temporal support
+
+Environment state transitions are rollbackable via Layer 7. `RollbackExecutor` restores `state` from `before_state` on transition rollback and marks environments `discarded` on spawn rollback.
 
 ## Rules Engine (Layer 5)
 

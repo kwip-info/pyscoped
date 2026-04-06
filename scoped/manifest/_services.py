@@ -25,6 +25,8 @@ class ScopedServices:
     _rule_engine: Any = None
     _visibility_engine: Any = None
     _environments: Any = None
+    _env_container: Any = None
+    _env_snapshots: Any = None
     _pipelines: Any = None
     _flow: Any = None
     _deployments: Any = None
@@ -112,6 +114,22 @@ class ScopedServices:
             from scoped.environments.lifecycle import EnvironmentLifecycle
             self._environments = EnvironmentLifecycle(self.backend, audit_writer=self.audit)
         return self._environments
+
+    @property
+    def env_container(self) -> Any:
+        if self._env_container is None:
+            from scoped.environments.container import EnvironmentContainer
+            self._env_container = EnvironmentContainer(
+                self.backend, audit_writer=self.audit, rule_engine=self.rule_engine,
+            )
+        return self._env_container
+
+    @property
+    def env_snapshots(self) -> Any:
+        if self._env_snapshots is None:
+            from scoped.environments.snapshot import SnapshotManager
+            self._env_snapshots = SnapshotManager(self.backend, audit_writer=self.audit)
+        return self._env_snapshots
 
     @property
     def pipelines(self) -> Any:

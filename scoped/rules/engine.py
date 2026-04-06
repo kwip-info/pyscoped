@@ -429,6 +429,7 @@ class RuleEngine:
         object_type: str | None = None,
         object_id: str | None = None,
         scope_id: str | None = None,
+        environment_id: str | None = None,
     ) -> EvaluationResult:
         """Evaluate rules for an access request.
 
@@ -460,6 +461,12 @@ class RuleEngine:
         if object_id:
             candidates.extend(
                 self._rules_for_target(BindingTargetType.OBJECT, object_id)
+            )
+
+        # Rules bound to this environment
+        if environment_id:
+            candidates.extend(
+                self._rules_for_target(BindingTargetType.ENVIRONMENT, environment_id)
             )
 
         # Deduplicate by rule ID

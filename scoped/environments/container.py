@@ -37,9 +37,11 @@ class EnvironmentContainer:
         backend: StorageBackend,
         *,
         audit_writer: Any | None = None,
+        rule_engine: Any | None = None,
     ) -> None:
         self._backend = backend
         self._audit = audit_writer
+        self._rule_engine = rule_engine
 
     # ------------------------------------------------------------------
     # Add objects
@@ -63,6 +65,23 @@ class EnvironmentContainer:
         env = self._require_active(env_id)
         if actor_id is not None:
             self._require_owner(env, actor_id)
+        if self._rule_engine is not None and actor_id is not None:
+            result = self._rule_engine.evaluate(
+                action="add_object",
+                principal_id=actor_id,
+                environment_id=env_id,
+                scope_id=env.scope_id,
+            )
+            if not result.allowed and (result.deny_rules or result.matching_rules):
+                deny_names = [r.name for r in result.deny_rules]
+                raise AccessDeniedError(
+                    f"Action 'add_object' denied by rule(s): {deny_names}",
+                    context={
+                        "action": "add_object",
+                        "environment_id": env_id,
+                        "principal_id": actor_id,
+                    },
+                )
         ts = now_utc()
         eo_id = generate_id()
 

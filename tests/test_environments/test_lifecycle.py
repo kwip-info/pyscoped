@@ -391,3 +391,21 @@ class TestAuditTrail:
             (env.id,),
         )
         assert len(rows) == 1
+
+
+class TestMetadataValidation:
+
+    def test_spawn_rejects_non_string_keys(self, lifecycle, principals):
+        alice, _ = principals
+        with pytest.raises(ValueError, match="keys must be strings"):
+            lifecycle.spawn(name="E", owner_id=alice.id, metadata={1: "bad"})
+
+    def test_template_rejects_non_dict(self, lifecycle, principals):
+        alice, _ = principals
+        with pytest.raises(ValueError, match="must be a dict"):
+            lifecycle.create_template(name="T", owner_id=alice.id, config="not a dict")
+
+    def test_spawn_accepts_valid_metadata(self, lifecycle, principals):
+        alice, _ = principals
+        env = lifecycle.spawn(name="E", owner_id=alice.id, metadata={"key": [1, 2, 3]})
+        assert env.metadata == {"key": [1, 2, 3]}

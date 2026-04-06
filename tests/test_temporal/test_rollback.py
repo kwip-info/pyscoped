@@ -421,6 +421,58 @@ class TestRollbackCascade:
         assert child_rb.sequence < root_rb.sequence
 
 
+# ---- Environment rollback ----
+
+class TestRollbackEnvironment:
+
+    def test_rollback_restores_environment_state(self, sqlite_backend, writer, principals):
+        """Rolling back an env transition restores the previous state."""
+        ts = now_utc().isoformat()
+        sqlite_backend.execute(
+            """INSERT INTO environments
+               (id, name, owner_id, state, created_at, description, ephemeral, metadata_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("env1", "Test", "alice", "suspended", ts, "", 1, "{}"),
+        )
+        entry = writer.record(
+            actor_id="alice", action=ActionType.ENV_SUSPEND,
+            target_type="environment", target_id="env1",
+            before_state={"state": "active"},
+            after_state={"state": "suspended"},
+        )
+        executor = RollbackExecutor(sqlite_backend, audit_writer=writer)
+        result = executor.rollback_action(entry.id, actor_id="alice")
+        assert result.success
+
+        row = sqlite_backend.fetch_one(
+            "SELECT state FROM environments WHERE id = ?", ("env1",),
+        )
+        assert row["state"] == "active"
+
+    def test_rollback_env_create_marks_discarded(self, sqlite_backend, writer, principals):
+        """Rolling back an env spawn marks it discarded."""
+        ts = now_utc().isoformat()
+        sqlite_backend.execute(
+            """INSERT INTO environments
+               (id, name, owner_id, state, created_at, description, ephemeral, metadata_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("env2", "Test", "alice", "spawning", ts, "", 1, "{}"),
+        )
+        entry = writer.record(
+            actor_id="alice", action=ActionType.ENV_SPAWN,
+            target_type="environment", target_id="env2",
+            after_state={"state": "spawning"},
+        )
+        executor = RollbackExecutor(sqlite_backend, audit_writer=writer)
+        result = executor.rollback_action(entry.id, actor_id="alice")
+        assert result.success
+
+        row = sqlite_backend.fetch_one(
+            "SELECT state FROM environments WHERE id = ?", ("env2",),
+        )
+        assert row["state"] == "discarded"
+
+
 # ---- RollbackResult ----
 
 class TestRollbackResult:

@@ -8,6 +8,7 @@ Snapshots never include plaintext secret values.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 import sqlalchemy as sa
@@ -250,6 +251,101 @@ class SnapshotManager:
             return False
         expected = compute_snapshot_checksum(snap.snapshot_data)
         return snap.checksum == expected
+
+    # ------------------------------------------------------------------
+    # Retention
+    # ------------------------------------------------------------------
+
+    def apply_retention(
+        self,
+        env_id: str,
+        *,
+        max_age_days: int | None = None,
+        max_snapshots: int | None = None,
+    ) -> int:
+        """Delete old snapshots for an environment.
+
+        Args:
+            env_id: The environment whose snapshots to prune.
+            max_age_days: Delete snapshots older than this many days.
+            max_snapshots: Keep at most this many snapshots (newest kept).
+
+        Returns:
+            Number of snapshots deleted.
+        """
+        from datetime import timedelta, timezone
+
+        # Count before
+        count_stmt = (
+            sa.select(sa.func.count().label("cnt"))
+            .select_from(environment_snapshots)
+            .where(environment_snapshots.c.environment_id == env_id)
+        )
+        sql, params = compile_for(count_stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
+        total_before = row["cnt"] if row else 0
+
+        # 1. Delete by age
+        if max_age_days is not None:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            ).isoformat()
+            del_stmt = (
+                sa.delete(environment_snapshots)
+                .where(
+                    environment_snapshots.c.environment_id == env_id,
+                    environment_snapshots.c.created_at < cutoff,
+                )
+            )
+            sql, params = compile_for(del_stmt, self._backend.dialect)
+            self._backend.execute(sql, params)
+
+        # 2. Delete by count (keep newest N)
+        if max_snapshots is not None:
+            cutoff_stmt = (
+                sa.select(environment_snapshots.c.id)
+                .where(environment_snapshots.c.environment_id == env_id)
+                .order_by(environment_snapshots.c.created_at.desc())
+                .limit(1)
+                .offset(max_snapshots)
+            )
+            sql, params = compile_for(cutoff_stmt, self._backend.dialect)
+            cutoff_row = self._backend.fetch_one(sql, params)
+            if cutoff_row:
+                # Get IDs of snapshots to keep (newest N)
+                keep_stmt = (
+                    sa.select(environment_snapshots.c.id)
+                    .where(environment_snapshots.c.environment_id == env_id)
+                    .order_by(environment_snapshots.c.created_at.desc())
+                    .limit(max_snapshots)
+                )
+                sql, params = compile_for(keep_stmt, self._backend.dialect)
+                keep_rows = self._backend.fetch_all(sql, params)
+                keep_ids = {r["id"] for r in keep_rows}
+
+                # Fetch all IDs for this env, delete those not in keep set
+                all_stmt = (
+                    sa.select(environment_snapshots.c.id)
+                    .where(environment_snapshots.c.environment_id == env_id)
+                )
+                sql, params = compile_for(all_stmt, self._backend.dialect)
+                all_rows = self._backend.fetch_all(sql, params)
+                delete_ids = [r["id"] for r in all_rows if r["id"] not in keep_ids]
+
+                for did in delete_ids:
+                    del_stmt = (
+                        sa.delete(environment_snapshots)
+                        .where(environment_snapshots.c.id == did)
+                    )
+                    sql, params = compile_for(del_stmt, self._backend.dialect)
+                    self._backend.execute(sql, params)
+
+        # Count remaining
+        sql, params = compile_for(count_stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
+        total_after = row["cnt"] if row else 0
+
+        return total_before - total_after
 
     # ------------------------------------------------------------------
     # Internal

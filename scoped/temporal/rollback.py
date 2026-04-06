@@ -19,7 +19,7 @@ from scoped.audit.query import AuditQuery
 from scoped.audit.writer import AuditWriter
 from scoped.exceptions import RollbackDeniedError, RollbackFailedError
 from scoped.storage._query import compile_for
-from scoped.storage._schema import scoped_objects
+from scoped.storage._schema import environments, scoped_objects
 from scoped.storage.interface import StorageBackend
 from scoped.temporal.constraints import RollbackConstraintChecker
 from scoped.types import ActionType
@@ -395,12 +395,47 @@ class RollbackExecutor:
                 )
                 sql, params = compile_for(stmt, self._backend.dialect)
                 self._backend.execute(sql, params)
+            return
         elif obj_row is not None and entry.before_state is None:
             # Rolling back a create — tombstone the object
             stmt = (
                 sa.update(scoped_objects)
                 .where(scoped_objects.c.id == entry.target_id)
                 .values(lifecycle="ARCHIVED")
+            )
+            sql, params = compile_for(stmt, self._backend.dialect)
+            self._backend.execute(sql, params)
+            return
+
+        # Check if this target is an environment
+        env_stmt = sa.select(environments.c.id).where(
+            environments.c.id == entry.target_id,
+        )
+        env_sql, env_params = compile_for(env_stmt, self._backend.dialect)
+        env_row = self._backend.fetch_one(env_sql, env_params)
+
+        if env_row is not None and entry.before_state is not None:
+            # Restore environment state from before_state
+            values: dict[str, Any] = {}
+            if "state" in entry.before_state:
+                values["state"] = entry.before_state["state"]
+            if "metadata" in entry.before_state:
+                import json
+                values["metadata_json"] = json.dumps(entry.before_state["metadata"])
+            if values:
+                stmt = (
+                    sa.update(environments)
+                    .where(environments.c.id == entry.target_id)
+                    .values(**values)
+                )
+                sql, params = compile_for(stmt, self._backend.dialect)
+                self._backend.execute(sql, params)
+        elif env_row is not None and entry.before_state is None:
+            # Rolling back an environment create — mark discarded
+            stmt = (
+                sa.update(environments)
+                .where(environments.c.id == entry.target_id)
+                .values(state="discarded")
             )
             sql, params = compile_for(stmt, self._backend.dialect)
             self._backend.execute(sql, params)

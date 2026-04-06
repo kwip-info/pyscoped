@@ -38,6 +38,21 @@ from scoped.environments.models import (
 from scoped._stability import experimental
 
 
+def _validate_json_dict(value: dict[str, Any], field_name: str) -> None:
+    """Validate that *value* is a JSON-serializable dict with string keys."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a dict, got {type(value).__name__}")
+    for key in value:
+        if not isinstance(key, str):
+            raise ValueError(
+                f"{field_name} keys must be strings, got {type(key).__name__}"
+            )
+    try:
+        json.dumps(value, default=str)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} is not JSON-serializable: {exc}") from exc
+
+
 @experimental()
 class EnvironmentLifecycle:
     """Manages environment creation and state transitions."""
@@ -73,6 +88,7 @@ class EnvironmentLifecycle:
         ts = now_utc()
         env_id = generate_id()
         meta = metadata or {}
+        _validate_json_dict(meta, "metadata")
 
         # Auto-create isolation scope for this environment
         scope = self._scope_lifecycle.create_scope(
@@ -251,6 +267,7 @@ class EnvironmentLifecycle:
         ts = now_utc()
         tmpl_id = generate_id()
         cfg = config or {}
+        _validate_json_dict(cfg, "config")
 
         tmpl = EnvironmentTemplate(
             id=tmpl_id,
