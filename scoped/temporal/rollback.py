@@ -370,10 +370,21 @@ class RollbackExecutor:
         """Apply the rollback by restoring database state.
 
         For object updates/creates, this restores the ``current_version``
-        pointer.  For other target types, the before/after state in the
-        rollback trace itself serves as the record.
+        pointer.  The target is matched by looking up the ``target_id``
+        in the ``scoped_objects`` table (since ``target_type`` stores the
+        object's custom type, e.g. ``"invoice"``, not the literal
+        ``"object"``).  For other target types, the before/after state in
+        the rollback trace itself serves as the record.
         """
-        if entry.target_type == "object" and entry.before_state is not None:
+        # Check if this target is a scoped object (target_type stores
+        # the object's custom type, not the literal "object").
+        check_stmt = sa.select(scoped_objects.c.id).where(
+            scoped_objects.c.id == entry.target_id,
+        )
+        check_sql, check_params = compile_for(check_stmt, self._backend.dialect)
+        obj_row = self._backend.fetch_one(check_sql, check_params)
+
+        if obj_row is not None and entry.before_state is not None:
             # Restore object's current_version to the version before the change
             before_version = entry.before_state.get("current_version")
             if before_version is not None:
@@ -384,7 +395,7 @@ class RollbackExecutor:
                 )
                 sql, params = compile_for(stmt, self._backend.dialect)
                 self._backend.execute(sql, params)
-        elif entry.target_type == "object" and entry.before_state is None:
+        elif obj_row is not None and entry.before_state is None:
             # Rolling back a create — tombstone the object
             stmt = (
                 sa.update(scoped_objects)

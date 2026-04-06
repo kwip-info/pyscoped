@@ -635,7 +635,14 @@ class ScopedManager:
         row = self._backend.fetch_one(sql, params)
         if row is None:
             return None
-        return self._row_to_version(row)
+        # Look up object_type for typed_data support
+        obj_stmt = sa.select(scoped_objects.c.object_type).where(
+            scoped_objects.c.id == object_id,
+        )
+        obj_sql, obj_params = compile_for(obj_stmt, self._backend.dialect)
+        obj_row = self._backend.fetch_one(obj_sql, obj_params)
+        ot = obj_row["object_type"] if obj_row else ""
+        return self._row_to_version(row, object_type=ot)
 
     def get_current_version(
         self, object_id: str, *, principal_id: str
@@ -670,7 +677,7 @@ class ScopedManager:
             stmt = stmt.limit(limit).offset(offset)
         sql, params = compile_for(stmt, self._backend.dialect)
         rows = self._backend.fetch_all(sql, params)
-        return [self._row_to_version(r) for r in rows]
+        return [self._row_to_version(r, object_type=obj.object_type) for r in rows]
 
     def diff(
         self,
@@ -762,7 +769,6 @@ class ScopedManager:
             registry_entry_id=row.get("registry_entry_id"),
         )
 
-    @staticmethod
     @staticmethod
     def _row_to_version(
         row: dict[str, Any], *, object_type: str = "",
