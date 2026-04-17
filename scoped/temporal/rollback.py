@@ -19,7 +19,7 @@ from scoped.audit.query import AuditQuery
 from scoped.audit.writer import AuditWriter
 from scoped.exceptions import RollbackDeniedError, RollbackFailedError
 from scoped.storage._query import compile_for
-from scoped.storage._schema import environments, scoped_objects
+from scoped.storage._schema import environments, object_versions, scoped_objects
 from scoped.storage.interface import StorageBackend
 from scoped.temporal.constraints import RollbackConstraintChecker
 from scoped.types import ActionType
@@ -369,42 +369,54 @@ class RollbackExecutor:
     def _apply_rollback_state(self, entry: TraceEntry) -> None:
         """Apply the rollback by restoring database state.
 
-        For object updates/creates, this restores the ``current_version``
-        pointer.  The target is matched by looking up the ``target_id``
-        in the ``scoped_objects`` table (since ``target_type`` stores the
-        object's custom type, e.g. ``"invoice"``, not the literal
-        ``"object"``).  For other target types, the before/after state in
-        the rollback trace itself serves as the record.
+        For object updates this restores the ``current_version`` pointer
+        and removes the version row created by the rolled-back mutation
+        so that the next update reuses the freed version number without
+        violating the ``(object_id, version)`` uniqueness constraint.
+        For create rollbacks the object is archived.  Version numbers
+        are read from trace ``metadata`` (new contract); legacy callers
+        that recorded ``current_version`` in ``before_state`` are still
+        honored.  Environment state transitions restore from
+        ``before_state``; environment creates are marked discarded.
         """
-        # Check if this target is a scoped object (target_type stores
-        # the object's custom type, not the literal "object").
         check_stmt = sa.select(scoped_objects.c.id).where(
             scoped_objects.c.id == entry.target_id,
         )
         check_sql, check_params = compile_for(check_stmt, self._backend.dialect)
         obj_row = self._backend.fetch_one(check_sql, check_params)
 
-        if obj_row is not None and entry.before_state is not None:
-            # Restore object's current_version to the version before the change
-            before_version = entry.before_state.get("current_version")
+        if obj_row is not None:
+            meta = entry.metadata or {}
+            before_version = meta.get("before_version")
+            after_version = meta.get("after_version")
+            if before_version is None and entry.before_state is not None:
+                before_version = entry.before_state.get("current_version")
+
             if before_version is not None:
-                stmt = (
+                upd = (
                     sa.update(scoped_objects)
                     .where(scoped_objects.c.id == entry.target_id)
                     .values(current_version=before_version)
                 )
+                sql, params = compile_for(upd, self._backend.dialect)
+                self._backend.execute(sql, params)
+                if after_version is not None and after_version != before_version:
+                    del_stmt = sa.delete(object_versions).where(
+                        object_versions.c.object_id == entry.target_id,
+                        object_versions.c.version == after_version,
+                    )
+                    sql, params = compile_for(del_stmt, self._backend.dialect)
+                    self._backend.execute(sql, params)
+                return
+
+            if entry.before_state is None:
+                stmt = (
+                    sa.update(scoped_objects)
+                    .where(scoped_objects.c.id == entry.target_id)
+                    .values(lifecycle="ARCHIVED")
+                )
                 sql, params = compile_for(stmt, self._backend.dialect)
                 self._backend.execute(sql, params)
-            return
-        elif obj_row is not None and entry.before_state is None:
-            # Rolling back a create — tombstone the object
-            stmt = (
-                sa.update(scoped_objects)
-                .where(scoped_objects.c.id == entry.target_id)
-                .values(lifecycle="ARCHIVED")
-            )
-            sql, params = compile_for(stmt, self._backend.dialect)
-            self._backend.execute(sql, params)
             return
 
         # Check if this target is an environment

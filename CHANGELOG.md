@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1 (2026-04-17)
+
+### Fixed
+- **Rollback now actually reverts object versions.** `RollbackExecutor.rollback_action()` on a real object-update trace previously reported `success=True` but left `current_version` unchanged — the restore path looked for `current_version` inside `before_state`, but the object manager records the version's data dict there, not a metadata pointer. Fixed by recording `before_version`/`after_version` in the audit trace's `metadata` field (which is not part of the hash chain, so audit integrity is unaffected) and having `_apply_rollback_state` read from metadata. The rolled-back version row in `object_versions` is now also removed, so the freed version number is reused by the next update and no longer collides with the `UniqueConstraint("object_id", "version")`.
+- **`scoped.objects` no longer gets shadowed by the submodule.** The documented `scoped.objects.create(...)` quick-start form would fail after the first call because lazy imports of `scoped.objects.blobs` / `search` / etc. caused Python's import machinery to install the submodule as an attribute on the package, shadowing the `ObjectsNamespace` returned by the package-level `__getattr__`. The package now uses a `ModuleType` subclass whose `__getattribute__` always routes namespace names through the default client, so the documented quick-start works end-to-end regardless of import order.
+
 ## 1.0.4 (2026-04-03)
 
 ### Docs

@@ -266,6 +266,7 @@ class ScopedManager:
                 target_type=object_type,
                 target_id=obj_id,
                 after_state=data,
+                metadata={"after_version": 1},
             )
 
         return obj, ver
@@ -327,6 +328,7 @@ class ScopedManager:
                     "target_type": obj.object_type,
                     "target_id": obj.id,
                     "after_state": ver.data,
+                    "metadata": {"after_version": 1},
                 }
                 for obj, ver in results
             ])
@@ -525,6 +527,10 @@ class ScopedManager:
                 target_id=object_id,
                 before_state=before_data,
                 after_state=data,
+                metadata={
+                    "before_version": obj.current_version,
+                    "after_version": new_version_num,
+                },
             )
 
         return updated_obj, ver
@@ -602,6 +608,7 @@ class ScopedManager:
                 target_type=obj.object_type,
                 target_id=object_id,
                 before_state=before_data,
+                metadata={"before_version": obj.current_version},
             )
 
         return tomb

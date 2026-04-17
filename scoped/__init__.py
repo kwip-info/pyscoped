@@ -18,46 +18,51 @@ Quick start::
 See ``scoped.client`` for full documentation.
 """
 
-__version__ = "1.2.0"
+from __future__ import annotations
+
+import sys
+from types import ModuleType as _ModuleType
+
+__version__ = "1.2.1"
 
 from scoped.client import ScopedClient, init  # noqa: F401
 
 
-def __getattr__(name: str):
-    """Proxy module-level access to the default client's namespaces.
+_NAMESPACE_NAMES = frozenset({
+    "principals", "objects", "scopes", "audit", "secrets", "environments",
+})
 
-    After calling ``scoped.init()``, these attributes are available:
 
-    - ``scoped.principals`` — create and manage identities
-    - ``scoped.objects`` — versioned, isolated data objects
-    - ``scoped.scopes`` — tenancy, sharing, and access control
-    - ``scoped.audit`` — query the tamper-evident audit trail
-    - ``scoped.secrets`` — encrypted vault with zero-trust access
-    - ``scoped.environments`` — ephemeral workspaces
-    - ``scoped.as_principal(p)`` — set the acting principal
-    - ``scoped.services`` — raw ScopedServices escape hatch
+class _ScopedModule(_ModuleType):
+    """Module subclass that proxies namespace access through the default client.
+
+    Python's import machinery sets ``scoped.<submodule>`` as a real attribute
+    whenever something imports, say, ``scoped.objects.manager``.  That would
+    shadow a plain ``__getattr__`` on the package, so after the first internal
+    import the documented ``scoped.objects.create(...)`` form would resolve to
+    the submodule instead of the namespace.  By overriding ``__getattribute__``
+    at the package level we always route the documented names through the
+    default client regardless of what import state has materialized.
     """
-    _namespace_names = {
-        "principals", "objects", "scopes", "audit", "secrets", "environments",
-    }
-    if name in _namespace_names:
-        from scoped.client import _get_default_client
 
-        return getattr(_get_default_client(), name)
+    def __getattribute__(self, name: str):
+        if name in _NAMESPACE_NAMES:
+            from scoped.client import _get_default_client
 
-    if name == "as_principal":
-        from scoped.client import _get_default_client
+            return getattr(_get_default_client(), name)
+        if name == "as_principal":
+            from scoped.client import _get_default_client
 
-        return _get_default_client().as_principal
+            return _get_default_client().as_principal
+        if name == "services":
+            from scoped.client import _get_default_client
 
-    if name == "services":
-        from scoped.client import _get_default_client
+            return _get_default_client().services
+        if name == "register_type":
+            from scoped._type_registry import _registry
 
-        return _get_default_client().services
+            return _registry.register
+        return super().__getattribute__(name)
 
-    if name == "register_type":
-        from scoped._type_registry import _registry
 
-        return _registry.register
-
-    raise AttributeError(f"module 'scoped' has no attribute {name!r}")
+sys.modules[__name__].__class__ = _ScopedModule
