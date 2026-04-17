@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.4.0 (2026-04-17)
+
+### Layer 9 (Flow) — Phase 2 integration + Phase 3 graduate
+
+**Layer 9 is now stable.** The `@experimental` decorators on `PipelineManager`, `FlowEngine`, and `PromotionManager` have been replaced with `@stable(since="1.4.0")` — no more warnings on import, and the API contract is now covered by the usual semver guarantees.
+
+### Added — `env.promote()` auto-chains to promotions
+
+- `EnvironmentLifecycle.promote()` accepts `target_scope_id`, `target_stage_id`, and `access_level`. When `target_scope_id` is provided, every object tracked with `origin=CREATED` is auto-promoted (projected) into that scope before the env state flips to `PROMOTED`. Projected-origin objects are left untouched (they belong elsewhere).
+- If any per-object promotion fails, the env stays in `COMPLETED` so the caller can retry or discard — no partial state flip.
+- `EnvironmentLifecycle.__init__` takes new optional `container=` and `promotion_manager=` deps; the default service wiring pre-injects both, so `scoped.environments.promote(env, target_scope_id=team)` just works.
+
+### Added — module-level namespaces: `scoped.pipelines`, `scoped.flow`, `scoped.promotions`
+
+- `scoped.pipelines.create(...)`, `.add_stage(pipeline, ...)`, `.transition(obj, to_stage, from_stage=...)`, `.current_stage(obj)`, `.history(obj)`, `.archive(pipeline)`
+- `scoped.flow.create_channel(...)`, `.can_flow(...)`, `.can_flow_or_raise(...)`, `.list_channels(...)`, `.archive_channel(channel)`, `.find_routes(...)`
+- `scoped.promotions.promote(obj=..., source_env=..., target_scope=..., target_stage=..., access_level=...)`, `.list(source_env=...)`, `.count(source_env)`
+
+All three accept model instances or string IDs for references, and infer `owner_id`/`transitioned_by`/`promoted_by` from the active `ScopedContext` when omitted.
+
+### Added — rule-engine deny hooks
+
+- `PipelineManager(rule_engine=...)` now evaluates rules before every `transition()` with `action="stage_transition"`, binding targets `object`, `object_type`, `principal`, and the pipeline as `scope_id`. DENY raises `StageTransitionDeniedError`.
+- `PromotionManager(rule_engine=...)` evaluates rules before every `promote()` with `action="promotion"`, binding targets `scope` (target), `environment` (source), `object`, `object_type`, and `principal`. DENY raises `PromotionDeniedError`.
+- The default service wiring injects `rule_engine` into both managers.
+
+### Changed — `FlowEngine.archive_channel()` signature
+
+- `archived_by` is now required (was optional, with audit silently skipped when omitted). Archival now always emits an audit entry.
+
 ## 1.3.0 (2026-04-17)
 
 ### Layer 9 (Flow) — Phase 1 hardening

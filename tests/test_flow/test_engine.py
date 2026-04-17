@@ -102,7 +102,7 @@ class TestChannelCRUD:
             target_type=FlowPointType.SCOPE, target_id="s2",
             owner_id=principals.id,
         )
-        engine.archive_channel(ch.id)
+        engine.archive_channel(ch.id, archived_by=principals.id)
         result = engine.list_channels(active_only=True)
         assert len(result) == 0
 
@@ -178,7 +178,7 @@ class TestCanFlow:
             target_type=FlowPointType.SCOPE, target_id="s2",
             owner_id=principals.id,
         )
-        engine.archive_channel(ch.id)
+        engine.archive_channel(ch.id, archived_by=principals.id)
         result = engine.can_flow(
             source_type=FlowPointType.SCOPE, source_id="s1",
             target_type=FlowPointType.SCOPE, target_id="s2",

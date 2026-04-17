@@ -35,10 +35,10 @@ from scoped.flow.models import (
     stage_from_row,
     transition_from_row,
 )
-from scoped._stability import experimental
+from scoped._stability import stable
 
 
-@experimental()
+@stable(since="1.4.0")
 class PipelineManager:
     """Manages pipelines, stages, and stage transitions."""
 
@@ -47,9 +47,11 @@ class PipelineManager:
         backend: StorageBackend,
         *,
         audit_writer: Any | None = None,
+        rule_engine: Any | None = None,
     ) -> None:
         self._backend = backend
         self._audit = audit_writer
+        self._rule_engine = rule_engine
 
     # ------------------------------------------------------------------
     # Pipelines
@@ -275,6 +277,14 @@ class PipelineManager:
                 },
             )
 
+        self._check_transition_rules(
+            object_id=object_id,
+            object_type=self._get_object_type(object_id),
+            principal_id=transitioned_by,
+            to_stage_id=to_stage_id,
+            pipeline_id=to_stage.pipeline_id,
+        )
+
         current = self.get_current_stage(object_id)
         current_stage_id = current.to_stage_id if current is not None else None
         if from_stage_id is None:
@@ -334,6 +344,51 @@ class PipelineManager:
         sql, params = compile_for(stmt, self._backend.dialect)
         row = self._backend.fetch_one(sql, params)
         return row["owner_id"] if row else None
+
+    def _get_object_type(self, object_id: str) -> str | None:
+        stmt = sa.select(scoped_objects.c.object_type).where(
+            scoped_objects.c.id == object_id,
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
+        return row["object_type"] if row else None
+
+    def _check_transition_rules(
+        self,
+        *,
+        object_id: str,
+        object_type: str | None,
+        principal_id: str,
+        to_stage_id: str,
+        pipeline_id: str,
+    ) -> None:
+        """Evaluate rules for a stage transition; raise if denied.
+
+        No-op when no rule engine is configured. Bindings checked:
+        object, object_type, pipeline (as scope), and principal.
+        Action is always ``"stage_transition"``; condition matchers
+        can narrow further on ``to_stage_id`` / ``pipeline_id``.
+        """
+        if self._rule_engine is None:
+            return
+        result = self._rule_engine.evaluate(
+            action="stage_transition",
+            principal_id=principal_id,
+            object_type=object_type,
+            object_id=object_id,
+            scope_id=pipeline_id,
+        )
+        if not result.allowed and (result.deny_rules or result.matching_rules):
+            deny_names = [r.name for r in result.deny_rules]
+            raise StageTransitionDeniedError(
+                f"Stage transition denied by rule(s): {deny_names}",
+                context={
+                    "object_id": object_id,
+                    "to_stage_id": to_stage_id,
+                    "principal_id": principal_id,
+                    "deny_rules": deny_names,
+                },
+            )
 
     def get_current_stage(self, object_id: str) -> StageTransition | None:
         """Get the most recent stage transition for an object."""

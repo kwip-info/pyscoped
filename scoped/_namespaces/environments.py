@@ -91,10 +91,31 @@ class EnvironmentsNamespace:
             _to_id(env), actor_id=_resolve_principal_id(actor_id),
         )
 
-    def promote(self, env: str | Any, *, actor_id: str | None = None) -> Environment:
-        """COMPLETED -> PROMOTED."""
+    def promote(
+        self,
+        env: str | Any,
+        *,
+        actor_id: str | None = None,
+        target_scope_id: str | Any | None = None,
+        target_stage_id: str | Any | None = None,
+        access_level: Any | None = None,
+    ) -> Environment:
+        """COMPLETED -> PROMOTED.
+
+        If *target_scope_id* is provided, every CREATED-origin object in
+        the environment is promoted (projected) into that scope.
+        """
+        kwargs: dict[str, Any] = {}
+        if target_scope_id is not None:
+            kwargs["target_scope_id"] = _to_id(target_scope_id)
+        if target_stage_id is not None:
+            kwargs["target_stage_id"] = _to_id(target_stage_id)
+        if access_level is not None:
+            kwargs["access_level"] = access_level
         return self._svc.environments.promote(
-            _to_id(env), actor_id=_resolve_principal_id(actor_id),
+            _to_id(env),
+            actor_id=_resolve_principal_id(actor_id),
+            **kwargs,
         )
 
     def get(self, env_id: str) -> Environment | None:

@@ -35,10 +35,10 @@ from scoped.flow.models import (
     Promotion,
     promotion_from_row,
 )
-from scoped._stability import experimental
+from scoped._stability import stable
 
 
-@experimental()
+@stable(since="1.4.0")
 class PromotionManager:
     """Promote objects from environments into persistent scopes."""
 
@@ -48,11 +48,13 @@ class PromotionManager:
         *,
         flow_engine: FlowEngine | None = None,
         projection_manager: ProjectionManager | None = None,
+        rule_engine: Any | None = None,
         audit_writer: Any | None = None,
     ) -> None:
         self._backend = backend
         self._flow = flow_engine
         self._projections = projection_manager
+        self._rule_engine = rule_engine
         self._audit = audit_writer
 
     def promote(
@@ -100,6 +102,14 @@ class PromotionManager:
                         "target_scope_id": target_scope_id,
                     },
                 )
+
+        self._check_promotion_rules(
+            object_id=object_id,
+            object_type=object_type or self._get_object_type(object_id),
+            principal_id=promoted_by,
+            source_env_id=source_env_id,
+            target_scope_id=target_scope_id,
+        )
 
         if self._projections is not None:
             self._projections.project(
@@ -185,6 +195,52 @@ class PromotionManager:
             raise PromotionDeniedError(
                 f"Stage {stage_id} not found",
                 context={"stage_id": stage_id},
+            )
+
+    def _get_object_type(self, object_id: str) -> str | None:
+        stmt = sa.select(scoped_objects.c.object_type).where(
+            scoped_objects.c.id == object_id,
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
+        return row["object_type"] if row else None
+
+    def _check_promotion_rules(
+        self,
+        *,
+        object_id: str,
+        object_type: str | None,
+        principal_id: str,
+        source_env_id: str,
+        target_scope_id: str,
+    ) -> None:
+        """Evaluate rules for a promotion; raise if denied.
+
+        No-op when no rule engine is configured. Bindings checked:
+        target scope, source environment, object, object_type, principal.
+        Action is always ``"promotion"``.
+        """
+        if self._rule_engine is None:
+            return
+        result = self._rule_engine.evaluate(
+            action="promotion",
+            principal_id=principal_id,
+            object_type=object_type,
+            object_id=object_id,
+            scope_id=target_scope_id,
+            environment_id=source_env_id,
+        )
+        if not result.allowed and (result.deny_rules or result.matching_rules):
+            deny_names = [r.name for r in result.deny_rules]
+            raise PromotionDeniedError(
+                f"Promotion denied by rule(s): {deny_names}",
+                context={
+                    "object_id": object_id,
+                    "source_env_id": source_env_id,
+                    "target_scope_id": target_scope_id,
+                    "principal_id": principal_id,
+                    "deny_rules": deny_names,
+                },
             )
 
     def get(self, promotion_id: str) -> Promotion | None:

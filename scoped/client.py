@@ -71,8 +71,11 @@ from typing import Any
 
 from scoped._namespaces.audit import AuditNamespace
 from scoped._namespaces.environments import EnvironmentsNamespace
+from scoped._namespaces.flow import FlowNamespace
 from scoped._namespaces.objects import ObjectsNamespace
+from scoped._namespaces.pipelines import PipelinesNamespace
 from scoped._namespaces.principals import PrincipalsNamespace
+from scoped._namespaces.promotions import PromotionsNamespace
 from scoped._namespaces.scopes import ScopesNamespace
 from scoped._namespaces.secrets import SecretsNamespace
 from scoped.manifest._services import ScopedServices, build_services
@@ -199,6 +202,9 @@ class ScopedClient:
         self._audit_ns: AuditNamespace | None = None
         self._secrets_ns: SecretsNamespace | None = None
         self._environments_ns: EnvironmentsNamespace | None = None
+        self._pipelines_ns: PipelinesNamespace | None = None
+        self._flow_ns: FlowNamespace | None = None
+        self._promotions_ns: PromotionsNamespace | None = None
 
     # -- Namespace properties ----------------------------------------------
 
@@ -243,6 +249,27 @@ class ScopedClient:
         if self._environments_ns is None:
             self._environments_ns = EnvironmentsNamespace(self._services)
         return self._environments_ns
+
+    @property
+    def pipelines(self) -> PipelinesNamespace:
+        """Pipelines and stages — define how objects mature through stages."""
+        if self._pipelines_ns is None:
+            self._pipelines_ns = PipelinesNamespace(self._services)
+        return self._pipelines_ns
+
+    @property
+    def flow(self) -> FlowNamespace:
+        """Flow channels — directional pipes that permit object movement."""
+        if self._flow_ns is None:
+            self._flow_ns = FlowNamespace(self._services)
+        return self._flow_ns
+
+    @property
+    def promotions(self) -> PromotionsNamespace:
+        """Promotions — move objects from environments into persistent scopes."""
+        if self._promotions_ns is None:
+            self._promotions_ns = PromotionsNamespace(self._services)
+        return self._promotions_ns
 
     # -- Context management ------------------------------------------------
 

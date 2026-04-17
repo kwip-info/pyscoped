@@ -62,10 +62,14 @@ class EnvironmentLifecycle:
         backend: StorageBackend,
         *,
         audit_writer: Any | None = None,
+        container: Any | None = None,
+        promotion_manager: Any | None = None,
     ) -> None:
         self._backend = backend
         self._audit = audit_writer
         self._scope_lifecycle = ScopeLifecycle(backend, audit_writer=audit_writer)
+        self._container = container
+        self._promotion_manager = promotion_manager
 
     # ------------------------------------------------------------------
     # Spawn
@@ -200,12 +204,59 @@ class EnvironmentLifecycle:
 
         return env
 
-    def promote(self, env_id: str, *, actor_id: str) -> Environment:
+    def promote(
+        self,
+        env_id: str,
+        *,
+        actor_id: str,
+        target_scope_id: str | None = None,
+        target_stage_id: str | None = None,
+        access_level: Any | None = None,
+    ) -> Environment:
         """Mark environment as promoted (results have been kept).
 
         Valid from COMPLETED state.  After promotion, the environment
         can still be discarded.
+
+        If *target_scope_id* is provided and the lifecycle was constructed
+        with both a container and a promotion_manager, every object
+        tracked with origin=CREATED is promoted into the target scope,
+        producing real scope projections (Layer 4).  Objects added with
+        origin=PROJECTED are *not* auto-promoted — they already live
+        elsewhere and were only borrowed into the env.
+
+        Raises whatever :meth:`PromotionManager.promote` raises if a
+        per-object promotion fails.  The env state flip to ``PROMOTED``
+        happens only after all promotions succeed — a failure leaves the
+        env in ``COMPLETED`` so the caller can retry or discard.
         """
+        if target_scope_id is not None:
+            if self._container is None or self._promotion_manager is None:
+                raise EnvironmentStateError(
+                    "target_scope_id requires EnvironmentLifecycle to be "
+                    "constructed with both a container and a promotion_manager.",
+                    context={
+                        "environment_id": env_id,
+                        "target_scope_id": target_scope_id,
+                    },
+                )
+            env = self.get_or_raise(env_id)
+            self._require_owner(env, actor_id)
+
+            created_ids = self._container.get_created_object_ids(env_id)
+            kwargs: dict[str, Any] = {}
+            if access_level is not None:
+                kwargs["access_level"] = access_level
+            for object_id in created_ids:
+                self._promotion_manager.promote(
+                    object_id=object_id,
+                    source_env_id=env_id,
+                    target_scope_id=target_scope_id,
+                    promoted_by=actor_id,
+                    target_stage_id=target_stage_id,
+                    **kwargs,
+                )
+
         return self._transition(env_id, EnvironmentState.PROMOTED, actor_id=actor_id)
 
     # ------------------------------------------------------------------

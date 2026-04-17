@@ -17,14 +17,14 @@ from scoped.exceptions import FlowBlockedError
 from scoped.storage._query import compile_for
 from scoped.storage._schema import flow_channels
 from scoped.storage.interface import StorageBackend
-from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+from scoped.types import ActionType, generate_id, now_utc
 
 from scoped.flow.models import (
     FlowChannel,
     FlowPointType,
     channel_from_row,
 )
-from scoped._stability import experimental
+from scoped._stability import stable
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +39,7 @@ class FlowResolution:
         return self.allowed
 
 
-@experimental()
+@stable(since="1.4.0")
 class FlowEngine:
     """Manages flow channels and resolves flow permissions."""
 
@@ -133,7 +133,11 @@ class FlowEngine:
         rows = self._backend.fetch_all(sql, params)
         return [channel_from_row(r) for r in rows]
 
-    def archive_channel(self, channel_id: str, *, archived_by: str | None = None) -> None:
+    def archive_channel(self, channel_id: str, *, archived_by: str) -> None:
+        """Archive a flow channel so it no longer permits routes.
+
+        Always emits an audit entry so the archival is traceable.
+        """
         stmt = (
             sa.update(flow_channels)
             .where(flow_channels.c.id == channel_id)
@@ -142,7 +146,7 @@ class FlowEngine:
         sql, params = compile_for(stmt, self._backend.dialect)
         self._backend.execute(sql, params)
 
-        if self._audit is not None and archived_by is not None:
+        if self._audit is not None:
             self._audit.record(
                 actor_id=archived_by,
                 action=ActionType.LIFECYCLE_CHANGE,

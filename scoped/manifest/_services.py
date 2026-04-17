@@ -113,7 +113,14 @@ class ScopedServices:
     def environments(self) -> Any:
         if self._environments is None:
             from scoped.environments.lifecycle import EnvironmentLifecycle
-            self._environments = EnvironmentLifecycle(self.backend, audit_writer=self.audit)
+            # Wire container + promotion_manager so env.promote(target_scope_id=...)
+            # can auto-chain per-object promotions into the target scope.
+            self._environments = EnvironmentLifecycle(
+                self.backend,
+                audit_writer=self.audit,
+                container=self.env_container,
+                promotion_manager=self.promotions,
+            )
         return self._environments
 
     @property
@@ -136,7 +143,11 @@ class ScopedServices:
     def pipelines(self) -> Any:
         if self._pipelines is None:
             from scoped.flow.pipeline import PipelineManager
-            self._pipelines = PipelineManager(self.backend, audit_writer=self.audit)
+            self._pipelines = PipelineManager(
+                self.backend,
+                audit_writer=self.audit,
+                rule_engine=self.rule_engine,
+            )
         return self._pipelines
 
     @property
@@ -156,6 +167,7 @@ class ScopedServices:
             self._promotions = PromotionManager(
                 self.backend,
                 projection_manager=self.projections,
+                rule_engine=self.rule_engine,
                 audit_writer=self.audit,
             )
         return self._promotions
