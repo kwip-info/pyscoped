@@ -29,6 +29,7 @@ class ScopedServices:
     _env_snapshots: Any = None
     _pipelines: Any = None
     _flow: Any = None
+    _promotions: Any = None
     _deployments: Any = None
     _secrets: Any = None
     _plugins: Any = None
@@ -144,6 +145,20 @@ class ScopedServices:
             from scoped.flow.engine import FlowEngine
             self._flow = FlowEngine(self.backend, audit_writer=self.audit)
         return self._flow
+
+    @property
+    def promotions(self) -> Any:
+        if self._promotions is None:
+            from scoped.flow.promotion import PromotionManager
+            # Default wiring: projections are always applied; flow-channel
+            # enforcement is opt-in (construct your own PromotionManager with
+            # flow_engine=self.flow to require a channel for every promotion).
+            self._promotions = PromotionManager(
+                self.backend,
+                projection_manager=self.projections,
+                audit_writer=self.audit,
+            )
+        return self._promotions
 
     @property
     def deployments(self) -> Any:

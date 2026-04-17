@@ -23,7 +23,7 @@ from __future__ import annotations
 import sys
 from types import ModuleType as _ModuleType
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 from scoped.client import ScopedClient, init  # noqa: F401
 

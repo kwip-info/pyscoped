@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.3.0 (2026-04-17)
+
+### Layer 9 (Flow) — Phase 1 hardening
+
+**Behavior changes** (previously-broken or missing functionality now works):
+
+- **`PromotionManager.promote()` now actually promotes.** Before, it wrote a row to `promotions` but never projected the object into the target scope — so nothing became visible. It now creates a real `ScopeProjection` via an injected `ProjectionManager`, so the promoted object shows up under `VisibilityEngine.can_see(principal, object)` as intended. Accepts an optional `access_level` (defaults to `READ`) controlling the projection's grant level.
+- **Missing references raise scoped exceptions** instead of leaking `sqlalchemy.IntegrityError`. `promote()` now pre-validates env/scope/object/stage existence and raises `EnvironmentNotFoundError`, `ScopeNotFoundError`, or `PromotionDeniedError` with useful context.
+- **`PipelineManager.transition()` now enforces invariants** that were silently ignored:
+  - Stages must share a pipeline. Cross-pipeline transitions raise `StageTransitionDeniedError`.
+  - The pipeline must be `ACTIVE`. Archived pipelines reject transitions.
+  - `from_stage_id` must equal the object's actual current stage (no more fake transition histories).
+  - Initial placement (no `from_stage_id`) is rejected if the object already has a current stage.
+  - Callers must own the object (`AccessDeniedError` otherwise).
+  - Missing target objects raise `FlowError` instead of silently inserting.
+
+### Added
+
+- **`services.promotions`** — `PromotionManager` is now wired into `ScopedServices` with the default `ProjectionManager` already attached, so `client.services.promotions.promote(...)` works out of the box. Flow-channel enforcement remains opt-in: construct your own `PromotionManager(flow_engine=...)` if every promotion must be gated by an active channel.
+- **`PromotionManager(projection_manager=...)` constructor arg** — inject a `ProjectionManager` to make promotions create real scope projections.
+
 ## 1.2.1 (2026-04-17)
 
 ### Fixed

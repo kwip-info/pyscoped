@@ -12,11 +12,20 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from scoped.exceptions import FlowError, StageTransitionDeniedError
+from scoped.exceptions import (
+    AccessDeniedError,
+    FlowError,
+    StageTransitionDeniedError,
+)
 from scoped.storage._query import compile_for
-from scoped.storage._schema import pipelines, stage_transitions, stages
+from scoped.storage._schema import (
+    pipelines,
+    scoped_objects,
+    stage_transitions,
+    stages,
+)
 from scoped.storage.interface import StorageBackend
-from scoped.types import ActionType, Lifecycle, generate_id, now_utc
+from scoped.types import ActionType, generate_id, now_utc
 
 from scoped.flow.models import (
     Pipeline,
@@ -204,12 +213,15 @@ class PipelineManager:
     ) -> StageTransition:
         """Move an object to a new stage.
 
-        If *from_stage_id* is ``None``, this is an initial placement.
-        """
-        ts = now_utc()
-        tid = generate_id()
+        If *from_stage_id* is ``None``, this is an initial placement and
+        the object must not already have a current stage.  Otherwise,
+        *from_stage_id* must equal the object's current stage.
 
-        # Validate target stage exists
+        The caller (``transitioned_by``) must own the object.
+
+        Both stages must belong to the same pipeline and that pipeline
+        must still be active — archived pipelines reject transitions.
+        """
         to_stage = self.get_stage(to_stage_id)
         if to_stage is None:
             raise FlowError(
@@ -217,7 +229,7 @@ class PipelineManager:
                 context={"to_stage_id": to_stage_id},
             )
 
-        # Validate from_stage exists if provided
+        from_stage = None
         if from_stage_id is not None:
             from_stage = self.get_stage(from_stage_id)
             if from_stage is None:
@@ -225,6 +237,68 @@ class PipelineManager:
                     f"Source stage '{from_stage_id}' not found",
                     context={"from_stage_id": from_stage_id},
                 )
+            if from_stage.pipeline_id != to_stage.pipeline_id:
+                raise StageTransitionDeniedError(
+                    "Stages belong to different pipelines — transitions must "
+                    "stay within a single pipeline.",
+                    context={
+                        "from_stage_id": from_stage_id,
+                        "to_stage_id": to_stage_id,
+                        "from_pipeline_id": from_stage.pipeline_id,
+                        "to_pipeline_id": to_stage.pipeline_id,
+                    },
+                )
+
+        pipeline = self.get_pipeline(to_stage.pipeline_id)
+        if pipeline is not None and not pipeline.is_active:
+            raise StageTransitionDeniedError(
+                f"Pipeline '{pipeline.name}' is archived; transitions denied.",
+                context={
+                    "pipeline_id": pipeline.id,
+                    "lifecycle": pipeline.lifecycle.name,
+                },
+            )
+
+        owner_id = self._get_object_owner(object_id)
+        if owner_id is None:
+            raise FlowError(
+                f"Object '{object_id}' not found",
+                context={"object_id": object_id},
+            )
+        if owner_id != transitioned_by:
+            raise AccessDeniedError(
+                "Only the object owner can transition its stage.",
+                context={
+                    "object_id": object_id,
+                    "owner_id": owner_id,
+                    "actor_id": transitioned_by,
+                },
+            )
+
+        current = self.get_current_stage(object_id)
+        current_stage_id = current.to_stage_id if current is not None else None
+        if from_stage_id is None:
+            if current_stage_id is not None:
+                raise StageTransitionDeniedError(
+                    "Object already has a current stage; pass from_stage_id "
+                    "to move it or use an explicit transition.",
+                    context={
+                        "object_id": object_id,
+                        "current_stage_id": current_stage_id,
+                    },
+                )
+        elif current_stage_id != from_stage_id:
+            raise StageTransitionDeniedError(
+                "from_stage_id does not match the object's current stage.",
+                context={
+                    "object_id": object_id,
+                    "from_stage_id": from_stage_id,
+                    "current_stage_id": current_stage_id,
+                },
+            )
+
+        ts = now_utc()
+        tid = generate_id()
 
         trans = StageTransition(
             id=tid, object_id=object_id,
@@ -252,6 +326,14 @@ class PipelineManager:
         )
 
         return trans
+
+    def _get_object_owner(self, object_id: str) -> str | None:
+        stmt = sa.select(scoped_objects.c.owner_id).where(
+            scoped_objects.c.id == object_id,
+        )
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
+        return row["owner_id"] if row else None
 
     def get_current_stage(self, object_id: str) -> StageTransition | None:
         """Get the most recent stage transition for an object."""
