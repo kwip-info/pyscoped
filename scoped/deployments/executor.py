@@ -13,9 +13,15 @@ from typing import Any, Callable
 
 import sqlalchemy as sa
 
-from scoped.exceptions import DeploymentError, DeploymentGateFailedError
+from scoped.exceptions import DeploymentError, DeploymentGateFailedError, ScopeNotFoundError
 from scoped.storage._query import compile_for
-from scoped.storage._schema import deployment_gates, deployment_targets, deployments
+from scoped.storage._schema import (
+    deployment_gates,
+    deployment_targets,
+    deployments,
+    scoped_objects,
+    scopes,
+)
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, generate_id, now_utc
 
@@ -26,10 +32,33 @@ from scoped.deployments.models import (
     deployment_from_row,
     target_from_row,
 )
-from scoped._stability import experimental
+from scoped._stability import stable
+
+_ALLOWED_TRANSITIONS = {
+    DeploymentState.PENDING: frozenset({DeploymentState.DEPLOYING}),
+    DeploymentState.DEPLOYING: frozenset({DeploymentState.DEPLOYED, DeploymentState.FAILED}),
+    DeploymentState.DEPLOYED: frozenset({DeploymentState.ROLLED_BACK}),
+    DeploymentState.FAILED: frozenset(),
+    DeploymentState.ROLLED_BACK: frozenset(),
+}
 
 
-@experimental()
+def _validate_json_dict(value: dict[str, Any], field_name: str) -> None:
+    """Validate that *value* is a JSON-serializable dict with string keys."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a dict, got {type(value).__name__}")
+    for key in value:
+        if not isinstance(key, str):
+            raise ValueError(
+                f"{field_name} keys must be strings, got {type(key).__name__}"
+            )
+    try:
+        json.dumps(value, default=str)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} is not JSON-serializable: {exc}") from exc
+
+
+@stable(since="1.5.0")
 class DeploymentExecutor:
     """Create and manage deployments and their targets."""
 
@@ -54,11 +83,13 @@ class DeploymentExecutor:
     ) -> DeploymentTarget:
         ts = now_utc()
         tid = generate_id()
+        target_config = config or {}
+        _validate_json_dict(target_config, "config")
         target = DeploymentTarget(
             id=tid,
             name=name,
             target_type=target_type,
-            config=config or {},
+            config=target_config,
             owner_id=owner_id,
             created_at=ts,
         )
@@ -137,6 +168,30 @@ class DeploymentExecutor:
         rollback_of: str | None = None,
     ) -> Deployment:
         """Create a new deployment in PENDING state."""
+        target = self._require_target(target_id, active_only=True)
+        deployment_metadata = metadata or {}
+        _validate_json_dict(deployment_metadata, "metadata")
+        if object_id is not None:
+            self._require_object(object_id)
+        if scope_id is not None:
+            self._require_scope(scope_id)
+        if rollback_of is not None:
+            original = self.get_deployment(rollback_of)
+            if original is None:
+                raise DeploymentError(
+                    f"Rollback source deployment {rollback_of} not found",
+                    context={"rollback_of": rollback_of},
+                )
+            if original.target_id != target_id:
+                raise DeploymentError(
+                    "Rollback deployment target must match the original deployment",
+                    context={
+                        "rollback_of": rollback_of,
+                        "original_target_id": original.target_id,
+                        "target_id": target_id,
+                    },
+                )
+
         # Compute version number for this target
         stmt = (
             sa.select(sa.func.coalesce(sa.func.max(deployments.c.version), 0).label("max_v"))
@@ -157,7 +212,7 @@ class DeploymentExecutor:
             state=DeploymentState.PENDING,
             deployed_by=deployed_by,
             rollback_of=rollback_of,
-            metadata=metadata or {},
+            metadata=deployment_metadata,
         )
         stmt = sa.insert(deployments).values(
             id=did, target_id=target_id, object_id=object_id,
@@ -217,13 +272,17 @@ class DeploymentExecutor:
                 f"Deployment {deployment_id} not found",
                 context={"deployment_id": deployment_id},
             )
-        # Allow DEPLOYED → ROLLED_BACK (rollback path), block other terminal transitions
-        if dep.is_terminal:
-            if not (dep.state == DeploymentState.DEPLOYED and new_state == DeploymentState.ROLLED_BACK):
-                raise DeploymentError(
-                    f"Deployment {deployment_id} is in terminal state {dep.state.value}",
-                    context={"deployment_id": deployment_id, "state": dep.state.value},
-                )
+        allowed = _ALLOWED_TRANSITIONS[dep.state]
+        if new_state not in allowed:
+            raise DeploymentError(
+                f"Invalid deployment transition {dep.state.value} -> {new_state.value}",
+                context={
+                    "deployment_id": deployment_id,
+                    "from_state": dep.state.value,
+                    "to_state": new_state.value,
+                    "allowed_transitions": [state.value for state in allowed],
+                },
+            )
 
         before = dep.snapshot()
         dep.state = new_state
@@ -279,6 +338,7 @@ class DeploymentExecutor:
                 f"Deployment must be in PENDING state, got {dep.state.value}",
                 context={"deployment_id": deployment_id, "state": dep.state.value},
             )
+        self._require_target(dep.target_id, active_only=True)
 
         # Check gates
         stmt = (
@@ -315,3 +375,42 @@ class DeploymentExecutor:
         # Success
         dep = self.transition_state(deployment_id, DeploymentState.DEPLOYED, actor_id=actor_id)
         return dep
+
+    def _require_target(
+        self,
+        target_id: str,
+        *,
+        active_only: bool = False,
+    ) -> DeploymentTarget:
+        target = self.get_target(target_id)
+        if target is None:
+            raise DeploymentError(
+                f"Deployment target {target_id} not found",
+                context={"target_id": target_id},
+            )
+        if active_only and not target.is_active:
+            raise DeploymentError(
+                f"Deployment target {target_id} is archived",
+                context={"target_id": target_id, "lifecycle": target.lifecycle.name},
+            )
+        return target
+
+    def _require_object(self, object_id: str) -> None:
+        stmt = sa.select(scoped_objects.c.id).where(scoped_objects.c.id == object_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
+        if row is None:
+            raise DeploymentError(
+                f"Deployment object {object_id} not found",
+                context={"object_id": object_id},
+            )
+
+    def _require_scope(self, scope_id: str) -> None:
+        stmt = sa.select(scopes.c.id).where(scopes.c.id == scope_id)
+        sql, params = compile_for(stmt, self._backend.dialect)
+        row = self._backend.fetch_one(sql, params)
+        if row is None:
+            raise ScopeNotFoundError(
+                f"Scope {scope_id} not found",
+                context={"scope_id": scope_id},
+            )

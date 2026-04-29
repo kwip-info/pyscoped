@@ -5,9 +5,10 @@ import pytest
 from scoped.deployments.executor import DeploymentExecutor
 from scoped.deployments.gates import GateChecker
 from scoped.deployments.models import DeploymentState, GateType
-from scoped.exceptions import DeploymentError, DeploymentGateFailedError
+from scoped.exceptions import DeploymentError, DeploymentGateFailedError, ScopeNotFoundError
 from scoped.identity.principal import PrincipalStore
 from scoped.objects.manager import ScopedManager
+from scoped.tenancy.lifecycle import ScopeLifecycle
 
 
 @pytest.fixture
@@ -103,6 +104,44 @@ class TestDeploymentCRUD:
         assert d.object_id == obj.id
         assert d.metadata == {"env": "staging"}
 
+    def test_create_deployment_requires_existing_target(self, executor, principals):
+        with pytest.raises(DeploymentError, match="target .* not found"):
+            executor.create_deployment(target_id="missing", deployed_by=principals.id)
+
+    def test_create_deployment_rejects_archived_target(self, executor, principals):
+        target = executor.create_target(name="T", target_type="api", owner_id=principals.id)
+        executor.archive_target(target.id)
+        with pytest.raises(DeploymentError, match="archived"):
+            executor.create_deployment(target_id=target.id, deployed_by=principals.id)
+
+    def test_create_deployment_requires_existing_object(self, executor, principals):
+        target = executor.create_target(name="T", target_type="api", owner_id=principals.id)
+        with pytest.raises(DeploymentError, match="object .* not found"):
+            executor.create_deployment(
+                target_id=target.id,
+                deployed_by=principals.id,
+                object_id="missing-object",
+            )
+
+    def test_create_deployment_requires_existing_scope(self, executor, principals):
+        target = executor.create_target(name="T", target_type="api", owner_id=principals.id)
+        with pytest.raises(ScopeNotFoundError, match="not found"):
+            executor.create_deployment(
+                target_id=target.id,
+                deployed_by=principals.id,
+                scope_id="missing-scope",
+            )
+
+    def test_create_deployment_with_scope(self, executor, principals, sqlite_backend):
+        target = executor.create_target(name="T", target_type="api", owner_id=principals.id)
+        scope = ScopeLifecycle(sqlite_backend).create_scope(name="prod", owner_id=principals.id)
+        deployment = executor.create_deployment(
+            target_id=target.id,
+            deployed_by=principals.id,
+            scope_id=scope.id,
+        )
+        assert deployment.scope_id == scope.id
+
     def test_get_deployment(self, executor, principals):
         t = executor.create_target(name="T", target_type="api", owner_id=principals.id)
         d = executor.create_deployment(target_id=t.id, deployed_by=principals.id)
@@ -137,6 +176,12 @@ class TestTransitionState:
         d = executor.transition_state(d.id, DeploymentState.DEPLOYING)
         assert d.state == DeploymentState.DEPLOYING
 
+    def test_pending_cannot_skip_to_deployed(self, executor, principals):
+        t = executor.create_target(name="T", target_type="api", owner_id=principals.id)
+        d = executor.create_deployment(target_id=t.id, deployed_by=principals.id)
+        with pytest.raises(DeploymentError, match="Invalid deployment transition"):
+            executor.transition_state(d.id, DeploymentState.DEPLOYED)
+
     def test_deploying_to_deployed(self, executor, principals):
         t = executor.create_target(name="T", target_type="api", owner_id=principals.id)
         d = executor.create_deployment(target_id=t.id, deployed_by=principals.id)
@@ -152,12 +197,19 @@ class TestTransitionState:
         d = executor.transition_state(d.id, DeploymentState.FAILED)
         assert d.state == DeploymentState.FAILED
 
+    def test_deploying_cannot_return_to_pending(self, executor, principals):
+        t = executor.create_target(name="T", target_type="api", owner_id=principals.id)
+        d = executor.create_deployment(target_id=t.id, deployed_by=principals.id)
+        executor.transition_state(d.id, DeploymentState.DEPLOYING)
+        with pytest.raises(DeploymentError, match="Invalid deployment transition"):
+            executor.transition_state(d.id, DeploymentState.PENDING)
+
     def test_terminal_state_blocks_transition(self, executor, principals):
         t = executor.create_target(name="T", target_type="api", owner_id=principals.id)
         d = executor.create_deployment(target_id=t.id, deployed_by=principals.id)
         executor.transition_state(d.id, DeploymentState.DEPLOYING)
         executor.transition_state(d.id, DeploymentState.DEPLOYED)
-        with pytest.raises(DeploymentError, match="terminal"):
+        with pytest.raises(DeploymentError, match="Invalid deployment transition"):
             executor.transition_state(d.id, DeploymentState.DEPLOYING)
 
     def test_nonexistent_deployment(self, executor):
@@ -209,6 +261,13 @@ class TestExecuteDeployment:
         d = executor.create_deployment(target_id=t.id, deployed_by=principals.id)
         executor.transition_state(d.id, DeploymentState.DEPLOYING)
         with pytest.raises(DeploymentError, match="PENDING"):
+            executor.execute_deployment(d.id, actor_id=principals.id)
+
+    def test_execute_rejects_archived_target(self, executor, principals):
+        t = executor.create_target(name="T", target_type="api", owner_id=principals.id)
+        d = executor.create_deployment(target_id=t.id, deployed_by=principals.id)
+        executor.archive_target(t.id)
+        with pytest.raises(DeploymentError, match="archived"):
             executor.execute_deployment(d.id, actor_id=principals.id)
 
     def test_execute_blocked_by_gate(self, executor, gate_checker, principals):

@@ -32,10 +32,10 @@ from scoped.environments.models import (
     environment_from_row,
     snapshot_from_row,
 )
-from scoped._stability import experimental
+from scoped._stability import stable
 
 
-@experimental()
+@stable(since="1.1.0")
 class SnapshotManager:
     """Capture and restore environment state snapshots."""
 

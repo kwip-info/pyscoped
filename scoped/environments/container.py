@@ -25,10 +25,10 @@ from scoped.environments.models import (
     env_object_from_row,
     environment_from_row,
 )
-from scoped._stability import experimental
+from scoped._stability import stable
 
 
-@experimental()
+@stable(since="1.1.0")
 class EnvironmentContainer:
     """Manages the set of objects within an environment."""
 

@@ -23,7 +23,22 @@ from scoped.deployments.models import (
     GateType,
     gate_from_row,
 )
-from scoped._stability import experimental
+from scoped._stability import stable
+
+
+def _validate_json_dict(value: dict[str, Any], field_name: str) -> None:
+    """Validate that *value* is a JSON-serializable dict with string keys."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a dict, got {type(value).__name__}")
+    for key in value:
+        if not isinstance(key, str):
+            raise ValueError(
+                f"{field_name} keys must be strings, got {type(key).__name__}"
+            )
+    try:
+        json.dumps(value, default=str)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} is not JSON-serializable: {exc}") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +51,7 @@ class GateResult:
     failed_count: int = 0
 
 
-@experimental()
+@stable(since="1.5.0")
 class GateChecker:
     """Record and evaluate deployment gate checks."""
 
@@ -61,13 +76,15 @@ class GateChecker:
         """Record a gate check result."""
         ts = now_utc()
         gid = generate_id()
+        gate_details = details or {}
+        _validate_json_dict(gate_details, "details")
         gate = DeploymentGate(
             id=gid,
             deployment_id=deployment_id,
             gate_type=gate_type,
             passed=passed,
             checked_at=ts,
-            details=details or {},
+            details=gate_details,
         )
         stmt = sa.insert(deployment_gates).values(
             id=gid, deployment_id=deployment_id,

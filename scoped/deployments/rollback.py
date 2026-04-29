@@ -8,6 +8,7 @@ traces as forward deployments.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import sqlalchemy as sa
@@ -20,10 +21,25 @@ from scoped.types import ActionType, now_utc
 
 from scoped.deployments.executor import DeploymentExecutor
 from scoped.deployments.models import Deployment, DeploymentState
-from scoped._stability import experimental
+from scoped._stability import stable
 
 
-@experimental()
+def _validate_json_dict(value: dict[str, Any], field_name: str) -> None:
+    """Validate that *value* is a JSON-serializable dict with string keys."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a dict, got {type(value).__name__}")
+    for key in value:
+        if not isinstance(key, str):
+            raise ValueError(
+                f"{field_name} keys must be strings, got {type(key).__name__}"
+            )
+    try:
+        json.dumps(value, default=str)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} is not JSON-serializable: {exc}") from exc
+
+
+@stable(since="1.5.0")
 class DeploymentRollbackManager:
     """Create and manage deployment rollbacks."""
 
@@ -63,6 +79,8 @@ class DeploymentRollbackManager:
                     "state": original.state.value,
                 },
             )
+        rollback_metadata = metadata or {"reason": f"rollback of {deployment_id}"}
+        _validate_json_dict(rollback_metadata, "metadata")
 
         # Create a new rollback deployment
         rollback_dep = self._executor.create_deployment(
@@ -71,7 +89,7 @@ class DeploymentRollbackManager:
             object_id=original.object_id,
             scope_id=original.scope_id,
             rollback_of=deployment_id,
-            metadata=metadata or {"reason": f"rollback of {deployment_id}"},
+            metadata=rollback_metadata,
         )
 
         # Mark original as rolled back
@@ -97,8 +115,15 @@ class DeploymentRollbackManager:
         """Get the chain of rollbacks for a deployment."""
         chain: list[Deployment] = []
         current_id: str | None = deployment_id
+        seen: set[str] = set()
 
         while current_id is not None:
+            if current_id in seen:
+                raise DeploymentRollbackError(
+                    f"Detected cycle in rollback chain at deployment {current_id}",
+                    context={"deployment_id": deployment_id, "cycle_at": current_id},
+                )
+            seen.add(current_id)
             dep = self._executor.get_deployment(current_id)
             if dep is None:
                 break
@@ -107,6 +132,7 @@ class DeploymentRollbackManager:
             stmt = (
                 sa.select(deployments.c.id)
                 .where(deployments.c.rollback_of == current_id)
+                .order_by(deployments.c.version.asc())
             )
             sql, params = compile_for(stmt, self._backend.dialect)
             row = self._backend.fetch_one(sql, params)

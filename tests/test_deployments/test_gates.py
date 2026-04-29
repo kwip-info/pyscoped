@@ -74,6 +74,15 @@ class TestRecordGate:
         )
         assert g.gate_type == GateType.CUSTOM
 
+    def test_details_must_be_json_object(self, checker, deployment):
+        with pytest.raises(ValueError, match="details must be a dict"):
+            checker.record_gate(
+                deployment_id=deployment.id,
+                gate_type=GateType.CUSTOM,
+                passed=True,
+                details=["bad"],
+            )
+
 
 class TestGetGates:
 

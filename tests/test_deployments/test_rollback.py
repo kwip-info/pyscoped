@@ -69,6 +69,14 @@ class TestRollbackDeployment:
         )
         assert rb.metadata == {"reason": "regression found"}
 
+    def test_rollback_metadata_must_be_json_object(self, rollbacks, deployed, principals):
+        with pytest.raises(ValueError, match="metadata must be a dict"):
+            rollbacks.rollback_deployment(
+                deployed.id,
+                actor_id=principals.id,
+                metadata=["bad"],
+            )
+
     def test_rollback_nonexistent(self, rollbacks, principals):
         with pytest.raises(DeploymentRollbackError, match="not found"):
             rollbacks.rollback_deployment("nonexistent", actor_id=principals.id)

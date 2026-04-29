@@ -869,9 +869,9 @@ scoped/
   rules/                   # Layer 5: Policy engine + rate limiting + typed conditions
   audit/                   # Layer 6: Hash-chained trail (writer + query)
   temporal/                # Layer 7: Rollback + reconstruction
-  environments/            # Layer 8: Ephemeral workspaces (@experimental)
-  flow/                    # Layer 9: Pipelines + promotions (@experimental)
-  deployments/             # Layer 10: External graduation (@experimental)
+  environments/            # Layer 8: Ephemeral workspaces (@stable)
+  flow/                    # Layer 9: Pipelines + promotions (@stable)
+  deployments/             # Layer 10: External graduation (@stable)
   secrets/                 # Layer 11: Encrypted vault (@experimental)
   integrations/            # Layer 12: Plugin lifecycle (@experimental)
   connector/               # Layer 13: Federation + marketplace (@preview)

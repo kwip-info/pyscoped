@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.5.0 (2026-04-29)
+
+### Layer 10 (Deployments) — graduate to stable
+
+**Layer 10 is now stable.** The `@experimental` decorators on `DeploymentExecutor`, `GateChecker`, and `DeploymentRollbackManager` have been replaced with `@stable(since="1.5.0")`.
+
+### Fixed — deployment validation and state-machine hardening
+
+- `DeploymentExecutor.create_target()`, `create_deployment()`, `GateChecker.record_gate()`, and `DeploymentRollbackManager.rollback_deployment()` now validate config / metadata / gate details as JSON-serializable dicts with string keys before persisting them.
+- `DeploymentExecutor.create_deployment()` now pre-validates referenced targets, objects, scopes, and rollback sources, raising scoped errors instead of leaking storage-level failures.
+- Archived deployment targets can no longer accept new deployments or execute pending ones.
+- Deployment state transitions now enforce an explicit state machine: `pending -> deploying -> deployed|failed`, with `deployed -> rolled_back` reserved for rollback.
+- Rollback chains now guard against cycles and read deterministically by version order.
+
+### Changed
+
+- Layer 8 (Environments) is now explicitly marked stable in code. `EnvironmentLifecycle`, `EnvironmentContainer`, and `SnapshotManager` now use `@stable(since="1.1.0")`, matching the earlier production-hardening releases.
+
+### Docs
+
+- Backfilled missing changelog entries for `1.0.5`, `1.1.0`, and `1.2.0` so the public release history matches the tagged releases.
+
 ## 1.4.1 (2026-04-17)
 
 ### Fixed — Layer 3 ↔ Layer 4 visibility integration
@@ -69,6 +91,40 @@ All three accept model instances or string IDs for references, and infer `owner_
 ### Fixed
 - **Rollback now actually reverts object versions.** `RollbackExecutor.rollback_action()` on a real object-update trace previously reported `success=True` but left `current_version` unchanged — the restore path looked for `current_version` inside `before_state`, but the object manager records the version's data dict there, not a metadata pointer. Fixed by recording `before_version`/`after_version` in the audit trace's `metadata` field (which is not part of the hash chain, so audit integrity is unaffected) and having `_apply_rollback_state` read from metadata. The rolled-back version row in `object_versions` is now also removed, so the freed version number is reused by the next update and no longer collides with the `UniqueConstraint("object_id", "version")`.
 - **`scoped.objects` no longer gets shadowed by the submodule.** The documented `scoped.objects.create(...)` quick-start form would fail after the first call because lazy imports of `scoped.objects.blobs` / `search` / etc. caused Python's import machinery to install the submodule as an attribute on the package, shadowing the `ObjectsNamespace` returned by the package-level `__getattr__`. The package now uses a `ModuleType` subclass whose `__getattribute__` always routes namespace names through the default client, so the documented quick-start works end-to-end regardless of import order.
+
+## 1.2.0 (2026-04-06)
+
+### Added
+- **`scoped.environments` namespace.** Layer 8 now has a module-level namespace with context-aware lifecycle, container, template, and snapshot operations, matching the simplified APIs used elsewhere in the SDK.
+- **Snapshot retention management.** `SnapshotManager.apply_retention(max_age_days, max_snapshots)` can prune old environment snapshots by age and count.
+- **Environment storage indexes.** Migration `m0015` adds indexes for common Layer 8 query paths on environment ownership, state, object origin, and snapshot history.
+
+### Changed
+- **Layer 8 rule integration.** The rule engine now accepts `environment_id`, evaluates `BindingTargetType.ENVIRONMENT` bindings, and `EnvironmentContainer.add_object()` consults rules when a `rule_engine` is wired.
+- **Metadata validation for environment inputs.** `spawn()` and `create_template()` now validate metadata/config dicts for string keys and JSON-serializability before writing invalid payloads.
+- **Default service wiring expanded.** `ScopedServices` now exposes environment container and snapshot managers with the usual audit and rule-engine dependencies injected.
+
+### Fixed
+- **Environment rollback support.** Layer 7 rollback now restores environment state transitions from audit `before_state`, and rolling back an environment spawn marks the environment discarded instead of leaving inconsistent state behind.
+
+## 1.1.0 (2026-04-06)
+
+### Layer 8 (Environments) — production hardening
+
+### Fixed
+- **Lifecycle transaction safety.** `spawn()` now cleans up the auto-created scope if environment creation fails, and `discard()` restores the previous environment state if the scope archive step fails.
+- **Ownership enforcement across Layer 8.** Lifecycle transitions, container mutations, and snapshot operations now consistently require the environment owner and raise `AccessDeniedError` on misuse.
+- **Environment discard cleanup.** Discarding an environment now tombstones objects created inside it while leaving projected-in external objects untouched.
+- **Snapshot restore correctness.** `SnapshotManager.restore()` now reinstates object `current_version` pointers, resynchronizes `environment_objects`, and verifies snapshot checksums during restore.
+
+### Changed
+- **Layer 8 audit coverage.** Container add/remove operations and snapshot capture/restore now emit audit records, closing earlier trace gaps in environment activity.
+
+## 1.0.5 (2026-04-06)
+
+### Fixed
+- **Typed object versions deserialize correctly.** `list_versions()` and `get_version()` now pass `object_type` through version row decoding, so `typed_data` returns hydrated custom instances instead of raw dict payloads.
+- **Rollback works for custom object types.** `RollbackExecutor` now resolves rollback targets through `scoped_objects` instead of assuming `target_type == "object"`, fixing rollback for typed models such as `invoice`.
 
 ## 1.0.4 (2026-04-03)
 

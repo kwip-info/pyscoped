@@ -35,7 +35,7 @@ from scoped.environments.models import (
     environment_from_row,
     template_from_row,
 )
-from scoped._stability import experimental
+from scoped._stability import stable
 
 
 def _validate_json_dict(value: dict[str, Any], field_name: str) -> None:
@@ -53,7 +53,7 @@ def _validate_json_dict(value: dict[str, Any], field_name: str) -> None:
         raise ValueError(f"{field_name} is not JSON-serializable: {exc}") from exc
 
 
-@experimental()
+@stable(since="1.1.0")
 class EnvironmentLifecycle:
     """Manages environment creation and state transitions."""
 

@@ -195,10 +195,15 @@ class TestIntrospection:
 
 
 class TestFrameworkClasses:
-    def test_environment_lifecycle_is_experimental(self):
+    def test_environment_lifecycle_is_stable(self):
         from scoped.environments.lifecycle import EnvironmentLifecycle
 
-        assert get_stability_level(EnvironmentLifecycle) == StabilityLevel.EXPERIMENTAL
+        assert get_stability_level(EnvironmentLifecycle) == StabilityLevel.STABLE
+
+    def test_deployment_executor_is_stable(self):
+        from scoped.deployments.executor import DeploymentExecutor
+
+        assert get_stability_level(DeploymentExecutor) == StabilityLevel.STABLE
 
     def test_connector_manager_is_preview(self):
         from scoped.connector.bridge import ConnectorManager
