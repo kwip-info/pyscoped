@@ -872,7 +872,7 @@ scoped/
   environments/            # Layer 8: Ephemeral workspaces (@stable)
   flow/                    # Layer 9: Pipelines + promotions (@stable)
   deployments/             # Layer 10: External graduation (@stable)
-  secrets/                 # Layer 11: Encrypted vault (@experimental)
+  secrets/                 # Layer 11: Encrypted vault (@stable)
   integrations/            # Layer 12: Plugin lifecycle (@experimental)
   connector/               # Layer 13: Federation + marketplace (@preview)
   events/                  # Layer 14: Event bus + webhooks (@experimental)

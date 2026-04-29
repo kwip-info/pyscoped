@@ -12,6 +12,7 @@ from scoped.exceptions import (
 from scoped.identity.principal import PrincipalStore
 from scoped.objects.manager import ScopedManager
 from scoped.secrets.backend import InMemoryBackend
+from scoped.secrets.policy import SecretPolicyManager
 from scoped.secrets.models import AccessResult
 from scoped.secrets.vault import SecretVault
 from scoped.types import now_utc
@@ -33,10 +34,25 @@ def objects(sqlite_backend):
 @pytest.fixture
 def vault(sqlite_backend, objects):
     enc = InMemoryBackend()
-    return SecretVault(sqlite_backend, enc, object_manager=objects)
+    policies = SecretPolicyManager(sqlite_backend)
+    return SecretVault(
+        sqlite_backend,
+        enc,
+        object_manager=objects,
+        policy_manager=policies,
+    )
 
 
 class TestCreateSecret:
+    def test_create_requires_object_manager(self, sqlite_backend):
+        enc = InMemoryBackend()
+        vault = SecretVault(sqlite_backend, enc)
+        with pytest.raises(ValueError, match="object_manager"):
+            vault.create_secret(
+                name="api-key",
+                plaintext_value="sk-12345",
+                owner_id="alice",
+            )
 
     def test_basic_create(self, vault, principals):
         alice, _ = principals
@@ -58,6 +74,16 @@ class TestCreateSecret:
             owner_id=alice.id, classification="critical",
         )
         assert secret.classification.value == "critical"
+
+    def test_create_with_invalid_classification(self, vault, principals):
+        alice, _ = principals
+        with pytest.raises(ValueError, match="classification"):
+            vault.create_secret(
+                name="db-pass",
+                plaintext_value="secret",
+                owner_id=alice.id,
+                classification="unknown",
+            )
 
     def test_get_secret(self, vault, principals):
         alice, _ = principals
@@ -156,6 +182,26 @@ class TestRotation:
         with pytest.raises(SecretNotFoundError):
             vault.rotate("nonexistent", new_value="v", rotated_by=alice.id)
 
+    def test_rotate_archived_secret(self, vault, principals):
+        alice, _ = principals
+        secret, _ = vault.create_secret(
+            name="k", plaintext_value="old-value", owner_id=alice.id,
+        )
+        vault.archive_secret(secret.id, actor_id=alice.id)
+        with pytest.raises(SecretAccessDeniedError, match="archived"):
+            vault.rotate(secret.id, new_value="new-value", rotated_by=alice.id)
+
+    def test_rotate_expired_secret(self, vault, principals):
+        alice, _ = principals
+        secret, _ = vault.create_secret(
+            name="k",
+            plaintext_value="old-value",
+            owner_id=alice.id,
+            expires_at=now_utc() - timedelta(minutes=1),
+        )
+        with pytest.raises(SecretAccessDeniedError, match="expired"):
+            vault.rotate(secret.id, new_value="new-value", rotated_by=alice.id)
+
 
 class TestRefs:
 
@@ -170,6 +216,48 @@ class TestRefs:
         assert ref.secret_id == secret.id
         assert ref.granted_to == bob.id
         assert ref.is_active
+
+    def test_grant_ref_archived_secret_denied(self, vault, principals):
+        alice, bob = principals
+        secret, _ = vault.create_secret(name="k", plaintext_value="v", owner_id=alice.id)
+        vault.archive_secret(secret.id, actor_id=alice.id)
+        with pytest.raises(SecretAccessDeniedError, match="archived"):
+            vault.grant_ref(
+                secret_id=secret.id,
+                granted_to=bob.id,
+                granted_by=alice.id,
+            )
+
+    def test_grant_ref_requires_scope_when_policy_restricts_scope(self, vault, principals):
+        alice, bob = principals
+        secret, _ = vault.create_secret(name="k", plaintext_value="v", owner_id=alice.id)
+        vault._policy_manager.create_policy(
+            created_by=alice.id,
+            secret_id=secret.id,
+            allowed_scopes=["scope-1"],
+        )
+        with pytest.raises(SecretAccessDeniedError, match="scope_id"):
+            vault.grant_ref(
+                secret_id=secret.id,
+                granted_to=bob.id,
+                granted_by=alice.id,
+            )
+
+    def test_grant_ref_rejects_disallowed_policy_scope(self, vault, principals):
+        alice, bob = principals
+        secret, _ = vault.create_secret(name="k", plaintext_value="v", owner_id=alice.id)
+        vault._policy_manager.create_policy(
+            created_by=alice.id,
+            secret_id=secret.id,
+            allowed_scopes=["scope-1"],
+        )
+        with pytest.raises(SecretAccessDeniedError, match="policy denies"):
+            vault.grant_ref(
+                secret_id=secret.id,
+                granted_to=bob.id,
+                granted_by=alice.id,
+                scope_id="scope-2",
+            )
 
     def test_grant_with_scope(self, vault, principals):
         alice, bob = principals
@@ -334,6 +422,59 @@ class TestResolve:
         _, bob = principals
         with pytest.raises(SecretAccessDeniedError, match="Invalid"):
             vault.resolve("bad-token", accessor_id=bob.id)
+
+    def test_resolve_archived_secret_denied(self, vault, principals):
+        alice, bob = principals
+        secret, _ = vault.create_secret(name="k", plaintext_value="v", owner_id=alice.id)
+        ref = vault.grant_ref(secret_id=secret.id, granted_to=bob.id, granted_by=alice.id)
+        vault.archive_secret(secret.id, actor_id=alice.id)
+        with pytest.raises(SecretAccessDeniedError, match="revoked"):
+            vault.resolve(ref.ref_token, accessor_id=bob.id)
+
+    def test_grant_ref_expired_secret_denied(self, vault, principals):
+        alice, bob = principals
+        secret, _ = vault.create_secret(
+            name="k",
+            plaintext_value="v",
+            owner_id=alice.id,
+            expires_at=now_utc() - timedelta(minutes=1),
+        )
+        with pytest.raises(SecretAccessDeniedError, match="expired"):
+            vault.grant_ref(secret_id=secret.id, granted_to=bob.id, granted_by=alice.id)
+
+    def test_resolve_policy_scope_restriction(self, vault, principals):
+        alice, bob = principals
+        secret, _ = vault.create_secret(name="k", plaintext_value="v", owner_id=alice.id)
+        vault._policy_manager.create_policy(
+            created_by=alice.id,
+            secret_id=secret.id,
+            allowed_scopes=["scope-1"],
+        )
+        ref = vault.grant_ref(
+            secret_id=secret.id,
+            granted_to=bob.id,
+            granted_by=alice.id,
+            scope_id="scope-1",
+        )
+        with pytest.raises(SecretAccessDeniedError, match="different scope"):
+            vault.resolve(ref.ref_token, accessor_id=bob.id, scope_id="scope-2")
+
+    def test_resolve_policy_requires_scope(self, vault, principals):
+        alice, bob = principals
+        secret, _ = vault.create_secret(name="k", plaintext_value="v", owner_id=alice.id)
+        vault._policy_manager.create_policy(
+            created_by=alice.id,
+            secret_id=secret.id,
+            allowed_scopes=["scope-1"],
+        )
+        ref = vault.grant_ref(
+            secret_id=secret.id,
+            granted_to=bob.id,
+            granted_by=alice.id,
+            scope_id="scope-1",
+        )
+        with pytest.raises(SecretAccessDeniedError, match="different scope"):
+            vault.resolve(ref.ref_token, accessor_id=bob.id)
 
 
 class TestAccessLog:

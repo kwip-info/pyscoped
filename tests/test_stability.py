@@ -205,6 +205,11 @@ class TestFrameworkClasses:
 
         assert get_stability_level(DeploymentExecutor) == StabilityLevel.STABLE
 
+    def test_secret_vault_is_stable(self):
+        from scoped.secrets.vault import SecretVault
+
+        assert get_stability_level(SecretVault) == StabilityLevel.STABLE
+
     def test_connector_manager_is_preview(self):
         from scoped.connector.bridge import ConnectorManager
 

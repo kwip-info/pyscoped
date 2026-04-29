@@ -98,7 +98,14 @@ class ScopedTestCase:
         self.flow_engine = FlowEngine(self.backend, audit_writer=self.audit)
         self.pipelines = PipelineManager(self.backend, audit_writer=self.audit)
         self.deployments = DeploymentExecutor(self.backend, audit_writer=self.audit)
-        self.secrets = SecretVault(self.backend, self.manager, audit_writer=self.audit)
+        from scoped.secrets.backend import InMemoryBackend
+
+        self.secrets = SecretVault(
+            self.backend,
+            InMemoryBackend(),
+            object_manager=self.manager,
+            audit_writer=self.audit,
+        )
         self.plugins = PluginLifecycleManager(self.backend, audit_writer=self.audit)
         self.connectors = ConnectorManager(self.backend, audit_writer=self.audit)
         self.events = EventBus(self.backend, audit_writer=self.audit)

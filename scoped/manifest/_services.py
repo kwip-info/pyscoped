@@ -32,6 +32,7 @@ class ScopedServices:
     _promotions: Any = None
     _deployments: Any = None
     _secrets: Any = None
+    _secret_policies: Any = None
     _plugins: Any = None
     _connectors: Any = None
     _events: Any = None
@@ -183,11 +184,17 @@ class ScopedServices:
     def secrets(self) -> Any:
         if self._secrets is None:
             from scoped.secrets.backend import InMemoryBackend as InMemorySecretBackend
+            from scoped.secrets.policy import SecretPolicyManager
             from scoped.secrets.vault import SecretVault
             encryption = InMemorySecretBackend()
+            if self._secret_policies is None:
+                self._secret_policies = SecretPolicyManager(self.backend)
             self._secrets = SecretVault(
-                self.backend, encryption,
-                object_manager=self.manager, audit_writer=self.audit,
+                self.backend,
+                encryption,
+                object_manager=self.manager,
+                policy_manager=self._secret_policies,
+                audit_writer=self.audit,
             )
         return self._secrets
 

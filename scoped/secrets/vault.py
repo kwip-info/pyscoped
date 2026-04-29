@@ -6,12 +6,12 @@ It coordinates encryption, storage, ref management, and access logging.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import sqlalchemy as sa
 
 from scoped.logging import get_logger
+from scoped._stability import stable
 from scoped.exceptions import (
     SecretAccessDeniedError,
     SecretNotFoundError,
@@ -22,6 +22,7 @@ from scoped.secrets.backend import SecretBackend
 from scoped.secrets.models import (
     AccessResult,
     Secret,
+    SecretClassification,
     SecretAccessEntry,
     SecretRef,
     SecretVersion,
@@ -30,6 +31,7 @@ from scoped.secrets.models import (
     secret_from_row,
     version_from_row,
 )
+from scoped.secrets.policy import SecretPolicyManager
 from scoped.storage._query import compile_for
 from scoped.storage._schema import (
     secret_access_log,
@@ -44,6 +46,27 @@ from scoped.types import ActionType, Lifecycle, generate_id, now_utc
 _logger = get_logger("secrets.vault")
 
 
+def _coerce_classification(value: str) -> SecretClassification:
+    try:
+        return SecretClassification(value)
+    except ValueError as exc:
+        valid = ", ".join(item.value for item in SecretClassification)
+        raise ValueError(f"classification must be one of: {valid}") from exc
+
+
+def _validate_scope_or_env_list(
+    values: list[str],
+    *,
+    field_name: str,
+) -> None:
+    if not isinstance(values, list):
+        raise ValueError(f"{field_name} must be a list of string IDs")
+    for value in values:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{field_name} entries must be non-empty strings")
+
+
+@stable(since="1.5.0")
 class SecretVault:
     """Create, rotate, and resolve secrets via encrypted refs."""
 
@@ -53,11 +76,13 @@ class SecretVault:
         encryption: SecretBackend,
         *,
         object_manager: ScopedManager | None = None,
+        policy_manager: SecretPolicyManager | None = None,
         audit_writer: Any | None = None,
     ) -> None:
         self._backend = backend
         self._encryption = encryption
         self._objects = object_manager
+        self._policy_manager = policy_manager
         self._audit = audit_writer
         # Generate a default key on init
         self._default_key_id, _ = encryption.generate_key()
@@ -80,20 +105,23 @@ class SecretVault:
         Also creates a backing scoped object if an object_manager
         is configured.
         """
+        if self._objects is None:
+            raise ValueError(
+                "SecretVault requires object_manager for create_secret() so "
+                "secrets.object_id can reference a real scoped object"
+            )
         ts = now_utc()
         sid = generate_id()
         use_key = key_id or self._default_key_id
+        secret_classification = _coerce_classification(classification)
 
         # Create backing scoped object
-        if self._objects is not None:
-            obj, _ = self._objects.create(
-                object_type="secret",
-                owner_id=owner_id,
-                data={"name": name, "classification": classification},
-            )
-            object_id = obj.id
-        else:
-            object_id = generate_id()
+        obj, _ = self._objects.create(
+            object_type="secret",
+            owner_id=owner_id,
+            data={"name": name, "classification": classification},
+        )
+        object_id = obj.id
 
         # Encrypt value
         encrypted = self._encryption.encrypt(plaintext_value, key_id=use_key)
@@ -104,7 +132,7 @@ class SecretVault:
             owner_id=owner_id,
             object_id=object_id,
             description=description,
-            classification=__import__("scoped.secrets.models", fromlist=["SecretClassification"]).SecretClassification(classification),
+            classification=secret_classification,
             created_at=ts,
             expires_at=expires_at,
         )
@@ -204,6 +232,7 @@ class SecretVault:
 
     def archive_secret(self, secret_id: str, *, actor_id: str) -> None:
         """Archive a secret and revoke all its refs."""
+        secret = self.get_secret_or_raise(secret_id)
         stmt = sa.update(secrets).where(secrets.c.id == secret_id).values(
             lifecycle="ARCHIVED",
         )
@@ -222,6 +251,7 @@ class SecretVault:
                 action=ActionType.SECRET_REVOKE,
                 target_type="secret",
                 target_id=secret_id,
+                before_state=secret.snapshot(),
             )
 
     # -- Rotation ----------------------------------------------------------
@@ -236,7 +266,7 @@ class SecretVault:
         key_id: str | None = None,
     ) -> SecretVersion:
         """Rotate a secret to a new value. Old version is kept."""
-        secret = self.get_secret_or_raise(secret_id)
+        secret = self._require_active_secret(secret_id, allow_expired=False)
         ts = now_utc()
         use_key = key_id or self._default_key_id
         new_version = secret.current_version + 1
@@ -322,7 +352,12 @@ class SecretVault:
         expires_at: Any | None = None,
     ) -> SecretRef:
         """Grant a reference token for a secret to a principal."""
-        self.get_secret_or_raise(secret_id)
+        self._require_active_secret(secret_id, allow_expired=False)
+        self._enforce_policy_restrictions_on_grant(
+            secret_id,
+            scope_id=scope_id,
+            environment_id=environment_id,
+        )
         ts = now_utc()
         rid = generate_id()
         ref_token = generate_id()  # opaque token
@@ -496,7 +531,12 @@ class SecretVault:
             )
 
         # Get current version and decrypt
-        secret = self.get_secret_or_raise(ref.secret_id)
+        secret = self._require_active_secret(ref.secret_id, allow_expired=False)
+        self._enforce_policy_restrictions_on_resolve(
+            ref.secret_id,
+            scope_id=scope_id,
+            environment_id=environment_id,
+        )
         ver = self.get_version(ref.secret_id, secret.current_version)
         if ver is None:
             raise SecretNotFoundError(
@@ -569,3 +609,91 @@ class SecretVault:
         sql, params = compile_for(stmt, self._backend.dialect)
         rows = self._backend.fetch_all(sql, params)
         return [access_entry_from_row(r) for r in rows]
+
+    def _require_active_secret(
+        self,
+        secret_id: str,
+        *,
+        allow_expired: bool,
+    ) -> Secret:
+        secret = self.get_secret_or_raise(secret_id)
+        if not secret.is_active:
+            raise SecretAccessDeniedError(
+                "Secret is archived",
+                context={"secret_id": secret_id, "lifecycle": secret.lifecycle.name},
+            )
+        if not allow_expired and secret.expires_at is not None and now_utc() >= secret.expires_at:
+            raise SecretAccessDeniedError(
+                "Secret has expired",
+                context={"secret_id": secret_id, "expires_at": secret.expires_at.isoformat()},
+            )
+        return secret
+
+    def _enforce_policy_restrictions_on_grant(
+        self,
+        secret_id: str,
+        *,
+        scope_id: str | None,
+        environment_id: str | None,
+    ) -> None:
+        if self._policy_manager is None:
+            return
+        policies = self._policy_manager.get_policies_for_secret(secret_id)
+        if not policies:
+            return
+
+        restricted_scopes = [p.allowed_scopes for p in policies if p.allowed_scopes]
+        if restricted_scopes:
+            if scope_id is None:
+                raise SecretAccessDeniedError(
+                    "Policy-restricted secret refs must specify scope_id",
+                    context={"secret_id": secret_id},
+                )
+            if not self._policy_manager.check_scope_allowed(secret_id, scope_id):
+                raise SecretAccessDeniedError(
+                    "Secret policy denies the requested scope",
+                    context={"secret_id": secret_id, "scope_id": scope_id},
+                )
+
+        restricted_envs = [p.allowed_envs for p in policies if p.allowed_envs]
+        if restricted_envs:
+            if environment_id is None:
+                raise SecretAccessDeniedError(
+                    "Policy-restricted secret refs must specify environment_id",
+                    context={"secret_id": secret_id},
+                )
+            if not self._policy_manager.check_env_allowed(secret_id, environment_id):
+                raise SecretAccessDeniedError(
+                    "Secret policy denies the requested environment",
+                    context={"secret_id": secret_id, "environment_id": environment_id},
+                )
+
+    def _enforce_policy_restrictions_on_resolve(
+        self,
+        secret_id: str,
+        *,
+        scope_id: str | None,
+        environment_id: str | None,
+    ) -> None:
+        if self._policy_manager is None:
+            return
+        policies = self._policy_manager.get_policies_for_secret(secret_id)
+        if not policies:
+            return
+
+        if any(p.allowed_scopes for p in policies):
+            if scope_id is None or not self._policy_manager.check_scope_allowed(secret_id, scope_id):
+                raise SecretAccessDeniedError(
+                    "Secret policy denies access from this scope",
+                    context={"secret_id": secret_id, "scope_id": scope_id},
+                )
+
+        if any(p.allowed_envs for p in policies):
+            if (
+                environment_id is None
+                or not self._policy_manager.check_env_allowed(secret_id, environment_id)
+            ):
+                raise SecretAccessDeniedError(
+                    "Secret policy denies access from this environment",
+                    context={"secret_id": secret_id, "environment_id": environment_id},
+                )

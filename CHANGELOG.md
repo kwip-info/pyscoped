@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.6.0 (2026-04-29)
+
+### Layer 11 (Secrets) — graduate to stable
+
+**Layer 11 is now stable.** `SecretVault` and `SecretPolicyManager` now use `@stable(since="1.6.0")`, and the default service wiring attaches secret policies to the vault automatically.
+
+### Fixed — vault lifecycle, policy, and API hardening
+
+- `SecretVault.create_secret()` now requires a real `object_manager` so `secrets.object_id` always points at a valid backing scoped object instead of silently fabricating an invalid foreign key.
+- Secret classification values are now validated before write-time side effects in both vault and policy APIs.
+- Archived and expired secrets can no longer be rotated or granted new refs.
+- Secret policies are now enforced during ref grant and resolve, not just exposed as a separate helper API.
+- `SecretPolicyManager.create_policy()` now validates its target, classification, max age, and scope/environment restriction lists before persisting malformed policies.
+
+### Changed
+
+- `ScopedServices.secrets` now wires `SecretPolicyManager` into `SecretVault` by default, so namespace and client users get policy-aware enforcement without manual construction.
+
 ## 1.5.0 (2026-04-29)
 
 ### Layer 10 (Deployments) — graduate to stable

@@ -7,7 +7,9 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from scoped._stability import stable
 from scoped.secrets.models import (
+    SecretClassification,
     SecretPolicy,
     policy_from_row,
 )
@@ -17,6 +19,28 @@ from scoped.storage.interface import StorageBackend
 from scoped.types import generate_id, now_utc
 
 
+def _coerce_classification(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return SecretClassification(value).value
+    except ValueError as exc:
+        valid = ", ".join(item.value for item in SecretClassification)
+        raise ValueError(f"classification must be one of: {valid}") from exc
+
+
+def _validate_id_list(values: list[str] | None, *, field_name: str) -> list[str]:
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        raise ValueError(f"{field_name} must be a list of string IDs")
+    for value in values:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{field_name} entries must be non-empty strings")
+    return values
+
+
+@stable(since="1.5.0")
 class SecretPolicyManager:
     """Create and evaluate secret policies."""
 
@@ -34,23 +58,42 @@ class SecretPolicyManager:
         allowed_scopes: list[str] | None = None,
         allowed_envs: list[str] | None = None,
     ) -> SecretPolicy:
+        if secret_id is None and classification is None:
+            raise ValueError("policy must target a secret_id or classification")
+        if max_age_seconds is not None and max_age_seconds < 0:
+            raise ValueError("max_age_seconds must be >= 0")
+        normalized_classification = _coerce_classification(classification)
+        scope_restrictions = _validate_id_list(
+            allowed_scopes,
+            field_name="allowed_scopes",
+        )
+        env_restrictions = _validate_id_list(
+            allowed_envs,
+            field_name="allowed_envs",
+        )
+        if secret_id is not None:
+            stmt = sa.select(secrets.c.id).where(secrets.c.id == secret_id)
+            sql, params = compile_for(stmt, self._backend.dialect)
+            if self._backend.fetch_one(sql, params) is None:
+                raise ValueError(f"secret_id does not exist: {secret_id}")
+
         ts = now_utc()
         pid = generate_id()
         policy = SecretPolicy(
             id=pid,
             secret_id=secret_id,
-            classification=classification,
+            classification=normalized_classification,
             max_age_seconds=max_age_seconds,
             auto_rotate=auto_rotate,
-            allowed_scopes=allowed_scopes or [],
-            allowed_envs=allowed_envs or [],
+            allowed_scopes=scope_restrictions,
+            allowed_envs=env_restrictions,
             created_at=ts,
             created_by=created_by,
         )
         stmt = sa.insert(secret_policies).values(
             id=pid,
             secret_id=secret_id,
-            classification=classification,
+            classification=normalized_classification,
             max_age_seconds=max_age_seconds,
             auto_rotate=int(auto_rotate),
             allowed_scopes=json.dumps(policy.allowed_scopes),

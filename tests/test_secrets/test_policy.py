@@ -35,6 +35,9 @@ def policies(sqlite_backend):
 
 
 class TestCreatePolicy:
+    def test_create_requires_target(self, policies, principals):
+        with pytest.raises(ValueError, match="must target"):
+            policies.create_policy(created_by=principals.id)
 
     def test_create_for_secret(self, policies, vault, principals):
         secret, _ = vault.create_secret(
@@ -72,6 +75,33 @@ class TestCreatePolicy:
 
     def test_get_nonexistent(self, policies):
         assert policies.get_policy("nonexistent") is None
+
+    def test_create_rejects_unknown_secret(self, policies, principals):
+        with pytest.raises(ValueError, match="does not exist"):
+            policies.create_policy(created_by=principals.id, secret_id="missing")
+
+    def test_create_rejects_invalid_classification(self, policies, principals):
+        with pytest.raises(ValueError, match="classification"):
+            policies.create_policy(
+                created_by=principals.id,
+                classification="unknown",
+            )
+
+    def test_create_rejects_negative_max_age(self, policies, principals):
+        with pytest.raises(ValueError, match="max_age_seconds"):
+            policies.create_policy(
+                created_by=principals.id,
+                classification="critical",
+                max_age_seconds=-1,
+            )
+
+    def test_create_rejects_non_string_scope_ids(self, policies, principals):
+        with pytest.raises(ValueError, match="allowed_scopes"):
+            policies.create_policy(
+                created_by=principals.id,
+                classification="critical",
+                allowed_scopes=["s1", 2],
+            )
 
 
 class TestGetPoliciesForSecret:
