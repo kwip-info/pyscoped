@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.1 (2026-04-17)
+
+### Fixed — Layer 3 ↔ Layer 4 visibility integration
+
+`ScopedManager.get()` and `list_objects()` (the `client.objects.get()` / `client.objects.list()` paths) were owner-only — they ignored scope projections entirely, contradicting the documented "scope members see projected objects" invariant. Promoted objects, projected objects, and hierarchy-inherited projections were all invisible through the public API even though `VisibilityEngine.can_see()` correctly returned `True`.
+
+- `ScopedManager.get()` and `get_or_raise()` now consult the wired `VisibilityEngine` when the owner check fails, returning the object if any active projection grants visibility.
+- `ScopedManager.list_objects()` and `count()` now return owned + projected objects (including via ancestor-scope inheritance).
+- `VisibilityEngine._projected_object_ids()` (and therefore `visible_object_ids()`) now uses a recursive CTE to walk ancestor scopes, matching the hierarchy semantics already implemented in `can_see()`.
+- Backward compat: callers who construct a bare `ScopedManager(backend)` without injecting a `visibility_engine` keep the historical owner-only behavior — no change to direct test fixtures.
+
+This unblocks every Layer 9 promotion scenario (post-promotion, scope members can finally read promoted objects via the documented `client.objects.get()` API).
+
 ## 1.4.0 (2026-04-17)
 
 ### Layer 9 (Flow) — Phase 2 integration + Phase 3 graduate

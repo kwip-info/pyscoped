@@ -340,28 +340,44 @@ class ScopedManager:
     # ------------------------------------------------------------------
 
     def get(self, object_id: str, *, principal_id: str) -> ScopedObject | None:
-        """Get an object by ID if the principal can see it."""
+        """Get an object by ID if the principal can see it.
+
+        Visibility = ownership OR active scope projection (Layer 4) into
+        a scope the principal is a member of, including ancestor scopes.
+        Falls back to owner-only when no visibility engine is wired.
+        """
         obj = self._load_object(object_id)
         if obj is None:
             return None
-        if not can_access(obj.owner_id, principal_id):
-            return None
-        return obj
+        if can_access(obj.owner_id, principal_id):
+            return obj
+        if self._visibility is not None and self._visibility.can_see(
+            principal_id, object_id,
+        ):
+            return obj
+        return None
 
     def get_or_raise(self, object_id: str, *, principal_id: str) -> ScopedObject:
-        """Get an object by ID or raise AccessDeniedError."""
+        """Get an object by ID or raise AccessDeniedError.
+
+        Same visibility semantics as :meth:`get`.
+        """
         obj = self._load_object(object_id)
         if obj is None:
             raise AccessDeniedError(
                 f"Object {object_id} not found or access denied",
                 context={"object_id": object_id, "principal_id": principal_id},
             )
-        if not can_access(obj.owner_id, principal_id):
-            raise AccessDeniedError(
-                f"Principal {principal_id} cannot access object {object_id}",
-                context={"object_id": object_id, "principal_id": principal_id},
-            )
-        return obj
+        if can_access(obj.owner_id, principal_id):
+            return obj
+        if self._visibility is not None and self._visibility.can_see(
+            principal_id, object_id,
+        ):
+            return obj
+        raise AccessDeniedError(
+            f"Principal {principal_id} cannot access object {object_id}",
+            context={"object_id": object_id, "principal_id": principal_id},
+        )
 
     # Columns that are safe to ORDER BY
     _OBJECT_ORDER_COLUMNS = {"created_at", "object_type"}
@@ -376,18 +392,21 @@ class ScopedManager:
         limit: int = 100,
         offset: int = 0,
     ) -> list[ScopedObject]:
-        """List objects visible to a principal (owner-only at this layer).
+        """List objects visible to a principal.
+
+        Visibility = ownership OR active scope projection (Layer 4) into
+        a scope the principal is a member of, including ancestor scopes.
+        Falls back to owner-only when no visibility engine is wired.
 
         Args:
             order_by: Column to sort by. Prefix with ``-`` for descending.
                       Allowed: ``created_at``, ``object_type``. Default: ``created_at``.
         """
-        stmt = sa.select(scoped_objects).where(
-            scoped_objects.c.owner_id == principal_id,
+        stmt = self._visibility_filtered_select(
+            sa.select(scoped_objects),
+            principal_id,
+            object_type=object_type,
         )
-
-        if object_type is not None:
-            stmt = stmt.where(scoped_objects.c.object_type == object_type)
 
         if not include_tombstoned:
             stmt = stmt.where(scoped_objects.c.lifecycle != Lifecycle.ARCHIVED.name)
@@ -415,13 +434,15 @@ class ScopedManager:
         object_type: str | None = None,
         include_tombstoned: bool = False,
     ) -> int:
-        """Count objects visible to a principal."""
-        stmt = sa.select(sa.func.count().label("cnt")).select_from(
-            scoped_objects,
-        ).where(scoped_objects.c.owner_id == principal_id)
+        """Count objects visible to a principal.
 
-        if object_type is not None:
-            stmt = stmt.where(scoped_objects.c.object_type == object_type)
+        Same visibility semantics as :meth:`list_objects`.
+        """
+        stmt = self._visibility_filtered_select(
+            sa.select(sa.func.count().label("cnt")).select_from(scoped_objects),
+            principal_id,
+            object_type=object_type,
+        )
 
         if not include_tombstoned:
             stmt = stmt.where(scoped_objects.c.lifecycle != Lifecycle.ARCHIVED.name)
@@ -429,6 +450,36 @@ class ScopedManager:
         sql, params = compile_for(stmt, self._backend.dialect)
         row = self._backend.fetch_one(sql, params)
         return row["cnt"] if row else 0
+
+    def _visibility_filtered_select(
+        self,
+        stmt: Any,
+        principal_id: str,
+        *,
+        object_type: str | None,
+    ) -> Any:
+        """Apply visibility filtering (owned OR projected) to a select.
+
+        Without a visibility engine wired, falls back to owner-only
+        (preserves the historical Layer 3 behavior for callers that
+        construct ``ScopedManager`` directly).
+        """
+        if self._visibility is None:
+            stmt = stmt.where(scoped_objects.c.owner_id == principal_id)
+            if object_type is not None:
+                stmt = stmt.where(scoped_objects.c.object_type == object_type)
+            return stmt
+
+        visible_ids = self._visibility.visible_object_ids(
+            principal_id, object_type=object_type, limit=10_000,
+        )
+        if not visible_ids:
+            stmt = stmt.where(sa.literal(False))
+            return stmt
+        stmt = stmt.where(scoped_objects.c.id.in_(visible_ids))
+        if object_type is not None:
+            stmt = stmt.where(scoped_objects.c.object_type == object_type)
+        return stmt
 
     # ------------------------------------------------------------------
     # Update (creates new version)

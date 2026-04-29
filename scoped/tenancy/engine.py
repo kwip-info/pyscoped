@@ -267,13 +267,45 @@ class VisibilityEngine:
         *,
         object_type: str | None = None,
     ) -> list[str]:
-        """Get object IDs visible through scope projections (direct memberships)."""
-        join_clause = scope_projections.join(
-            scope_memberships,
-            scope_projections.c.scope_id == scope_memberships.c.scope_id,
+        """Get object IDs visible through scope projections.
+
+        Includes both direct memberships (scopes the principal is a
+        member of) and inherited memberships (ancestor scopes of the
+        principal's direct memberships), matching the behavior of
+        :meth:`can_see`.  Implemented as a recursive CTE so the
+        hierarchy walk is a single round trip.
+        """
+        # Base: scopes the principal is an active, non-expired member of.
+        depth_col = sa.literal(0).label("depth")
+        base = (
+            sa.select(scope_memberships.c.scope_id, depth_col)
+            .where(
+                sa.and_(
+                    scope_memberships.c.principal_id == principal_id,
+                    active_membership_condition(scope_memberships),
+                )
+            )
         )
+        cte = base.cte(name="visible_scopes", recursive=True)
+        # Recursive: include each scope's parent (ancestor inheritance).
+        recursive = (
+            sa.select(
+                scopes.c.parent_scope_id.label("scope_id"),
+                (cte.c.depth + 1).label("depth"),
+            )
+            .select_from(scopes.join(cte, scopes.c.id == cte.c.scope_id))
+            .where(
+                sa.and_(
+                    scopes.c.parent_scope_id.isnot(None),
+                    cte.c.depth < 20,
+                )
+            )
+        )
+        cte = cte.union_all(recursive)
+
+        join_clause = scope_projections
         if object_type:
-            join_clause = join_clause.join(
+            join_clause = scope_projections.join(
                 scoped_objects,
                 scope_projections.c.object_id == scoped_objects.c.id,
             )
@@ -283,9 +315,8 @@ class VisibilityEngine:
             .select_from(join_clause)
             .where(
                 sa.and_(
-                    scope_memberships.c.principal_id == principal_id,
                     scope_projections.c.lifecycle == Lifecycle.ACTIVE.name,
-                    active_membership_condition(scope_memberships),
+                    scope_projections.c.scope_id.in_(sa.select(cte.c.scope_id)),
                 )
             )
         )
