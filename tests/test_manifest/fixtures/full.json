@@ -63,7 +63,7 @@
       {"name": "db-password", "owner": "admin", "description": "Database password"}
     ],
     "plugins": [
-      {"name": "my-plugin", "owner": "admin", "version": "1.0.0", "scope": "org"}
+      {"name": "my-plugin", "owner": "admin", "version": "1.0.0"}
     ]
   }
 }

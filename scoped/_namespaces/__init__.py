@@ -13,14 +13,20 @@ Each namespace:
 """
 
 from scoped._namespaces.audit import AuditNamespace
+from scoped._namespaces.hooks import HooksNamespace
+from scoped._namespaces.integrations import IntegrationsNamespace
 from scoped._namespaces.objects import ObjectsNamespace
+from scoped._namespaces.plugins import PluginsNamespace
 from scoped._namespaces.principals import PrincipalsNamespace
 from scoped._namespaces.scopes import ScopesNamespace
 from scoped._namespaces.secrets import SecretsNamespace
 
 __all__ = [
     "AuditNamespace",
+    "HooksNamespace",
+    "IntegrationsNamespace",
     "ObjectsNamespace",
+    "PluginsNamespace",
     "PrincipalsNamespace",
     "ScopesNamespace",
     "SecretsNamespace",

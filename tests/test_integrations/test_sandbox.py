@@ -53,7 +53,7 @@ class TestCheckPermission:
             plugin_id=active_plugin.id, permission_type="scope_access",
             target_ref="scope-1", granted_by=principals.id,
         )
-        plugins.revoke_permission(perm.id)
+        plugins.revoke_permission(perm.id, actor_id=principals.id)
         assert not sandbox.check_permission(
             active_plugin.id, "scope_access", "scope-1",
         )

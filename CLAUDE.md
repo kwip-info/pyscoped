@@ -593,6 +593,96 @@ jobs = scheduler.process_due_actions(queue)
 completed = queue.run_all()
 ```
 
+## Integrations and Plugins (Layer 12)
+
+Stable since `1.7.0`. Provides plugins (versioned code extensions), integrations (connections to external systems), and a hook registry that lets plugins respond to framework events. Every operation is owner-enforced, audited, and gateable through the Layer 5 rule engine.
+
+### Module-level namespaces
+
+```python
+import scoped
+
+with scoped.as_principal(alice):
+    # Plugins
+    p = scoped.plugins.install("my-extension", scope_id=team)
+    scoped.plugins.activate(p)
+    scoped.plugins.grant_permission(
+        p, permission_type="scope_access", target_ref=team,
+    )
+    scoped.plugins.suspend(p)
+    scoped.plugins.uninstall(p)
+
+    # Integrations (external systems)
+    gh = scoped.integrations.create("gh-acme", integration_type="github",
+                                    config={"org": "acme"})
+    scoped.integrations.update_config(gh, {"org": "acme", "repo": "main"})
+    scoped.integrations.archive(gh)
+
+    # Hooks (extension points)
+    scoped.hooks.register_handler("scoped:fn:on_create", lambda ctx: ...)
+    scoped.hooks.register(p, hook_point="post_object_create",
+                          handler_ref="scoped:fn:on_create")
+    result = scoped.hooks.dispatch("post_object_create", context={"object_id": doc.id})
+```
+
+`PluginLifecycleManager`, `IntegrationManager`, `HookRegistry`, and `PluginSandbox` are all `@stable(since="1.7.0")`. They are wired into `ScopedServices` and exposed via `client.plugins`, `client.integrations`, `client.hooks` (and the matching module-level proxies after `scoped.init()`).
+
+### Owner enforcement
+
+Every state-changing call requires the acting principal to match the plugin/integration owner; non-owners get `AccessDeniedError`:
+
+- `plugins.activate / suspend / uninstall(plugin, actor_id=...)`
+- `plugins.grant_permission(plugin, ..., granted_by=actor)` and `plugins.revoke_permission(perm_id, actor_id=...)`
+- `hooks.register(plugin, ..., actor_id=...)` and `hooks.deactivate(hook_id, actor_id=...)`
+- `integrations.update_config(integration, ..., actor_id=...)` and `integrations.archive(integration, actor_id=...)`
+
+`actor_id` is inferred from `ScopedContext` when not passed explicitly.
+
+### Audit emission
+
+Every install / activate / suspend / uninstall / grant / revoke / register / deactivate writes a trace entry. New `ActionType` values: `PLUGIN_PERMISSION_GRANT`, `PLUGIN_PERMISSION_REVOKE`, `HOOK_REGISTER`, `HOOK_DEACTIVATE`. Existing `PLUGIN_INSTALL`, `PLUGIN_ACTIVATE`, `PLUGIN_SUSPEND`, `PLUGIN_UNINSTALL`, `HOOK_EXECUTE`, `INTEGRATION_CONNECT`, `INTEGRATION_DISCONNECT` continue to emit.
+
+### Sandbox
+
+`HookRegistry.dispatch()` flows through `PluginSandbox.require_active()` before invoking each handler — suspended/uninstalled/missing plugins are silently skipped. Pass `enforce_hook_permissions=True` to also require an explicit `permission_type="hook"` grant on each `hook_point`:
+
+```python
+from scoped.integrations.hooks import HookRegistry
+hooks = HookRegistry(backend, enforce_hook_permissions=True)
+# Without scoped.plugins.grant_permission(p, "hook", "post_create"), dispatch silently skips.
+```
+
+### Rule engine integration
+
+The default service wiring passes `rule_engine` into all four managers. DENY rules block operations:
+
+```python
+client.services.rules.create_rule(
+    name="block-prod-plugin-install",
+    rule_type=RuleType.ACCESS, effect=RuleEffect.DENY,
+    conditions={"action": "plugin_install"},
+    priority=100, created_by="system",
+)
+client.services.rules.bind_rule(rule.id, target_type=BindingTargetType.OBJECT_TYPE,
+                                target_id="plugin", bound_by="system")
+
+with client.as_principal(alice):
+    client.plugins.install("blocked")  # raises AccessDeniedError
+```
+
+Gated actions: `plugin_install`, `plugin_activate`, `plugin_suspend`, `plugin_uninstall`, `integration_connect`, `hook_dispatch` (object_id = hook_point). Default-permit when no rules are bound.
+
+### Exceptions
+
+| Exception | When |
+|-----------|------|
+| `PluginError` | Plugin not found, invalid transition, duplicate plugin name |
+| `IntegrationError` | Integration not found |
+| `PluginPermissionError` | Sandbox `require_permission` denied |
+| `PluginSandboxError` | Sandbox `require_active` failed (plugin missing/suspended) |
+| `HookExecutionError` | `dispatch_or_raise` saw a handler raise |
+| `AccessDeniedError` | Non-owner tried to mutate a plugin/integration, or a Layer 5 DENY matched |
+
 ## Connector Federation
 
 ```python
@@ -844,7 +934,7 @@ class MyService: ...
 @preview(reason="Nearing stable, feedback welcome")
 class MyConnector: ...
 ```
-- `ExperimentalAPIWarning(FutureWarning)` — Layers 8-16 (environments, flow, deployments, secrets, integrations, events, notifications, scheduling)
+- `ExperimentalAPIWarning(FutureWarning)` — Layers 14-16 (events, notifications, scheduling)
 - `PreviewAPIWarning(FutureWarning)` — Layer 13 connector/marketplace
 - Suppress via `warnings.filterwarnings("ignore", category=ExperimentalAPIWarning)`
 
@@ -873,7 +963,7 @@ scoped/
   flow/                    # Layer 9: Pipelines + promotions (@stable)
   deployments/             # Layer 10: External graduation (@stable)
   secrets/                 # Layer 11: Encrypted vault (@stable)
-  integrations/            # Layer 12: Plugin lifecycle (@experimental)
+  integrations/            # Layer 12: Plugin lifecycle (@stable)
   connector/               # Layer 13: Federation + marketplace (@preview)
   events/                  # Layer 14: Event bus + webhooks (@experimental)
   notifications/           # Layer 15: Notification engine (@experimental)

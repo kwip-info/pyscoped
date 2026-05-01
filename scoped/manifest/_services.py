@@ -34,6 +34,9 @@ class ScopedServices:
     _secrets: Any = None
     _secret_policies: Any = None
     _plugins: Any = None
+    _integrations: Any = None
+    _hooks: Any = None
+    _plugin_sandbox: Any = None
     _connectors: Any = None
     _events: Any = None
     _subscriptions: Any = None
@@ -202,8 +205,42 @@ class ScopedServices:
     def plugins(self) -> Any:
         if self._plugins is None:
             from scoped.integrations.lifecycle import PluginLifecycleManager
-            self._plugins = PluginLifecycleManager(self.backend, audit_writer=self.audit)
+            self._plugins = PluginLifecycleManager(
+                self.backend,
+                audit_writer=self.audit,
+                rule_engine=self.rule_engine,
+            )
         return self._plugins
+
+    @property
+    def integrations(self) -> Any:
+        if self._integrations is None:
+            from scoped.integrations.connectors import IntegrationManager
+            self._integrations = IntegrationManager(
+                self.backend,
+                audit_writer=self.audit,
+                rule_engine=self.rule_engine,
+            )
+        return self._integrations
+
+    @property
+    def plugin_sandbox(self) -> Any:
+        if self._plugin_sandbox is None:
+            from scoped.integrations.sandbox import PluginSandbox
+            self._plugin_sandbox = PluginSandbox(self.backend)
+        return self._plugin_sandbox
+
+    @property
+    def hooks(self) -> Any:
+        if self._hooks is None:
+            from scoped.integrations.hooks import HookRegistry
+            self._hooks = HookRegistry(
+                self.backend,
+                audit_writer=self.audit,
+                sandbox=self.plugin_sandbox,
+                rule_engine=self.rule_engine,
+            )
+        return self._hooks
 
     @property
     def connectors(self) -> Any:

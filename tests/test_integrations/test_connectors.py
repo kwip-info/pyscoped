@@ -2,7 +2,7 @@
 
 import pytest
 
-from scoped.exceptions import IntegrationError
+from scoped.exceptions import AccessDeniedError, IntegrationError
 from scoped.identity.principal import PrincipalStore
 from scoped.integrations.connectors import IntegrationManager
 from scoped.types import Lifecycle
@@ -165,3 +165,32 @@ class TestArchiveIntegration:
         fetched = manager.get_integration(i.id)
         assert not fetched.is_active
         assert fetched.lifecycle == Lifecycle.ARCHIVED
+
+    def test_archive_missing_raises(self, manager, principals):
+        with pytest.raises(IntegrationError, match="not found"):
+            manager.archive_integration("nonexistent", actor_id=principals.id)
+
+
+class TestOwnerEnforcement:
+    """Phase 1 hardening: only the integration owner may mutate config/state."""
+
+    @pytest.fixture
+    def bob(self, sqlite_backend):
+        store = PrincipalStore(sqlite_backend)
+        return store.create_principal(
+            kind="user", display_name="Bob", principal_id="bob",
+        )
+
+    def test_non_owner_cannot_update_config(self, manager, principals, bob):
+        i = manager.create_integration(
+            name="gh", integration_type="github", owner_id=principals.id,
+        )
+        with pytest.raises(AccessDeniedError, match="not the owner"):
+            manager.update_config(i.id, config={"changed": True}, actor_id=bob.id)
+
+    def test_non_owner_cannot_archive(self, manager, principals, bob):
+        i = manager.create_integration(
+            name="gh", integration_type="github", owner_id=principals.id,
+        )
+        with pytest.raises(AccessDeniedError, match="not the owner"):
+            manager.archive_integration(i.id, actor_id=bob.id)

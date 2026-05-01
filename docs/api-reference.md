@@ -958,46 +958,117 @@ Scans data for potential secret leaks (plaintext values appearing where they sho
 
 ## Layer 12: Integrations
 
-```
-from scoped.integrations import (
-    IntegrationManager, PluginLifecycleManager, PluginSandbox,
-    HookRegistry, HookResult, DispatchResult,
-    Integration, Plugin, PluginHook, PluginPermission, PluginState
+Stable since `1.7.0`.
+
+```python
+from scoped.integrations.connectors import IntegrationManager
+from scoped.integrations.lifecycle import PluginLifecycleManager
+from scoped.integrations.sandbox import PluginSandbox
+from scoped.integrations.hooks import HookRegistry, HookResult, DispatchResult
+from scoped.integrations.models import (
+    Integration, Plugin, PluginHook, PluginPermission, PluginState,
 )
 ```
+
+The default service wiring (`scoped.init()` / `ScopedServices`) injects all of these, with `audit_writer` and `rule_engine` pre-wired. Reach them via `client.services.{plugins, integrations, hooks, plugin_sandbox}`, or use the SDK namespaces below.
+
+### Module-level namespaces
+
+```python
+import scoped
+
+with scoped.as_principal(alice):
+    p = scoped.plugins.install("my-extension", scope_id=team)
+    scoped.plugins.activate(p)
+    scoped.plugins.grant_permission(
+        p, permission_type="scope_access", target_ref=team,
+    )
+
+    scoped.hooks.register_handler("scoped:fn:on_create", lambda ctx: ...)
+    scoped.hooks.register(p, hook_point="post_object_create",
+                          handler_ref="scoped:fn:on_create")
+
+    gh = scoped.integrations.create("gh", integration_type="github")
+    scoped.integrations.update_config(gh, {"org": "acme"})
+```
+
+`actor_id` is inferred from `ScopedContext` when not passed explicitly.
 
 ### `IntegrationManager`
 
 ```python
 class IntegrationManager:
-    def __init__(self, backend: StorageBackend, *, audit_writer=None) -> None
+    def __init__(self, backend, *, audit_writer=None, rule_engine=None) -> None
 ```
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `create_integration` | `(*, name, integration_type, owner_id, description="", scope_id=None, config=None, credentials_ref=None, metadata=None) -> Integration` | Register external system connection. |
+| `create_integration` | `(*, name, integration_type, owner_id, description="", scope_id=None, config=None, credentials_ref=None, metadata=None) -> Integration` | Create connection. Fires `integration_connect` rule check. |
 | `get_integration` | `(integration_id) -> Integration \| None` | Get by ID. |
-| `disconnect` | `(integration_id, *, actor_id) -> None` | Disconnect (archive). |
+| `get_integration_or_raise` | `(integration_id) -> Integration` | Raises `IntegrationError` if missing. |
+| `list_integrations` | `(*, owner_id=None, integration_type=None, scope_id=None, active_only=True, limit=100) -> list[Integration]` | Filtered list. |
+| `update_config` | `(integration_id, *, config, actor_id) -> Integration` | Owner-only. |
+| `archive_integration` | `(integration_id, *, actor_id) -> None` | Owner-only. Raises `IntegrationError` if missing. |
 
 ### `PluginLifecycleManager`
 
-Manages plugin lifecycle: install, activate, suspend, uninstall.
+```python
+class PluginLifecycleManager:
+    def __init__(self, backend, *, audit_writer=None, rule_engine=None) -> None
+```
 
-### `PluginSandbox`
-
-Runs plugin code in a restricted environment with explicit permission grants.
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `install_plugin` | `(*, name, owner_id, version="0.1.0", description="", scope_id=None, manifest=None, metadata=None) -> Plugin` | Install. Fires `plugin_install` rule check. Duplicate name → `PluginError`. |
+| `activate` / `suspend` / `uninstall` | `(plugin_id, *, actor_id) -> Plugin` | State transitions. Owner-only. Fire `plugin_activate` / `plugin_suspend` / `plugin_uninstall` rule checks. |
+| `grant_permission` | `(*, plugin_id, permission_type, target_ref, granted_by) -> PluginPermission` | Owner-only. Audited as `PLUGIN_PERMISSION_GRANT`. |
+| `revoke_permission` | `(permission_id, *, actor_id) -> None` | Owner-only. Audited as `PLUGIN_PERMISSION_REVOKE`. Raises `PluginError` if missing. |
+| `get_plugin` / `get_plugin_by_name` / `get_plugin_or_raise` / `list_plugins` / `get_permissions` / `has_permission` | (queries) | Read-only. |
 
 ### `HookRegistry`
 
 ```python
 class HookRegistry:
-    def register_hook(self, hook_point: str, callback, ...) -> PluginHook
-    def dispatch(self, hook_point: str, context: dict) -> DispatchResult
+    def __init__(self, backend, *, audit_writer=None,
+                 sandbox=None, enforce_hook_permissions=False,
+                 rule_engine=None) -> None
+```
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `register_handler` | `(handler_ref, handler) -> None` | In-memory handler binding. |
+| `register_hook` | `(*, plugin_id, hook_point, handler_ref, actor_id, priority=0) -> PluginHook` | Owner-only. Audited as `HOOK_REGISTER`. |
+| `deactivate_hook` | `(hook_id, *, actor_id) -> None` | Owner-only. Audited as `HOOK_DEACTIVATE`. |
+| `get_hooks_for_plugin` / `get_hooks_for_point` | (queries) | Read-only. |
+| `dispatch` | `(hook_point, *, context=None, stop_on_failure=False) -> DispatchResult` | Fires `hook_dispatch` rule check. Routes through `PluginSandbox.require_active()` per-handler — suspended plugins are silently skipped. |
+| `dispatch_or_raise` | `(hook_point, *, context=None) -> DispatchResult` | Raises `HookExecutionError` on any handler failure. |
+
+`enforce_hook_permissions=True` makes dispatch additionally require an explicit `permission_type="hook"` grant on each `hook_point`.
+
+### `PluginSandbox`
+
+```python
+class PluginSandbox:
+    def require_active(plugin_id) -> None
+    def require_permission(plugin_id, permission_type, target_ref) -> None
+    def check_permission(plugin_id, permission_type, target_ref) -> bool
+    def require_scope_access(plugin_id, scope_id) -> None
+    def require_secret_access(plugin_id, secret_ref) -> None
+    def get_allowed_scopes(plugin_id) -> list[str]
+    def get_allowed_object_types(plugin_id) -> list[str]
 ```
 
 ### `PluginState` (Enum)
 
-`INSTALLED`, `ACTIVE`, `SUSPENDED`, `UNINSTALLED`
+`INSTALLED`, `ACTIVE`, `SUSPENDED`, `UNINSTALLED`. Valid transitions: installed→active, active↔suspended, active|suspended→uninstalled.
+
+### Audit actions
+
+`PLUGIN_INSTALL`, `PLUGIN_ACTIVATE`, `PLUGIN_SUSPEND`, `PLUGIN_UNINSTALL`, `PLUGIN_PERMISSION_GRANT` (1.7.0+), `PLUGIN_PERMISSION_REVOKE` (1.7.0+), `HOOK_REGISTER` (1.7.0+), `HOOK_DEACTIVATE` (1.7.0+), `HOOK_EXECUTE`, `INTEGRATION_CONNECT`, `INTEGRATION_DISCONNECT`.
+
+### Rule actions
+
+DENY rules can gate: `plugin_install`, `plugin_activate`, `plugin_suspend`, `plugin_uninstall`, `integration_connect`, `hook_dispatch` (object_id = hook_point). Default-permit when no rules are bound.
 
 ---
 

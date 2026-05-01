@@ -11,10 +11,10 @@ from scoped.integrations.models import PluginState, plugin_from_row
 from scoped.storage._query import compile_for
 from scoped.storage._schema import plugin_permissions, plugins
 from scoped.storage.interface import StorageBackend
-from scoped._stability import experimental
+from scoped._stability import stable
 
 
-@experimental()
+@stable(since="1.7.0")
 class PluginSandbox:
     """Enforce plugin isolation and permission boundaries.
 

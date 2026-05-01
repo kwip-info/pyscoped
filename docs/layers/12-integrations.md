@@ -214,3 +214,53 @@ CREATE TABLE plugin_permissions (
 4. Integration credentials are managed as secrets (never in config).
 5. Plugin data is isolated in the plugin's own scope.
 6. All plugin lifecycle transitions are traced.
+
+## SDK Surface (stable since 1.7.0)
+
+Layer 12 graduated from `@experimental` to `@stable(since="1.7.0")` in release 1.7.0. The classes (`PluginLifecycleManager`, `IntegrationManager`, `HookRegistry`, `PluginSandbox`) are wired into `ScopedServices` and exposed via `client.plugins`, `client.integrations`, `client.hooks` (and matching module-level proxies after `scoped.init()`).
+
+```python
+import scoped
+
+with scoped.as_principal(alice):
+    p = scoped.plugins.install("my-extension")
+    scoped.plugins.activate(p)
+    scoped.plugins.grant_permission(
+        p, permission_type="scope_access", target_ref=team,
+    )
+
+    scoped.hooks.register_handler("scoped:fn:on_create", lambda ctx: ...)
+    scoped.hooks.register(p, hook_point="post_object_create",
+                          handler_ref="scoped:fn:on_create")
+
+    gh = scoped.integrations.create("gh", integration_type="github")
+    scoped.integrations.update_config(gh, {"org": "acme"})
+```
+
+### Owner enforcement
+
+Every state-changing call requires the acting principal to match the plugin/integration owner; non-owners get `AccessDeniedError`. `actor_id` is inferred from `ScopedContext` when not passed explicitly. Applies to: plugin activate/suspend/uninstall, grant/revoke permission, hook register/deactivate, integration update_config/archive.
+
+### Audit emission
+
+New `ActionType` values (in addition to the pre-existing install / activate / suspend / uninstall / hook_execute / integration_connect / integration_disconnect):
+
+- `PLUGIN_PERMISSION_GRANT`
+- `PLUGIN_PERMISSION_REVOKE`
+- `HOOK_REGISTER`
+- `HOOK_DEACTIVATE`
+
+### Sandbox is wired into dispatch
+
+`HookRegistry.dispatch()` calls `PluginSandbox.require_active(plugin_id)` before each handler — suspended/uninstalled/missing plugins are silently skipped through the explicit boundary. Pass `enforce_hook_permissions=True` to also require an explicit `permission_type="hook"` grant on each `hook_point`.
+
+### Rule-engine deny hooks
+
+The default service wiring injects `rule_engine` into all four managers. DENY rules raise `AccessDeniedError`:
+
+- `plugin_install` (object_type=`plugin`, scope_id=plugin scope)
+- `plugin_activate`, `plugin_suspend`, `plugin_uninstall` (object_id=plugin)
+- `integration_connect` (object_type=`integration`, scope_id=integration scope)
+- `hook_dispatch` (object_type=`hook`, object_id=hook point)
+
+Default-permit when no rules are bound, mirroring the Layer 9 pattern.

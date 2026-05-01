@@ -7,16 +7,16 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from scoped.exceptions import IntegrationError
+from scoped.exceptions import AccessDeniedError, IntegrationError
 from scoped.integrations.models import Integration, integration_from_row
 from scoped.storage._query import compile_for
 from scoped.storage._schema import integrations
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, Lifecycle, generate_id, now_utc
-from scoped._stability import experimental
+from scoped._stability import stable
 
 
-@experimental()
+@stable(since="1.7.0")
 class IntegrationManager:
     """Manage connections to external systems."""
 
@@ -25,9 +25,42 @@ class IntegrationManager:
         backend: StorageBackend,
         *,
         audit_writer: Any | None = None,
+        rule_engine: Any | None = None,
     ) -> None:
         self._backend = backend
         self._audit = audit_writer
+        self._rule_engine = rule_engine
+
+    def _check_rule(
+        self,
+        *,
+        action: str,
+        principal_id: str,
+        object_id: str | None = None,
+        scope_id: str | None = None,
+    ) -> None:
+        """Layer 5 rule gate. Mirrors the pattern in Layer 9."""
+        if self._rule_engine is None:
+            return
+        result = self._rule_engine.evaluate(
+            action=action,
+            principal_id=principal_id,
+            object_type="integration",
+            object_id=object_id,
+            scope_id=scope_id,
+        )
+        if not result.allowed and (result.deny_rules or result.matching_rules):
+            deny_names = [r.name for r in result.deny_rules]
+            raise AccessDeniedError(
+                f"{action} denied by rule(s): {deny_names}",
+                context={
+                    "action": action,
+                    "principal_id": principal_id,
+                    "object_id": object_id,
+                    "scope_id": scope_id,
+                    "deny_rules": deny_names,
+                },
+            )
 
     def create_integration(
         self,
@@ -42,6 +75,11 @@ class IntegrationManager:
         metadata: dict[str, Any] | None = None,
     ) -> Integration:
         """Create a new integration connection."""
+        self._check_rule(
+            action="integration_connect",
+            principal_id=owner_id,
+            scope_id=scope_id,
+        )
         ts = now_utc()
         iid = generate_id()
         cfg = config or {}
@@ -126,6 +164,23 @@ class IntegrationManager:
         rows = self._backend.fetch_all(sql, params)
         return [integration_from_row(r) for r in rows]
 
+    def _require_owner(
+        self,
+        integration: Integration,
+        actor_id: str,
+    ) -> None:
+        """Raise AccessDeniedError if actor is not the integration owner."""
+        if integration.owner_id != actor_id:
+            raise AccessDeniedError(
+                f"Principal '{actor_id}' is not the owner of integration "
+                f"'{integration.id}'",
+                context={
+                    "integration_id": integration.id,
+                    "actor_id": actor_id,
+                    "owner_id": integration.owner_id,
+                },
+            )
+
     def update_config(
         self,
         integration_id: str,
@@ -133,8 +188,12 @@ class IntegrationManager:
         config: dict[str, Any],
         actor_id: str,
     ) -> Integration:
-        """Update an integration's non-secret configuration."""
+        """Update an integration's non-secret configuration.
+
+        Only the integration owner may update its config.
+        """
         integration = self.get_integration_or_raise(integration_id)
+        self._require_owner(integration, actor_id)
         stmt = sa.update(integrations).where(
             integrations.c.id == integration_id,
         ).values(config_json=json.dumps(config))
@@ -159,7 +218,13 @@ class IntegrationManager:
         *,
         actor_id: str,
     ) -> None:
-        """Archive (disconnect) an integration."""
+        """Archive (disconnect) an integration.
+
+        Raises ``IntegrationError`` if the integration does not exist.
+        Only the integration owner may archive it.
+        """
+        integration = self.get_integration_or_raise(integration_id)
+        self._require_owner(integration, actor_id)
         stmt = sa.update(integrations).where(
             integrations.c.id == integration_id,
         ).values(lifecycle="ARCHIVED")

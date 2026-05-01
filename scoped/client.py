@@ -72,8 +72,11 @@ from typing import Any
 from scoped._namespaces.audit import AuditNamespace
 from scoped._namespaces.environments import EnvironmentsNamespace
 from scoped._namespaces.flow import FlowNamespace
+from scoped._namespaces.hooks import HooksNamespace
+from scoped._namespaces.integrations import IntegrationsNamespace
 from scoped._namespaces.objects import ObjectsNamespace
 from scoped._namespaces.pipelines import PipelinesNamespace
+from scoped._namespaces.plugins import PluginsNamespace
 from scoped._namespaces.principals import PrincipalsNamespace
 from scoped._namespaces.promotions import PromotionsNamespace
 from scoped._namespaces.scopes import ScopesNamespace
@@ -205,6 +208,9 @@ class ScopedClient:
         self._pipelines_ns: PipelinesNamespace | None = None
         self._flow_ns: FlowNamespace | None = None
         self._promotions_ns: PromotionsNamespace | None = None
+        self._plugins_ns: PluginsNamespace | None = None
+        self._integrations_ns: IntegrationsNamespace | None = None
+        self._hooks_ns: HooksNamespace | None = None
 
     # -- Namespace properties ----------------------------------------------
 
@@ -270,6 +276,27 @@ class ScopedClient:
         if self._promotions_ns is None:
             self._promotions_ns = PromotionsNamespace(self._services)
         return self._promotions_ns
+
+    @property
+    def plugins(self) -> PluginsNamespace:
+        """Plugins — install, activate, suspend, and uninstall extensions."""
+        if self._plugins_ns is None:
+            self._plugins_ns = PluginsNamespace(self._services)
+        return self._plugins_ns
+
+    @property
+    def integrations(self) -> IntegrationsNamespace:
+        """Integrations — manage connections to external systems."""
+        if self._integrations_ns is None:
+            self._integrations_ns = IntegrationsNamespace(self._services)
+        return self._integrations_ns
+
+    @property
+    def hooks(self) -> HooksNamespace:
+        """Hooks — register and dispatch plugin extension points."""
+        if self._hooks_ns is None:
+            self._hooks_ns = HooksNamespace(self._services)
+        return self._hooks_ns
 
     # -- Context management ------------------------------------------------
 

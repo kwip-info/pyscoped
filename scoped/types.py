@@ -156,6 +156,10 @@ class ActionType(Enum):
     PLUGIN_ACTIVATE = "plugin_activate"
     PLUGIN_SUSPEND = "plugin_suspend"
     PLUGIN_UNINSTALL = "plugin_uninstall"
+    PLUGIN_PERMISSION_GRANT = "plugin_permission_grant"
+    PLUGIN_PERMISSION_REVOKE = "plugin_permission_revoke"
+    HOOK_REGISTER = "hook_register"
+    HOOK_DEACTIVATE = "hook_deactivate"
     HOOK_EXECUTE = "hook_execute"
     # Connector & Marketplace
     CONNECTOR_PROPOSE = "connector_propose"

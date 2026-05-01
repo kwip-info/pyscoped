@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.7.0 (2026-04-30)
+
+### Layer 12 (Integrations) — graduate to stable
+
+**Layer 12 is now stable.** `PluginLifecycleManager`, `IntegrationManager`, `HookRegistry`, and `PluginSandbox` now use `@stable(since="1.7.0")` — no more warnings on import.
+
+### Fixed — access control across the layer (P0)
+
+Non-owners could mutate plugins, integrations, hooks, and permissions. Every state-changing API now enforces ownership:
+
+- `PluginLifecycleManager._transition()` (called by `activate`/`suspend`/`uninstall`) raises `AccessDeniedError` when `actor_id != plugin.owner_id`.
+- `PluginLifecycleManager.grant_permission()` requires `granted_by == plugin.owner_id`. `revoke_permission()` now takes a required `actor_id` (and raises `PluginError` on missing permissions).
+- `HookRegistry.register_hook()` and `deactivate_hook()` now take a required `actor_id` and enforce ownership.
+- `IntegrationManager.update_config()` and `archive_integration()` now enforce `actor_id == integration.owner_id`. `archive_integration()` raises `IntegrationError` on missing integration instead of silently no-opping.
+
+### Fixed — audit gaps (P0, Invariant #4)
+
+Permission grant/revoke and hook register/deactivate were silent. They now emit audit entries via four new `ActionType` values:
+
+- `PLUGIN_PERMISSION_GRANT`, `PLUGIN_PERMISSION_REVOKE`, `HOOK_REGISTER`, `HOOK_DEACTIVATE`.
+
+### Fixed — sandbox is no longer a paper tiger
+
+`PluginSandbox` was defined but never invoked. `HookRegistry.dispatch()` now calls `sandbox.require_active(plugin_id)` before each handler — suspended/uninstalled plugins are skipped through the explicit boundary instead of an inline state check.
+
+`HookRegistry(backend, enforce_hook_permissions=True)` opt-in flag adds a `sandbox.check_hook_access()` gate so plugins can only fire hooks for which they hold a `permission_type="hook"` grant.
+
+### Fixed — exception leakage
+
+- Duplicate `install_plugin(name=...)` raises a clean `PluginError("Plugin name '...' is already in use")` instead of leaking `sqlalchemy.exc.IntegrityError`.
+
+### Added — module-level namespaces: `scoped.plugins`, `scoped.integrations`, `scoped.hooks`
+
+Three new namespaces with the usual context-aware defaults (acting principal inferred from `ScopedContext`):
+
+- `scoped.plugins.install(...)`, `.activate(p)`, `.suspend(p)`, `.uninstall(p)`, `.grant_permission(p, ...)`, `.revoke_permission(perm_id)`, `.permissions(p)`, `.has_permission(p, ...)`, `.get(id)`, `.get_by_name(name)`, `.list(...)`
+- `scoped.integrations.create(...)`, `.update_config(i, config)`, `.archive(i)`, `.get(id)`, `.list(...)`
+- `scoped.hooks.register_handler(ref, fn)`, `.register(p, hook_point=..., handler_ref=...)`, `.deactivate(hook_id)`, `.for_plugin(p)`, `.for_point(point)`, `.dispatch(point, context=...)`, `.dispatch_or_raise(point)`
+
+`client.plugins`, `client.integrations`, `client.hooks` are exposed on `ScopedClient` directly, and `services.integrations`, `services.hooks`, `services.plugin_sandbox` are wired into `ScopedServices` (the existing `services.plugins` was the only piece previously wired).
+
+### Added — rule-engine deny hooks
+
+`PluginLifecycleManager`, `IntegrationManager`, and `HookRegistry` now accept an optional `rule_engine=...` (auto-injected by `ScopedServices`) and evaluate Layer 5 rules before key operations. DENY rules raise `AccessDeniedError`:
+
+- `plugin_install` (object_type=`plugin`, scope_id=plugin scope)
+- `plugin_activate`, `plugin_suspend`, `plugin_uninstall` (object_id=plugin)
+- `integration_connect` (object_type=`integration`, scope_id=integration scope)
+- `hook_dispatch` (object_type=`hook`, object_id=hook point)
+
+Default-permit when no rules are bound, mirroring the Layer 9 pattern.
+
 ## 1.6.0 (2026-04-29)
 
 ### Layer 11 (Secrets) — graduate to stable

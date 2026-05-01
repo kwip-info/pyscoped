@@ -2,7 +2,11 @@
 
 import pytest
 
-from scoped.exceptions import HookExecutionError, PluginError
+from scoped.exceptions import (
+    AccessDeniedError,
+    HookExecutionError,
+    PluginError,
+)
 from scoped.identity.principal import PrincipalStore
 from scoped.integrations.hooks import HookRegistry
 from scoped.integrations.lifecycle import PluginLifecycleManager
@@ -40,6 +44,7 @@ class TestRegisterHook:
             plugin_id=active_plugin.id,
             hook_point="post_object_create",
             handler_ref="scoped:function:test:on_create:1",
+            actor_id=active_plugin.owner_id,
         )
         assert h.hook_point == "post_object_create"
         assert h.plugin_id == active_plugin.id
@@ -50,6 +55,7 @@ class TestRegisterHook:
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:handler:1",
+            actor_id=active_plugin.owner_id,
             priority=100,
         )
         assert h.priority == 100
@@ -61,15 +67,17 @@ class TestRegisterHook:
             plugin_id=p.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:handler:1",
+            actor_id=principals.id,
         )
         assert h.is_active
 
-    def test_register_for_nonexistent_plugin(self, hooks):
+    def test_register_for_nonexistent_plugin(self, hooks, principals):
         with pytest.raises(PluginError, match="not found"):
             hooks.register_hook(
                 plugin_id="nonexistent",
                 hook_point="post_create",
                 handler_ref="scoped:function:test:handler:1",
+                actor_id=principals.id,
             )
 
     def test_register_for_uninstalled_plugin(self, hooks, plugins, principals):
@@ -81,6 +89,20 @@ class TestRegisterHook:
                 plugin_id=p.id,
                 hook_point="post_create",
                 handler_ref="scoped:function:test:handler:1",
+                actor_id=principals.id,
+            )
+
+    def test_register_denied_for_non_owner(
+        self, hooks, plugins, principals, sqlite_backend, active_plugin,
+    ):
+        store = PrincipalStore(sqlite_backend)
+        bob = store.create_principal(kind="user", display_name="Bob", principal_id="bob")
+        with pytest.raises(AccessDeniedError, match="not the owner"):
+            hooks.register_hook(
+                plugin_id=active_plugin.id,
+                hook_point="post_create",
+                handler_ref="scoped:function:test:handler:1",
+                actor_id=bob.id,
             )
 
 
@@ -91,11 +113,13 @@ class TestGetHooks:
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:h1:1",
+            actor_id=active_plugin.owner_id,
         )
         hooks.register_hook(
             plugin_id=active_plugin.id,
             hook_point="pre_delete",
             handler_ref="scoped:function:test:h2:1",
+            actor_id=active_plugin.owner_id,
         )
         result = hooks.get_hooks_for_plugin(active_plugin.id)
         assert len(result) == 2
@@ -105,6 +129,7 @@ class TestGetHooks:
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:h1:1",
+            actor_id=active_plugin.owner_id,
         )
         result = hooks.get_hooks_for_point("post_create")
         assert len(result) == 1
@@ -119,12 +144,14 @@ class TestGetHooks:
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:low:1",
+            actor_id=principals.id,
             priority=10,
         )
         hooks.register_hook(
             plugin_id=p2.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:high:1",
+            actor_id=principals.id,
             priority=100,
         )
 
@@ -138,18 +165,34 @@ class TestGetHooks:
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:h1:1",
+            actor_id=active_plugin.owner_id,
         )
-        hooks.deactivate_hook(h.id)
+        hooks.deactivate_hook(h.id, actor_id=active_plugin.owner_id)
         result = hooks.get_hooks_for_plugin(active_plugin.id, active_only=True)
         assert len(result) == 0
+
+    def test_deactivate_hook_denied_for_non_owner(
+        self, hooks, sqlite_backend, active_plugin,
+    ):
+        store = PrincipalStore(sqlite_backend)
+        bob = store.create_principal(kind="user", display_name="Bob", principal_id="bob")
+        h = hooks.register_hook(
+            plugin_id=active_plugin.id,
+            hook_point="post_create",
+            handler_ref="scoped:function:test:h1:1",
+            actor_id=active_plugin.owner_id,
+        )
+        with pytest.raises(AccessDeniedError, match="not the owner"):
+            hooks.deactivate_hook(h.id, actor_id=bob.id)
 
     def test_deactivated_not_in_point_query(self, hooks, active_plugin):
         h = hooks.register_hook(
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:h1:1",
+            actor_id=active_plugin.owner_id,
         )
-        hooks.deactivate_hook(h.id)
+        hooks.deactivate_hook(h.id, actor_id=active_plugin.owner_id)
         result = hooks.get_hooks_for_point("post_create")
         assert len(result) == 0
 
@@ -166,6 +209,7 @@ class TestDispatch:
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:success:1",
+            actor_id=active_plugin.owner_id,
         )
         hooks.register_handler(
             "scoped:function:test:success:1",
@@ -188,6 +232,7 @@ class TestDispatch:
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:ctx:1",
+            actor_id=active_plugin.owner_id,
         )
         hooks.register_handler("scoped:function:test:ctx:1", handler)
 
@@ -199,6 +244,7 @@ class TestDispatch:
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:fail:1",
+            actor_id=active_plugin.owner_id,
         )
         hooks.register_handler(
             "scoped:function:test:fail:1",
@@ -215,6 +261,7 @@ class TestDispatch:
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:missing:1",
+            actor_id=active_plugin.owner_id,
         )
         # Don't register the handler
 
@@ -227,6 +274,7 @@ class TestDispatch:
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:h:1",
+            actor_id=principals.id,
         )
         hooks.register_handler("scoped:function:test:h:1", lambda ctx: "ok")
 
@@ -234,8 +282,34 @@ class TestDispatch:
         plugins.suspend(active_plugin.id, actor_id=principals.id)
 
         result = hooks.dispatch("post_create")
-        # Plugin suspended → hook not called
+        # Plugin suspended → hook not called (sandbox.require_active fails)
         assert len(result.results) == 0
+
+    def test_dispatch_enforces_hook_permission_when_enabled(
+        self, sqlite_backend, plugins, principals, active_plugin,
+    ):
+        registry = HookRegistry(sqlite_backend, enforce_hook_permissions=True)
+        registry.register_hook(
+            plugin_id=active_plugin.id,
+            hook_point="post_create",
+            handler_ref="scoped:function:test:gate:1",
+            actor_id=principals.id,
+        )
+        registry.register_handler("scoped:function:test:gate:1", lambda ctx: "ok")
+
+        # Without "hook" permission for "post_create", dispatch silently skips.
+        result = registry.dispatch("post_create")
+        assert len(result.results) == 0
+
+        plugins.grant_permission(
+            plugin_id=active_plugin.id,
+            permission_type="hook",
+            target_ref="post_create",
+            granted_by=principals.id,
+        )
+        result = registry.dispatch("post_create")
+        assert result.all_succeeded
+        assert len(result.results) == 1
 
     def test_dispatch_multiple_hooks_priority_order(self, hooks, plugins, principals, active_plugin):
         p2 = plugins.install_plugin(name="plugin-2", owner_id=principals.id)
@@ -247,6 +321,7 @@ class TestDispatch:
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:low:1",
+            actor_id=principals.id,
             priority=10,
         )
         hooks.register_handler("scoped:function:test:low:1", lambda ctx: order.append("low"))
@@ -255,6 +330,7 @@ class TestDispatch:
             plugin_id=p2.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:high:1",
+            actor_id=principals.id,
             priority=100,
         )
         hooks.register_handler("scoped:function:test:high:1", lambda ctx: order.append("high"))
@@ -271,6 +347,7 @@ class TestDispatch:
             plugin_id=active_plugin.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:fail:1",
+            actor_id=principals.id,
             priority=100,  # runs first
         )
         hooks.register_handler(
@@ -282,6 +359,7 @@ class TestDispatch:
             plugin_id=p2.id,
             hook_point="post_create",
             handler_ref="scoped:function:test:ok:1",
+            actor_id=principals.id,
             priority=10,  # would run second
         )
         hooks.register_handler("scoped:function:test:ok:1", lambda ctx: "ok")
@@ -298,6 +376,7 @@ class TestDispatchOrRaise:
             plugin_id=active_plugin.id,
             hook_point="pre_deploy",
             handler_ref="scoped:function:test:ok:1",
+            actor_id=active_plugin.owner_id,
         )
         hooks.register_handler("scoped:function:test:ok:1", lambda ctx: "ok")
 
@@ -309,6 +388,7 @@ class TestDispatchOrRaise:
             plugin_id=active_plugin.id,
             hook_point="pre_deploy",
             handler_ref="scoped:function:test:fail:1",
+            actor_id=active_plugin.owner_id,
         )
         hooks.register_handler(
             "scoped:function:test:fail:1",

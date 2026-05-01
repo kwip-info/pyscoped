@@ -2,7 +2,7 @@
 
 import pytest
 
-from scoped.exceptions import PluginError
+from scoped.exceptions import AccessDeniedError, PluginError
 from scoped.identity.principal import PrincipalStore
 from scoped.integrations.lifecycle import PluginLifecycleManager
 from scoped.integrations.models import PluginState
@@ -56,7 +56,7 @@ class TestInstallPlugin:
 
     def test_duplicate_name_fails(self, plugins, principals):
         plugins.install_plugin(name="unique", owner_id=principals.id)
-        with pytest.raises(Exception):  # SQLite UNIQUE constraint
+        with pytest.raises(PluginError, match="already in use"):
             plugins.install_plugin(name="unique", owner_id=principals.id)
 
 
@@ -156,6 +156,7 @@ class TestSuspend:
         hook = hooks.register_hook(
             plugin_id=p.id, hook_point="post_create",
             handler_ref="scoped:function:test:handler:1",
+            actor_id=principals.id,
         )
         assert hook.is_active
 
@@ -203,6 +204,7 @@ class TestUninstall:
         hooks.register_hook(
             plugin_id=p.id, hook_point="post_create",
             handler_ref="scoped:function:test:handler:1",
+            actor_id=principals.id,
         )
 
         plugins.uninstall(p.id, actor_id=principals.id)
@@ -235,7 +237,7 @@ class TestPermissions:
             plugin_id=p.id, permission_type="scope_access",
             target_ref="scope-1", granted_by=principals.id,
         )
-        plugins.revoke_permission(perm.id)
+        plugins.revoke_permission(perm.id, actor_id=principals.id)
         perms = plugins.get_permissions(p.id, active_only=True)
         assert len(perms) == 0
 
@@ -245,7 +247,7 @@ class TestPermissions:
             plugin_id=p.id, permission_type="scope_access",
             target_ref="scope-1", granted_by=principals.id,
         )
-        plugins.revoke_permission(perm.id)
+        plugins.revoke_permission(perm.id, actor_id=principals.id)
         perms = plugins.get_permissions(p.id, active_only=False)
         assert len(perms) == 1
 
@@ -270,3 +272,95 @@ class TestPermissions:
         )
         perms = plugins.get_permissions(p.id)
         assert len(perms) == 2
+
+
+class TestOwnerEnforcement:
+    """Phase 1 hardening: only the plugin owner can mutate its lifecycle."""
+
+    @pytest.fixture
+    def bob(self, sqlite_backend):
+        store = PrincipalStore(sqlite_backend)
+        return store.create_principal(
+            kind="user", display_name="Bob", principal_id="bob",
+        )
+
+    def test_non_owner_cannot_activate(self, plugins, principals, bob):
+        p = plugins.install_plugin(name="alice-plugin", owner_id=principals.id)
+        with pytest.raises(AccessDeniedError, match="not the owner"):
+            plugins.activate(p.id, actor_id=bob.id)
+
+    def test_non_owner_cannot_suspend(self, plugins, principals, bob):
+        p = plugins.install_plugin(name="alice-plugin", owner_id=principals.id)
+        plugins.activate(p.id, actor_id=principals.id)
+        with pytest.raises(AccessDeniedError, match="not the owner"):
+            plugins.suspend(p.id, actor_id=bob.id)
+
+    def test_non_owner_cannot_uninstall(self, plugins, principals, bob):
+        p = plugins.install_plugin(name="alice-plugin", owner_id=principals.id)
+        plugins.activate(p.id, actor_id=principals.id)
+        with pytest.raises(AccessDeniedError, match="not the owner"):
+            plugins.uninstall(p.id, actor_id=bob.id)
+
+    def test_non_owner_cannot_grant_permission(self, plugins, principals, bob):
+        p = plugins.install_plugin(name="alice-plugin", owner_id=principals.id)
+        with pytest.raises(AccessDeniedError, match="not the owner"):
+            plugins.grant_permission(
+                plugin_id=p.id, permission_type="scope_access",
+                target_ref="scope-1", granted_by=bob.id,
+            )
+
+    def test_non_owner_cannot_revoke_permission(self, plugins, principals, bob):
+        p = plugins.install_plugin(name="alice-plugin", owner_id=principals.id)
+        perm = plugins.grant_permission(
+            plugin_id=p.id, permission_type="scope_access",
+            target_ref="scope-1", granted_by=principals.id,
+        )
+        with pytest.raises(AccessDeniedError, match="not the owner"):
+            plugins.revoke_permission(perm.id, actor_id=bob.id)
+
+    def test_revoke_missing_permission_raises(self, plugins, principals):
+        with pytest.raises(PluginError, match="not found"):
+            plugins.revoke_permission("nonexistent", actor_id=principals.id)
+
+
+class TestAuditEmission:
+    """Phase 1 hardening: permission grant/revoke are audited (Invariant #4)."""
+
+    def test_grant_permission_emits_audit(self, sqlite_backend, principals):
+        from scoped.audit.writer import AuditWriter
+
+        writer = AuditWriter(sqlite_backend)
+        mgr = PluginLifecycleManager(sqlite_backend, audit_writer=writer)
+        p = mgr.install_plugin(name="audited", owner_id=principals.id)
+        perm = mgr.grant_permission(
+            plugin_id=p.id, permission_type="scope_access",
+            target_ref="scope-1", granted_by=principals.id,
+        )
+
+        from scoped.audit.query import AuditQuery
+        from scoped.types import ActionType
+
+        entries = AuditQuery(sqlite_backend).query(
+            action=ActionType.PLUGIN_PERMISSION_GRANT,
+        )
+        assert any(e.target_id == perm.id for e in entries)
+
+    def test_revoke_permission_emits_audit(self, sqlite_backend, principals):
+        from scoped.audit.writer import AuditWriter
+
+        writer = AuditWriter(sqlite_backend)
+        mgr = PluginLifecycleManager(sqlite_backend, audit_writer=writer)
+        p = mgr.install_plugin(name="audited", owner_id=principals.id)
+        perm = mgr.grant_permission(
+            plugin_id=p.id, permission_type="scope_access",
+            target_ref="scope-1", granted_by=principals.id,
+        )
+        mgr.revoke_permission(perm.id, actor_id=principals.id)
+
+        from scoped.audit.query import AuditQuery
+        from scoped.types import ActionType
+
+        entries = AuditQuery(sqlite_backend).query(
+            action=ActionType.PLUGIN_PERMISSION_REVOKE,
+        )
+        assert any(e.target_id == perm.id for e in entries)
