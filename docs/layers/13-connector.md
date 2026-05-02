@@ -271,3 +271,69 @@ CREATE TABLE marketplace_installs (
 5. All connector actions are traced on both sides independently.
 6. Marketplace listings are the one intentional exception to user-first isolation — they're public by design.
 7. Installing from marketplace creates a private instance, not a shared one.
+
+## SDK Surface (stable since 1.8.0)
+
+Layer 13 graduated from `@preview` to `@stable(since="1.8.0")` in release 1.8.0. `ConnectorManager`, `FederationProtocol`, `MarketplacePublisher`, and `MarketplaceDiscovery` are wired into `ScopedServices` and exposed via `client.connectors`, `client.marketplace` (and matching module-level proxies after `scoped.init()`). FederationProtocol is per-channel and built via `services.federation_protocol(shared_key)` or `client.connectors.federation(shared_key)`.
+
+```python
+import scoped
+
+with scoped.as_principal(alice):
+    c = scoped.connectors.propose(
+        name="acme-beta",
+        local_org_id=org1, remote_org_id=org2,
+        remote_endpoint="https://beta.example.com/sync",
+    )
+    scoped.connectors.submit(c)
+    scoped.connectors.approve(c)
+
+    scoped.connectors.add_policy(
+        c, policy_type=PolicyType.DENY_TYPES,
+        config={"types": ["InternalMemo"]},
+    )
+    traffic = scoped.connectors.sync(c, object_type="Document", object_id=doc.id)
+
+    listing = scoped.marketplace.publish(
+        "My Plugin", listing_type=ListingType.PLUGIN,
+    )
+
+with scoped.as_principal(bob):
+    install = scoped.marketplace.install(listing)
+    scoped.marketplace.review(listing, rating=5, review_text="great")
+```
+
+### Owner enforcement
+
+Every state-changing call requires the acting principal to match the connector creator or listing publisher; non-owners get `AccessDeniedError`. `actor_id` is inferred from `ScopedContext` when not passed explicitly. Applies to: connector submit/approve/reject/suspend/reactivate/revoke, `add_policy`, marketplace `update_version`/`deprecate`/`remove`/`update_visibility`. `MarketplaceDiscovery.install()` enforces visibility — `PRIVATE` listings are publisher-only.
+
+### Audit emission
+
+New `ActionType` values in 1.8.0:
+
+- `CONNECTOR_SUBMIT`, `CONNECTOR_SUSPEND`, `CONNECTOR_REJECT`, `CONNECTOR_POLICY_ADD`
+- `MARKETPLACE_VERSION_UPDATE`, `MARKETPLACE_DEPRECATE`, `MARKETPLACE_REMOVE`, `MARKETPLACE_VISIBILITY_CHANGE`, `MARKETPLACE_REVIEW`
+
+State transitions no longer collapse under shared actions; sync audit uses the calling principal as `actor_id` (not the connector ID); install audit targets the install record, not the listing.
+
+### Federation replay protection
+
+`FederationProtocol` is backed by two tables (added in m0016):
+
+- `federation_sequences` — persisted sender counter per connector so the embedded sequence number is monotonic across process restarts.
+- `federation_seen_messages` — receiver ledger of accepted `(connector_id, sender_org_id, sequence)` triples; replays raise `FederationError`.
+
+`accept_message()` is the recommended receiver entry point: signature + replay check in one call. Without a backend, the protocol falls back to in-memory tracking (acceptable for tests, not for production federation).
+
+### Stricter secret-leakage block
+
+`check_policy()` rejects a frozenset of secret-like type names before any user policy fires: `secret`, `secret_ref`, `secret_version`, `credential`, `api_key`, `private_key`, `password` (and case/punctuation variants). Enforces Invariant #10 at the federation boundary regardless of which connector policies the parties have negotiated.
+
+### Rule-engine deny hooks
+
+The default service wiring injects `rule_engine` into `ConnectorManager`, `MarketplacePublisher`, and `MarketplaceDiscovery`. DENY rules raise `AccessDeniedError`:
+
+- `connector_propose`, `connector_submit`, `connector_approve`, `connector_reject`, `connector_suspend`, `connector_revoke`, `connector_sync`
+- `marketplace_publish`, `marketplace_install`
+
+Default-permit when no rules are bound, mirroring the Layer 9 pattern.

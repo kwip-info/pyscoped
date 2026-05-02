@@ -757,6 +757,28 @@ marketplace_installs = sa.Table(
     sa.Column("result_type", sa.Text),
 )
 
+# Federation protocol — sender sequence persistence and receiver-side
+# replay protection (added in m0016 / pyscoped 1.8).
+
+federation_sequences = sa.Table(
+    "federation_sequences",
+    metadata,
+    sa.Column("connector_id", sa.Text, primary_key=True),
+    sa.Column("last_sequence", sa.Integer, nullable=False, server_default="0"),
+    sa.Column("updated_at", sa.Text, nullable=False),
+)
+
+federation_seen_messages = sa.Table(
+    "federation_seen_messages",
+    metadata,
+    sa.Column("connector_id", sa.Text, nullable=False),
+    sa.Column("sender_org_id", sa.Text, nullable=False),
+    sa.Column("sequence", sa.Integer, nullable=False),
+    sa.Column("seen_at", sa.Text, nullable=False),
+    sa.Column("message_id", sa.Text, nullable=False),
+    sa.PrimaryKeyConstraint("connector_id", "sender_org_id", "sequence"),
+)
+
 # =====================================================================
 # m0002 — Contracts (Extension A2)
 # =====================================================================

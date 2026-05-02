@@ -38,6 +38,8 @@ class ScopedServices:
     _hooks: Any = None
     _plugin_sandbox: Any = None
     _connectors: Any = None
+    _marketplace_publisher: Any = None
+    _marketplace_discovery: Any = None
     _events: Any = None
     _subscriptions: Any = None
     _notifications: Any = None
@@ -246,8 +248,46 @@ class ScopedServices:
     def connectors(self) -> Any:
         if self._connectors is None:
             from scoped.connector.bridge import ConnectorManager
-            self._connectors = ConnectorManager(self.backend, audit_writer=self.audit)
+            self._connectors = ConnectorManager(
+                self.backend,
+                audit_writer=self.audit,
+                rule_engine=self.rule_engine,
+            )
         return self._connectors
+
+    @property
+    def marketplace_publisher(self) -> Any:
+        if self._marketplace_publisher is None:
+            from scoped.connector.marketplace.publishing import MarketplacePublisher
+            self._marketplace_publisher = MarketplacePublisher(
+                self.backend,
+                audit_writer=self.audit,
+                rule_engine=self.rule_engine,
+            )
+        return self._marketplace_publisher
+
+    @property
+    def marketplace_discovery(self) -> Any:
+        if self._marketplace_discovery is None:
+            from scoped.connector.marketplace.discovery import MarketplaceDiscovery
+            self._marketplace_discovery = MarketplaceDiscovery(
+                self.backend,
+                audit_writer=self.audit,
+                rule_engine=self.rule_engine,
+            )
+        return self._marketplace_discovery
+
+    def federation_protocol(self, shared_key: str) -> Any:
+        """Build a backend-wired ``FederationProtocol`` for a shared key.
+
+        FederationProtocol is per-channel — each connector pair has its
+        own pre-shared key — so this is a factory rather than a cached
+        singleton. The returned instance is wired to the services
+        backend so sender sequence persists and receiver-side replay
+        protection is active.
+        """
+        from scoped.connector.protocol import FederationProtocol
+        return FederationProtocol(shared_key, backend=self.backend)
 
     @property
     def events(self) -> Any:

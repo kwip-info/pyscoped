@@ -19,6 +19,14 @@ def principals(sqlite_backend, registry):
 
 
 @pytest.fixture
+def carol(sqlite_backend, registry):
+    store = PrincipalStore(sqlite_backend)
+    return store.create_principal(
+        kind="user", display_name="Carol", principal_id="carol",
+    )
+
+
+@pytest.fixture
 def publisher(sqlite_backend):
     return MarketplacePublisher(sqlite_backend)
 
@@ -199,19 +207,30 @@ class TestReviews:
         publisher.add_review(
             listing_id=listing.id, reviewer_id=bob.id, rating=4,
         )
-        with pytest.raises(Exception):  # UNIQUE constraint
+        with pytest.raises(MarketplaceError, match="already reviewed"):
             publisher.add_review(
                 listing_id=listing.id, reviewer_id=bob.id, rating=3,
             )
 
-    def test_get_reviews(self, publisher, principals):
+    def test_publisher_cannot_self_review(self, publisher, principals):
+        alice, _ = principals
+        listing = publisher.publish(
+            name="Plugin", publisher_id=alice.id,
+            listing_type=ListingType.PLUGIN,
+        )
+        with pytest.raises(MarketplaceError, match="cannot review their own"):
+            publisher.add_review(
+                listing_id=listing.id, reviewer_id=alice.id, rating=5,
+            )
+
+    def test_get_reviews(self, publisher, principals, carol):
         alice, bob = principals
         listing = publisher.publish(
             name="Plugin", publisher_id=alice.id,
             listing_type=ListingType.PLUGIN,
         )
         publisher.add_review(
-            listing_id=listing.id, reviewer_id=alice.id, rating=3,
+            listing_id=listing.id, reviewer_id=carol.id, rating=3,
         )
         publisher.add_review(
             listing_id=listing.id, reviewer_id=bob.id, rating=5,
@@ -219,14 +238,14 @@ class TestReviews:
         reviews = publisher.get_reviews(listing.id)
         assert len(reviews) == 2
 
-    def test_average_rating(self, publisher, principals):
+    def test_average_rating(self, publisher, principals, carol):
         alice, bob = principals
         listing = publisher.publish(
             name="Plugin", publisher_id=alice.id,
             listing_type=ListingType.PLUGIN,
         )
         publisher.add_review(
-            listing_id=listing.id, reviewer_id=alice.id, rating=3,
+            listing_id=listing.id, reviewer_id=carol.id, rating=3,
         )
         publisher.add_review(
             listing_id=listing.id, reviewer_id=bob.id, rating=5,

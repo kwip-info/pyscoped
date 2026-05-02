@@ -15,15 +15,19 @@ from scoped.connector.marketplace.models import (
     install_from_row,
     listing_from_row,
 )
-from scoped.exceptions import ListingNotFoundError, MarketplaceError
+from scoped.exceptions import (
+    AccessDeniedError,
+    ListingNotFoundError,
+    MarketplaceError,
+)
 from scoped.storage._query import compile_for
 from scoped.storage._schema import marketplace_installs, marketplace_listings
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, generate_id, now_utc
-from scoped._stability import preview
+from scoped._stability import stable
 
 
-@preview()
+@stable(since="1.8.0")
 class MarketplaceDiscovery:
     """Search, filter, browse, and install marketplace listings."""
 
@@ -32,9 +36,39 @@ class MarketplaceDiscovery:
         backend: StorageBackend,
         *,
         audit_writer: Any | None = None,
+        rule_engine: Any | None = None,
     ) -> None:
         self._backend = backend
         self._audit = audit_writer
+        self._rule_engine = rule_engine
+
+    def _check_rule(
+        self,
+        *,
+        action: str,
+        principal_id: str,
+        object_id: str | None = None,
+    ) -> None:
+        """Layer 5 rule gate. Default-permit when no rules are bound."""
+        if self._rule_engine is None:
+            return
+        result = self._rule_engine.evaluate(
+            action=action,
+            principal_id=principal_id,
+            object_type="marketplace_listing",
+            object_id=object_id,
+        )
+        if not result.allowed and (result.deny_rules or result.matching_rules):
+            deny_names = [r.name for r in result.deny_rules]
+            raise AccessDeniedError(
+                f"{action} denied by rule(s): {deny_names}",
+                context={
+                    "action": action,
+                    "principal_id": principal_id,
+                    "object_id": object_id,
+                    "deny_rules": deny_names,
+                },
+            )
 
     def browse(
         self,
@@ -112,7 +146,19 @@ class MarketplaceDiscovery:
 
         The listing is a blueprint — the install creates a private copy.
         Increments the listing's download count.
+
+        Visibility enforcement: ``PRIVATE`` listings can only be
+        installed by their publisher. ``PUBLIC`` and ``UNLISTED``
+        listings are installable by anyone with the listing ID
+        (the unlisted-by-link semantic).
         """
+        # Layer 5 rule gate before any work happens.
+        self._check_rule(
+            action="marketplace_install",
+            principal_id=installer_id,
+            object_id=listing_id,
+        )
+
         # Verify listing exists and is active
         stmt = sa.select(marketplace_listings).where(
             marketplace_listings.c.id == listing_id,
@@ -129,6 +175,21 @@ class MarketplaceDiscovery:
             raise MarketplaceError(
                 f"Listing {listing_id} is not active (lifecycle: {listing.lifecycle.name})",
                 context={"listing_id": listing_id},
+            )
+
+        # Visibility gate: PRIVATE = publisher-only.
+        if (
+            listing.visibility == Visibility.PRIVATE
+            and listing.publisher_id != installer_id
+        ):
+            raise AccessDeniedError(
+                f"Listing '{listing_id}' is private and can only be "
+                f"installed by its publisher",
+                context={
+                    "listing_id": listing_id,
+                    "installer_id": installer_id,
+                    "publisher_id": listing.publisher_id,
+                },
             )
 
         ts = now_utc()
@@ -172,8 +233,12 @@ class MarketplaceDiscovery:
             self._audit.record(
                 actor_id=installer_id,
                 action=ActionType.MARKETPLACE_INSTALL,
-                target_type="marketplace_listing",
-                target_id=listing_id,
+                target_type="marketplace_install",
+                target_id=iid,
+                metadata={
+                    "listing_id": listing_id,
+                    "version": listing.version,
+                },
             )
 
         return install_record

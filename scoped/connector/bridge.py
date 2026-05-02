@@ -8,6 +8,7 @@ from typing import Any
 import sqlalchemy as sa
 
 from scoped.exceptions import (
+    AccessDeniedError,
     ConnectorError,
     ConnectorNotApprovedError,
     ConnectorPolicyViolation,
@@ -32,10 +33,10 @@ from scoped.storage._query import compile_for
 from scoped.storage._schema import connector_policies, connector_traffic, connectors
 from scoped.storage.interface import StorageBackend
 from scoped.types import ActionType, generate_id, now_utc
-from scoped._stability import preview
+from scoped._stability import stable
 
 
-@preview()
+@stable(since="1.8.0")
 class ConnectorManager:
     """Manage cross-organization connectors, policies, and traffic.
 
@@ -58,10 +59,47 @@ class ConnectorManager:
         *,
         audit_writer: Any | None = None,
         transport: Any | None = None,
+        rule_engine: Any | None = None,
     ) -> None:
         self._backend = backend
         self._audit = audit_writer
         self._transport = transport
+        self._rule_engine = rule_engine
+
+    def _check_rule(
+        self,
+        *,
+        action: str,
+        principal_id: str,
+        object_id: str | None = None,
+        scope_id: str | None = None,
+    ) -> None:
+        """Layer 5 rule gate. Mirrors the pattern in Layer 9 / 12.
+
+        No-op when no rule engine is wired or when no rules are bound.
+        DENY raises ``AccessDeniedError``.
+        """
+        if self._rule_engine is None:
+            return
+        result = self._rule_engine.evaluate(
+            action=action,
+            principal_id=principal_id,
+            object_type="connector",
+            object_id=object_id,
+            scope_id=scope_id,
+        )
+        if not result.allowed and (result.deny_rules or result.matching_rules):
+            deny_names = [r.name for r in result.deny_rules]
+            raise AccessDeniedError(
+                f"{action} denied by rule(s): {deny_names}",
+                context={
+                    "action": action,
+                    "principal_id": principal_id,
+                    "object_id": object_id,
+                    "scope_id": scope_id,
+                    "deny_rules": deny_names,
+                },
+            )
 
     # -- Connector CRUD ----------------------------------------------------
 
@@ -78,6 +116,10 @@ class ConnectorManager:
         metadata: dict[str, Any] | None = None,
     ) -> Connector:
         """Propose a new connector (state=proposed)."""
+        self._check_rule(
+            action="connector_propose",
+            principal_id=created_by,
+        )
         ts = now_utc()
         cid = generate_id()
         meta = metadata or {}
@@ -174,6 +216,19 @@ class ConnectorManager:
 
     # -- State transitions -------------------------------------------------
 
+    def _require_creator(self, connector: Connector, actor_id: str) -> None:
+        """Raise AccessDeniedError if the actor is not the connector creator."""
+        if connector.created_by != actor_id:
+            raise AccessDeniedError(
+                f"Principal '{actor_id}' is not the creator of connector "
+                f"'{connector.id}'",
+                context={
+                    "connector_id": connector.id,
+                    "actor_id": actor_id,
+                    "created_by": connector.created_by,
+                },
+            )
+
     def _transition(
         self,
         connector_id: str,
@@ -183,6 +238,26 @@ class ConnectorManager:
         action: ActionType,
     ) -> Connector:
         connector = self.get_connector_or_raise(connector_id)
+        self._require_creator(connector, actor_id)
+
+        # Layer 5 rule gate per transition. Action mirrors the audit
+        # action so policy authors can write rules like
+        # "deny connector_approve when ...".
+        rule_action_map = {
+            ActionType.CONNECTOR_SUBMIT: "connector_submit",
+            ActionType.CONNECTOR_APPROVE: "connector_approve",
+            ActionType.CONNECTOR_REJECT: "connector_reject",
+            ActionType.CONNECTOR_SUSPEND: "connector_suspend",
+            ActionType.CONNECTOR_REVOKE: "connector_revoke",
+        }
+        rule_action = rule_action_map.get(action)
+        if rule_action is not None:
+            self._check_rule(
+                action=rule_action,
+                principal_id=actor_id,
+                object_id=connector_id,
+                scope_id=connector.local_scope_id,
+            )
 
         if not connector.can_transition_to(target_state):
             raise ConnectorError(
@@ -225,7 +300,7 @@ class ConnectorManager:
         """Move from proposed to pending_approval."""
         return self._transition(
             connector_id, ConnectorState.PENDING_APPROVAL,
-            actor_id=actor_id, action=ActionType.CONNECTOR_PROPOSE,
+            actor_id=actor_id, action=ActionType.CONNECTOR_SUBMIT,
         )
 
     def approve(self, connector_id: str, *, actor_id: str) -> Connector:
@@ -239,14 +314,14 @@ class ConnectorManager:
         """Reject a proposed/pending connector."""
         return self._transition(
             connector_id, ConnectorState.REJECTED,
-            actor_id=actor_id, action=ActionType.CONNECTOR_REVOKE,
+            actor_id=actor_id, action=ActionType.CONNECTOR_REJECT,
         )
 
     def suspend(self, connector_id: str, *, actor_id: str) -> Connector:
         """Temporarily suspend an active connector."""
         return self._transition(
             connector_id, ConnectorState.SUSPENDED,
-            actor_id=actor_id, action=ActionType.CONNECTOR_REVOKE,
+            actor_id=actor_id, action=ActionType.CONNECTOR_SUSPEND,
         )
 
     def reactivate(self, connector_id: str, *, actor_id: str) -> Connector:
@@ -273,8 +348,13 @@ class ConnectorManager:
         config: dict[str, Any],
         created_by: str,
     ) -> ConnectorPolicy:
-        """Add a policy to a connector."""
-        self.get_connector_or_raise(connector_id)
+        """Add a policy to a connector.
+
+        Only the connector creator may attach policies; ``created_by``
+        is the acting principal and must match ``connector.created_by``.
+        """
+        connector = self.get_connector_or_raise(connector_id)
+        self._require_creator(connector, created_by)
         ts = now_utc()
         pid = generate_id()
 
@@ -298,6 +378,15 @@ class ConnectorManager:
         sql, params = compile_for(stmt, self._backend.dialect)
         self._backend.execute(sql, params)
 
+        if self._audit is not None:
+            self._audit.record(
+                actor_id=created_by,
+                action=ActionType.CONNECTOR_POLICY_ADD,
+                target_type="connector_policy",
+                target_id=pid,
+                after_state=policy.snapshot(),
+            )
+
         return policy
 
     def get_policies(self, connector_id: str) -> list[ConnectorPolicy]:
@@ -308,6 +397,19 @@ class ConnectorManager:
         rows = self._backend.fetch_all(sql, params)
         return [policy_from_row(r) for r in rows]
 
+    # Object types that must NEVER flow through a connector. Enforces
+    # Invariant #10: Secrets never leak. Match is case-insensitive and
+    # covers both bare "secret" and the common ref/credential variants.
+    _SECRET_LIKE_TYPES = frozenset({
+        "secret", "secrets",
+        "secret_ref", "secretref",
+        "secret_version", "secretversion",
+        "credential", "credentials",
+        "api_key", "apikey",
+        "private_key", "privatekey",
+        "password",
+    })
+
     def check_policy(
         self,
         connector_id: str,
@@ -316,10 +418,10 @@ class ConnectorManager:
         """Check if an object type is allowed through the connector.
 
         Returns True if the object passes all policies.
-        Secrets are NEVER allowed (framework-enforced).
+        Secret-like object types are NEVER allowed (framework-enforced).
         """
-        # Hard rule: secrets never flow through connectors
-        if object_type.lower() == "secret":
+        # Hard rule: secret-like types never flow through connectors.
+        if object_type.lower() in self._SECRET_LIKE_TYPES:
             return False
 
         policies = self.get_policies(connector_id)
@@ -352,12 +454,18 @@ class ConnectorManager:
         direction: str,
         object_type: str,
         action: str,
+        actor_id: str,
         object_id: str | None = None,
         status: TrafficStatus = TrafficStatus.SUCCESS,
         size_bytes: int | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> ConnectorTraffic:
-        """Record a traffic event through a connector."""
+        """Record a traffic event through a connector.
+
+        ``actor_id`` is the principal driving the traffic (used as the
+        audit actor). The connector ID is recorded in metadata, never
+        as the actor.
+        """
         ts = now_utc()
         tid = generate_id()
         meta = metadata or {}
@@ -392,10 +500,16 @@ class ConnectorManager:
 
         if self._audit is not None:
             self._audit.record(
-                actor_id=connector_id,
+                actor_id=actor_id,
                 action=ActionType.CONNECTOR_SYNC,
                 target_type="connector_traffic",
                 target_id=tid,
+                metadata={
+                    "connector_id": connector_id,
+                    "direction": direction,
+                    "object_type": object_type,
+                    "status": status.value,
+                },
             )
 
         return traffic
@@ -424,11 +538,15 @@ class ConnectorManager:
         connector_id: str,
         *,
         object_type: str,
+        actor_id: str,
         object_id: str | None = None,
         direction: str = "outbound",
         size_bytes: int | None = None,
     ) -> ConnectorTraffic:
         """Sync an object through a connector with policy checking.
+
+        ``actor_id`` is the principal driving the sync (used as the
+        audit actor on the resulting traffic record).
 
         Raises ConnectorNotApprovedError if connector is not active.
         Raises ConnectorRevokedError if connector is revoked.
@@ -448,6 +566,16 @@ class ConnectorManager:
                 context={"connector_id": connector_id, "state": connector.state.value},
             )
 
+        # Layer 5 rule gate before any traffic flows. DENY raises
+        # AccessDeniedError without recording traffic, since the deny
+        # is policy-level rather than wire-level.
+        self._check_rule(
+            action="connector_sync",
+            principal_id=actor_id,
+            object_id=connector_id,
+            scope_id=connector.local_scope_id,
+        )
+
         # Check direction compatibility
         if direction == "outbound" and connector.direction == ConnectorDirection.INBOUND:
             raise ConnectorPolicyViolation(
@@ -462,12 +590,13 @@ class ConnectorManager:
 
         # Check policies
         if not self.check_policy(connector_id, object_type):
-            traffic = self.record_traffic(
+            self.record_traffic(
                 connector_id=connector_id,
                 direction=direction,
                 object_type=object_type,
                 object_id=object_id,
                 action="sync",
+                actor_id=actor_id,
                 status=TrafficStatus.BLOCKED,
                 size_bytes=size_bytes,
             )
@@ -499,6 +628,7 @@ class ConnectorManager:
                         object_type=object_type,
                         object_id=object_id,
                         action="sync",
+                        actor_id=actor_id,
                         status=TrafficStatus.FAILED,
                         size_bytes=size_bytes,
                         metadata={"status_code": status_code, "response": response_body},
@@ -510,6 +640,7 @@ class ConnectorManager:
                     object_type=object_type,
                     object_id=object_id,
                     action="sync",
+                    actor_id=actor_id,
                     status=TrafficStatus.FAILED,
                     size_bytes=size_bytes,
                     metadata={"error": str(exc)},
@@ -522,6 +653,7 @@ class ConnectorManager:
             object_type=object_type,
             object_id=object_id,
             action="sync",
+            actor_id=actor_id,
             status=TrafficStatus.SUCCESS,
             size_bytes=size_bytes,
         )

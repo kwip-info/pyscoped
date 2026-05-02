@@ -164,7 +164,7 @@ class TestSchemaNegotiation:
         remote = SchemaCapability(object_types=("Document",), api_version="2.0")
         result = FederationProtocol.negotiate_schema(local, remote)
         assert not result.compatible
-        assert "API version mismatch" in result.incompatibilities[0]
+        assert "major version mismatch" in result.incompatibilities[0]
 
     def test_no_common_types(self):
         local = SchemaCapability(object_types=("Document",), api_version="1.0")

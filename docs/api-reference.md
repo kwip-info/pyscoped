@@ -1087,44 +1087,110 @@ from scoped.connector.marketplace import (
 )
 ```
 
+Stable since `1.8.0`.
+
+The default service wiring (`scoped.init()` / `ScopedServices`) injects all four classes with `audit_writer` and `rule_engine` pre-wired. Reach them via `client.services.{connectors, marketplace_publisher, marketplace_discovery}` and the factory `client.services.federation_protocol(shared_key)`, or use the SDK namespaces below.
+
+### Module-level namespaces
+
+```python
+import scoped
+
+with scoped.as_principal(alice):
+    c = scoped.connectors.propose(
+        name="acme-beta", local_org_id=org1, remote_org_id=org2,
+        remote_endpoint="https://beta.example.com/sync",
+    )
+    scoped.connectors.submit(c)
+    scoped.connectors.approve(c)
+
+    listing = scoped.marketplace.publish(
+        "My Plugin", listing_type=ListingType.PLUGIN,
+    )
+
+with scoped.as_principal(bob):
+    install = scoped.marketplace.install(listing)
+```
+
+`actor_id` / `created_by` / `publisher_id` / `installer_id` / `reviewer_id` are inferred from `ScopedContext` when not passed explicitly.
+
 ### `ConnectorManager`
 
 ```python
 class ConnectorManager:
-    def __init__(self, backend: StorageBackend, *, audit_writer=None) -> None
+    def __init__(self, backend, *, audit_writer=None,
+                 transport=None, rule_engine=None) -> None
 ```
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `propose` | `(*, name, local_org_id, remote_org_id, remote_endpoint, created_by, description="", direction=ConnectorDirection.BIDIRECTIONAL, metadata=None) -> Connector` | Propose new connector (state=`PROPOSED`). |
-| `approve` | `(connector_id, *, approved_by) -> Connector` | Approve connector. |
-| `activate` | `(connector_id, *, actor_id) -> Connector` | Activate for traffic. |
-| `revoke` | `(connector_id, *, revoked_by) -> Connector` | Revoke connector. |
-| `add_policy` | `(*, connector_id, policy_type, ...) -> ConnectorPolicy` | Add traffic policy. |
-| `send` | `(connector_id, *, payload, sent_by) -> ConnectorTraffic` | Send data through connector. |
+| `propose` | `(*, name, local_org_id, remote_org_id, remote_endpoint, created_by, description="", direction=BIDIRECTIONAL, metadata=None) -> Connector` | Create proposed connector. Fires `connector_propose` rule check. |
+| `submit_for_approval` / `approve` / `reject` / `suspend` / `reactivate` / `revoke` | `(connector_id, *, actor_id) -> Connector` | State transitions. Creator-only. Each fires its own `connector_*` rule check. |
+| `add_policy` | `(*, connector_id, policy_type, config, created_by) -> ConnectorPolicy` | Attach traffic policy (creator-only). Audited as `CONNECTOR_POLICY_ADD`. |
+| `get_policies` / `check_policy` | (queries) | Read policies; `check_policy` returns False for secret-like types regardless of user policies. |
+| `record_traffic` | `(*, connector_id, direction, object_type, action, actor_id, ...) -> ConnectorTraffic` | Persist a traffic event. Caller is recorded as `actor_id` (not the connector). |
+| `sync_object` | `(connector_id, *, object_type, actor_id, object_id=None, direction="outbound", size_bytes=None) -> ConnectorTraffic` | Policy + rule-checked sync. Fires `connector_sync` rule check. |
+| `get_traffic` / `get_connector` / `list_connectors` | (queries) | Read-only. |
 
-### `ConnectorState` (Enum)
+### `ConnectorState` / `ConnectorDirection` / `PolicyType` (Enums)
 
-`PROPOSED`, `APPROVED`, `ACTIVE`, `SUSPENDED`, `REVOKED`
-
-### `ConnectorDirection` (Enum)
-
-`INBOUND`, `OUTBOUND`, `BIDIRECTIONAL`
-
-### `PolicyType` (Enum)
-
-Types of policies governing connector traffic.
+- `ConnectorState`: `PROPOSED`, `PENDING_APPROVAL`, `ACTIVE`, `SUSPENDED`, `REVOKED`, `REJECTED`. Terminal: `REVOKED`, `REJECTED`.
+- `ConnectorDirection`: `INBOUND`, `OUTBOUND`, `BIDIRECTIONAL`.
+- `PolicyType`: `ALLOW_TYPES`, `DENY_TYPES`, `RATE_LIMIT`, `CLASSIFICATION`.
 
 ### `FederationProtocol`
 
-Handles schema negotiation and message exchange between organizations.
+```python
+class FederationProtocol:
+    def __init__(self, shared_key: str, *, backend=None) -> None
+```
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `create_message` | `(*, sender_org_id, receiver_org_id, connector_id, message_type, payload) -> FederationMessage` | Build + sign a message. Sender sequence persists per connector when a backend is wired. |
+| `verify_message` | `(message) -> bool` | Signature-only check. |
+| `verify_or_raise` | `(message) -> None` | Raises `FederationError` on bad signature. |
+| `mark_seen` | `(message) -> None` | Receiver-side replay ledger entry. Raises `FederationError` on replay. |
+| `accept_message` | `(message) -> None` | Recommended receiver entry: signature + replay check in one call. |
+| `negotiate_schema` (static) | `(local, remote) -> NegotiationResult` | Compares major API version semver-style; returns common types/features and any incompatibilities. |
 
 ### Marketplace
 
-- `MarketplacePublisher` -- Publish listings (plugins, templates, connectors).
-- `MarketplaceDiscovery` -- Search and browse listings.
-- `ListingType` -- `PLUGIN`, `TEMPLATE`, `CONNECTOR`, etc.
-- `Visibility` -- `PUBLIC`, `PRIVATE`, `ORGANIZATION`.
+```python
+class MarketplacePublisher:
+    def __init__(self, backend, *, audit_writer=None, rule_engine=None) -> None
+
+class MarketplaceDiscovery:
+    def __init__(self, backend, *, audit_writer=None, rule_engine=None) -> None
+```
+
+`MarketplacePublisher`:
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `publish` | `(*, name, publisher_id, listing_type, description="", version="1.0.0", config_template=None, visibility=PUBLIC, metadata=None) -> MarketplaceListing` | Fires `marketplace_publish` rule check. |
+| `update_version` | `(listing_id, *, new_version, config_template=None, actor_id) -> MarketplaceListing` | Publisher-only. Semver, strict-greater, ACTIVE only. Audited as `MARKETPLACE_VERSION_UPDATE`. |
+| `deprecate` / `remove` | `(listing_id, *, actor_id) -> MarketplaceListing` | Publisher-only. Audited as `MARKETPLACE_DEPRECATE` / `MARKETPLACE_REMOVE`. |
+| `update_visibility` | `(listing_id, *, visibility, actor_id) -> MarketplaceListing` | Publisher-only. Audited as `MARKETPLACE_VISIBILITY_CHANGE`. |
+| `add_review` | `(*, listing_id, reviewer_id, rating, review_text="") -> MarketplaceReview` | Audited as `MARKETPLACE_REVIEW`. Publishers cannot review their own listing. Duplicate raises `MarketplaceError`. |
+| `get_listing` / `get_reviews` / `get_average_rating` | (queries) | Read-only. |
+
+`MarketplaceDiscovery`:
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `browse` | `(*, listing_type=None, visibility=PUBLIC, active_only=True, limit=50) -> list[MarketplaceListing]` | List visible listings. |
+| `search` | `(query, *, listing_type=None, active_only=True, limit=50) -> list[MarketplaceListing]` | Name/description search; excludes PRIVATE. |
+| `get_by_publisher` / `get_installs` / `get_installs_by_user` | (queries) | Read-only. |
+| `install` | `(listing_id, *, installer_id, config=None, result_ref=None, result_type=None) -> MarketplaceInstall` | PRIVATE listings are publisher-only. Fires `marketplace_install` rule check. Audited as `MARKETPLACE_INSTALL` against the install record. |
+
+### Audit actions
+
+`CONNECTOR_PROPOSE`, `CONNECTOR_SUBMIT` (1.8.0+), `CONNECTOR_APPROVE`, `CONNECTOR_REJECT` (1.8.0+), `CONNECTOR_SUSPEND` (1.8.0+), `CONNECTOR_REVOKE`, `CONNECTOR_SYNC`, `CONNECTOR_POLICY_ADD` (1.8.0+), `MARKETPLACE_PUBLISH`, `MARKETPLACE_INSTALL`, `MARKETPLACE_VERSION_UPDATE` (1.8.0+), `MARKETPLACE_DEPRECATE` (1.8.0+), `MARKETPLACE_REMOVE` (1.8.0+), `MARKETPLACE_VISIBILITY_CHANGE` (1.8.0+), `MARKETPLACE_REVIEW` (1.8.0+).
+
+### Rule actions
+
+DENY rules can gate: `connector_propose`, `connector_submit`, `connector_approve`, `connector_reject`, `connector_suspend`, `connector_revoke`, `connector_sync`, `marketplace_publish`, `marketplace_install`. Default-permit when no rules are bound.
 
 ---
 

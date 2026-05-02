@@ -281,37 +281,40 @@ class TestTraffic:
         return c
 
     def test_record_traffic(self, manager, principals):
+        _, _, alice = principals
         c = self._active_connector(manager, principals)
         t = manager.record_traffic(
             connector_id=c.id, direction="outbound",
             object_type="Document", action="sync",
-            size_bytes=2048,
+            actor_id=alice.id, size_bytes=2048,
         )
         assert t.direction == "outbound"
         assert t.status == TrafficStatus.SUCCESS
 
     def test_get_traffic(self, manager, principals):
+        _, _, alice = principals
         c = self._active_connector(manager, principals)
         manager.record_traffic(
             connector_id=c.id, direction="outbound",
-            object_type="Document", action="sync",
+            object_type="Document", action="sync", actor_id=alice.id,
         )
         manager.record_traffic(
             connector_id=c.id, direction="inbound",
-            object_type="Report", action="sync",
+            object_type="Report", action="sync", actor_id=alice.id,
         )
         all_traffic = manager.get_traffic(c.id)
         assert len(all_traffic) == 2
 
     def test_get_traffic_by_direction(self, manager, principals):
+        _, _, alice = principals
         c = self._active_connector(manager, principals)
         manager.record_traffic(
             connector_id=c.id, direction="outbound",
-            object_type="Document", action="sync",
+            object_type="Document", action="sync", actor_id=alice.id,
         )
         manager.record_traffic(
             connector_id=c.id, direction="inbound",
-            object_type="Report", action="sync",
+            object_type="Report", action="sync", actor_id=alice.id,
         )
         outbound = manager.get_traffic(c.id, direction="outbound")
         assert len(outbound) == 1
@@ -332,9 +335,11 @@ class TestSyncObject:
         return c
 
     def test_sync_success(self, manager, principals):
+        _, _, alice = principals
         c = self._active_connector(manager, principals)
         t = manager.sync_object(
             c.id, object_type="Document", direction="outbound",
+            actor_id=alice.id,
         )
         assert t.status == TrafficStatus.SUCCESS
 
@@ -346,14 +351,14 @@ class TestSyncObject:
             created_by=alice.id,
         )
         with pytest.raises(ConnectorNotApprovedError, match="not active"):
-            manager.sync_object(c.id, object_type="Document")
+            manager.sync_object(c.id, object_type="Document", actor_id=alice.id)
 
     def test_sync_revoked(self, manager, principals):
         _, _, alice = principals
         c = self._active_connector(manager, principals)
         manager.revoke(c.id, actor_id=alice.id)
         with pytest.raises(ConnectorRevokedError, match="revoked"):
-            manager.sync_object(c.id, object_type="Document")
+            manager.sync_object(c.id, object_type="Document", actor_id=alice.id)
 
     def test_sync_blocked_by_policy(self, manager, principals):
         _, _, alice = principals
@@ -363,12 +368,15 @@ class TestSyncObject:
             config={"types": ["InternalMemo"]}, created_by=alice.id,
         )
         with pytest.raises(ConnectorPolicyViolation, match="blocked"):
-            manager.sync_object(c.id, object_type="InternalMemo")
+            manager.sync_object(
+                c.id, object_type="InternalMemo", actor_id=alice.id,
+            )
 
     def test_sync_secrets_always_blocked(self, manager, principals):
+        _, _, alice = principals
         c = self._active_connector(manager, principals)
         with pytest.raises(ConnectorPolicyViolation, match="blocked"):
-            manager.sync_object(c.id, object_type="secret")
+            manager.sync_object(c.id, object_type="secret", actor_id=alice.id)
 
     def test_sync_wrong_direction_outbound(self, manager, principals):
         org1, org2, alice = principals
@@ -381,7 +389,10 @@ class TestSyncObject:
         manager.approve(c.id, actor_id=alice.id)
 
         with pytest.raises(ConnectorPolicyViolation, match="inbound"):
-            manager.sync_object(c.id, object_type="Document", direction="outbound")
+            manager.sync_object(
+                c.id, object_type="Document",
+                direction="outbound", actor_id=alice.id,
+            )
 
     def test_sync_wrong_direction_inbound(self, manager, principals):
         org1, org2, alice = principals
@@ -394,7 +405,10 @@ class TestSyncObject:
         manager.approve(c.id, actor_id=alice.id)
 
         with pytest.raises(ConnectorPolicyViolation, match="outbound"):
-            manager.sync_object(c.id, object_type="Document", direction="inbound")
+            manager.sync_object(
+                c.id, object_type="Document",
+                direction="inbound", actor_id=alice.id,
+            )
 
     def test_blocked_sync_records_traffic(self, manager, principals):
         _, _, alice = principals
@@ -404,7 +418,9 @@ class TestSyncObject:
             config={"types": ["Blocked"]}, created_by=alice.id,
         )
         try:
-            manager.sync_object(c.id, object_type="Blocked")
+            manager.sync_object(
+                c.id, object_type="Blocked", actor_id=alice.id,
+            )
         except ConnectorPolicyViolation:
             pass
         traffic = manager.get_traffic(c.id)

@@ -70,10 +70,12 @@ import threading
 from typing import Any
 
 from scoped._namespaces.audit import AuditNamespace
+from scoped._namespaces.connectors import ConnectorsNamespace
 from scoped._namespaces.environments import EnvironmentsNamespace
 from scoped._namespaces.flow import FlowNamespace
 from scoped._namespaces.hooks import HooksNamespace
 from scoped._namespaces.integrations import IntegrationsNamespace
+from scoped._namespaces.marketplace import MarketplaceNamespace
 from scoped._namespaces.objects import ObjectsNamespace
 from scoped._namespaces.pipelines import PipelinesNamespace
 from scoped._namespaces.plugins import PluginsNamespace
@@ -211,6 +213,8 @@ class ScopedClient:
         self._plugins_ns: PluginsNamespace | None = None
         self._integrations_ns: IntegrationsNamespace | None = None
         self._hooks_ns: HooksNamespace | None = None
+        self._connectors_ns: ConnectorsNamespace | None = None
+        self._marketplace_ns: MarketplaceNamespace | None = None
 
     # -- Namespace properties ----------------------------------------------
 
@@ -297,6 +301,20 @@ class ScopedClient:
         if self._hooks_ns is None:
             self._hooks_ns = HooksNamespace(self._services)
         return self._hooks_ns
+
+    @property
+    def connectors(self) -> ConnectorsNamespace:
+        """Connectors — propose, approve, and sync across organizations."""
+        if self._connectors_ns is None:
+            self._connectors_ns = ConnectorsNamespace(self._services)
+        return self._connectors_ns
+
+    @property
+    def marketplace(self) -> MarketplaceNamespace:
+        """Marketplace — publish, browse, install listings."""
+        if self._marketplace_ns is None:
+            self._marketplace_ns = MarketplaceNamespace(self._services)
+        return self._marketplace_ns
 
     # -- Context management ------------------------------------------------
 

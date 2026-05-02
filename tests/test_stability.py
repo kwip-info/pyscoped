@@ -210,10 +210,25 @@ class TestFrameworkClasses:
 
         assert get_stability_level(SecretVault) == StabilityLevel.STABLE
 
-    def test_connector_manager_is_preview(self):
+    def test_connector_manager_is_stable(self):
         from scoped.connector.bridge import ConnectorManager
 
-        assert get_stability_level(ConnectorManager) == StabilityLevel.PREVIEW
+        assert get_stability_level(ConnectorManager) == StabilityLevel.STABLE
+
+    def test_federation_protocol_is_stable(self):
+        from scoped.connector.protocol import FederationProtocol
+
+        assert get_stability_level(FederationProtocol) == StabilityLevel.STABLE
+
+    def test_marketplace_publisher_is_stable(self):
+        from scoped.connector.marketplace.publishing import MarketplacePublisher
+
+        assert get_stability_level(MarketplacePublisher) == StabilityLevel.STABLE
+
+    def test_marketplace_discovery_is_stable(self):
+        from scoped.connector.marketplace.discovery import MarketplaceDiscovery
+
+        assert get_stability_level(MarketplaceDiscovery) == StabilityLevel.STABLE
 
     def test_event_bus_is_experimental(self):
         from scoped.events.bus import EventBus

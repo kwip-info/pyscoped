@@ -306,6 +306,7 @@ class TestConnectorTransport:
         mgr, connector = connector_setup
         traffic = mgr.sync_object(
             connector.id, object_type="Doc", object_id="d1",
+            actor_id="admin",
         )
         assert traffic.status == TrafficStatus.SUCCESS
 
@@ -332,6 +333,7 @@ class TestConnectorTransport:
 
         traffic = mgr.sync_object(
             connector.id, object_type="Doc", object_id="d1",
+            actor_id="admin",
         )
         assert traffic.status == TrafficStatus.SUCCESS
         assert len(call_log) == 1
@@ -359,6 +361,7 @@ class TestConnectorTransport:
 
         traffic = mgr.sync_object(
             connector.id, object_type="Doc", object_id="d1",
+            actor_id="admin",
         )
         assert traffic.status == TrafficStatus.FAILED
 
@@ -383,6 +386,7 @@ class TestConnectorTransport:
 
         traffic = mgr.sync_object(
             connector.id, object_type="Doc", object_id="d1",
+            actor_id="admin",
         )
         assert traffic.status == TrafficStatus.FAILED
 
@@ -413,6 +417,7 @@ class TestConnectorTransport:
 
         traffic = mgr.sync_object(
             connector.id, object_type="Doc", direction="inbound",
+            actor_id="admin",
         )
         assert traffic.status == TrafficStatus.SUCCESS
         assert len(call_log) == 0  # Transport not called for inbound

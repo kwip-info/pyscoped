@@ -683,22 +683,112 @@ Gated actions: `plugin_install`, `plugin_activate`, `plugin_suspend`, `plugin_un
 | `HookExecutionError` | `dispatch_or_raise` saw a handler raise |
 | `AccessDeniedError` | Non-owner tried to mutate a plugin/integration, or a Layer 5 DENY matched |
 
-## Connector Federation
+## Connector Federation and Marketplace (Layer 13)
+
+Stable since `1.8.0`. Two complementary subsystems:
+
+- **Connectors** (`ConnectorManager`, `FederationProtocol`) — bridge two pyscoped instances under mutual agreement. Connectors carry traffic, attach policies, and ride a signed federation protocol with persistent sequence + receiver-side replay protection.
+- **Marketplace** (`MarketplacePublisher`, `MarketplaceDiscovery`) — public discovery for plugin / integration / connector-template listings. Listings are blueprints; install creates a private instance.
+
+All four classes are `@stable(since="1.8.0")`. The default service wiring exposes `services.connectors`, `services.marketplace_publisher`, `services.marketplace_discovery`, and the factory `services.federation_protocol(shared_key)`.
+
+### Module-level namespaces
 
 ```python
-from scoped.connector.bridge import ConnectorManager
-mgr = ConnectorManager(backend, transport=ConnectorManager.http_transport)
+import scoped
 
-connector = mgr.propose(name="partner", local_org_id="us", remote_org_id="them",
-                         remote_endpoint="https://partner.com/sync", created_by="admin")
-mgr.submit_for_approval(connector.id, actor_id="admin")
-mgr.approve(connector.id, actor_id="admin")
+with scoped.as_principal(alice):
+    # Connector lifecycle
+    c = scoped.connectors.propose(
+        name="acme-beta",
+        local_org_id=org1, remote_org_id=org2,
+        remote_endpoint="https://beta.example.com/sync",
+    )
+    scoped.connectors.submit(c)
+    scoped.connectors.approve(c)
 
-# Sync with policy enforcement + remote HTTP push
-traffic = mgr.sync_object(connector.id, object_type="Doc", object_id="d1")
+    scoped.connectors.add_policy(
+        c, policy_type=PolicyType.DENY_TYPES,
+        config={"types": ["InternalMemo"]},
+    )
+    traffic = scoped.connectors.sync(c, object_type="Document", object_id=doc.id)
+
+    # Marketplace
+    listing = scoped.marketplace.publish(
+        "My Plugin", listing_type=ListingType.PLUGIN,
+    )
+    scoped.marketplace.update_version(listing, new_version="1.1.0")
+
+# Anyone can browse / install
+with scoped.as_principal(bob):
+    results = scoped.marketplace.search("plugin")
+    scoped.marketplace.install(results[0])
+    scoped.marketplace.review(results[0], rating=5, review_text="great")
 ```
 
-State machine: `PROPOSED -> PENDING_APPROVAL -> ACTIVE <-> SUSPENDED`, terminal: `REVOKED`, `REJECTED`.
+### State machine
+
+`PROPOSED -> PENDING_APPROVAL -> ACTIVE <-> SUSPENDED`, terminal: `REVOKED`, `REJECTED`. Each transition is creator-only and audited under its own `ActionType` (`CONNECTOR_SUBMIT`, `CONNECTOR_APPROVE`, `CONNECTOR_REJECT`, `CONNECTOR_SUSPEND`, `CONNECTOR_REVOKE`).
+
+### Owner enforcement
+
+- `ConnectorManager`: every state transition + `add_policy` requires `actor_id == connector.created_by`. Non-creators get `AccessDeniedError`.
+- `MarketplacePublisher`: `update_version`, `deprecate`, `remove`, `update_visibility` require `actor_id == listing.publisher_id`.
+- `MarketplaceDiscovery.install`: `Visibility.PRIVATE` listings are publisher-only. `UNLISTED` keeps unguessable-but-installable semantics.
+- Publishers cannot review their own listing (`add_review` raises `MarketplaceError`).
+
+### Audit emission
+
+Layer 13 actions: `CONNECTOR_PROPOSE`, `CONNECTOR_SUBMIT`, `CONNECTOR_APPROVE`, `CONNECTOR_REJECT`, `CONNECTOR_SUSPEND`, `CONNECTOR_REVOKE`, `CONNECTOR_SYNC`, `CONNECTOR_POLICY_ADD`, `MARKETPLACE_PUBLISH`, `MARKETPLACE_VERSION_UPDATE`, `MARKETPLACE_DEPRECATE`, `MARKETPLACE_REMOVE`, `MARKETPLACE_VISIBILITY_CHANGE`, `MARKETPLACE_REVIEW`, `MARKETPLACE_INSTALL`. Sync audit uses the calling principal as `actor_id`; the connector ID is recorded in metadata.
+
+### Secret-leakage hard block
+
+`ConnectorManager.check_policy()` rejects a frozenset of secret-like object types before any user policy fires: `secret`, `secret_ref`, `secret_version`, `credential`, `api_key`, `private_key`, `password` (and case/punctuation variants). This enforces Invariant #10 at the federation boundary.
+
+### Federation protocol replay protection
+
+```python
+proto = client.connectors.federation("pre-shared-key")  # backend-wired
+# Sender:
+msg = proto.create_message(
+    sender_org_id=org1, receiver_org_id=org2,
+    connector_id=c.id, message_type="sync", payload={"object_id": "d1"},
+)
+# Receiver (signature + replay check in one call):
+proto.accept_message(msg)
+proto.accept_message(msg)  # raises FederationError("replay")
+```
+
+Backed by `federation_sequences` (sender counter persisted per connector across restarts) and `federation_seen_messages` (receiver ledger keyed by `(connector_id, sender_org_id, sequence)`). Without a backend, replay protection falls back to in-memory tracking.
+
+### Rule-engine deny hooks
+
+The default service wiring injects `rule_engine` into all four managers. DENY rules raise `AccessDeniedError`:
+
+- `connector_propose` (object_type=`connector`)
+- `connector_submit`, `connector_approve`, `connector_reject`, `connector_suspend`, `connector_revoke` (object_id=connector)
+- `connector_sync` (object_id=connector, scope_id=connector.local_scope_id)
+- `marketplace_publish` (object_type=`marketplace_listing`)
+- `marketplace_install` (object_id=listing)
+
+Default-permit when no rules are bound, mirroring the Layer 9 pattern.
+
+### Marketplace versioning
+
+`update_version` enforces semver (`X.Y.Z[+/-suffix]`), strict-greater on the new version, and `lifecycle == ACTIVE`. Downgrades, equal-version bumps, and version-bumps on deprecated/archived listings raise `MarketplaceError`.
+
+### Exceptions
+
+| Exception | When |
+|-----------|------|
+| `ConnectorError` | Connector not found, invalid transition |
+| `ConnectorNotApprovedError` | Sync attempted on a non-active connector |
+| `ConnectorRevokedError` | Sync attempted on a revoked connector |
+| `ConnectorPolicyViolation` | Object type blocked or wrong direction |
+| `FederationError` | Bad signature or message replay detected |
+| `MarketplaceError` | Bad rating, duplicate review, invalid version, lifecycle gate |
+| `ListingNotFoundError` | Listing ID not found |
+| `AccessDeniedError` | Non-creator/publisher mutation, PRIVATE install denied, or Layer 5 DENY matched |
 
 ## Structured Logging
 
@@ -935,7 +1025,7 @@ class MyService: ...
 class MyConnector: ...
 ```
 - `ExperimentalAPIWarning(FutureWarning)` — Layers 14-16 (events, notifications, scheduling)
-- `PreviewAPIWarning(FutureWarning)` — Layer 13 connector/marketplace
+- `PreviewAPIWarning(FutureWarning)` — currently no preview-level APIs (Layer 13 graduated to stable in 1.8.0)
 - Suppress via `warnings.filterwarnings("ignore", category=ExperimentalAPIWarning)`
 
 ## Project Structure
@@ -964,7 +1054,7 @@ scoped/
   deployments/             # Layer 10: External graduation (@stable)
   secrets/                 # Layer 11: Encrypted vault (@stable)
   integrations/            # Layer 12: Plugin lifecycle (@stable)
-  connector/               # Layer 13: Federation + marketplace (@preview)
+  connector/               # Layer 13: Federation + marketplace (@stable)
   events/                  # Layer 14: Event bus + webhooks (@experimental)
   notifications/           # Layer 15: Notification engine (@experimental)
   scheduling/              # Layer 16: Scheduler + job queue (@experimental)

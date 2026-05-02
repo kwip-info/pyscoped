@@ -1,5 +1,73 @@
 # Changelog
 
+## 1.8.0 (2026-05-01)
+
+### Layer 13 (Connector + Marketplace) — graduate to stable
+
+**Layer 13 is now stable.** `ConnectorManager`, `FederationProtocol`, `MarketplacePublisher`, and `MarketplaceDiscovery` now use `@stable(since="1.8.0")` — no more preview warnings on import.
+
+### Fixed — access control across the layer (P0)
+
+Non-creators could drive connectors through their full lifecycle and attach traffic policies; non-publishers could yank marketplace listings; private listings could be installed by anyone with the listing ID. Every state-changing API now enforces ownership:
+
+- `ConnectorManager._transition()` (covers submit/approve/reject/suspend/reactivate/revoke) and `add_policy()` require `actor_id == connector.created_by`.
+- `MarketplacePublisher.update_version`, `deprecate`, `remove`, `update_visibility` require `actor_id == listing.publisher_id`.
+- `MarketplaceDiscovery.install()` honors visibility — `PRIVATE` listings are publisher-only; `PUBLIC` and `UNLISTED` install for anyone with the listing ID.
+- Publishers can no longer review their own listing.
+
+### Fixed — actor_id no longer recorded as connector_id
+
+`ConnectorManager.record_traffic()` and `sync_object()` previously wrote audit entries with `actor_id=connector_id`. They now require an explicit `actor_id` from the caller and place the connector ID in audit metadata.
+
+### Fixed — audit gaps (Invariant #4)
+
+Six previously silent operations now emit audit entries: `add_policy`, `update_version`, `deprecate`, `remove`, `update_visibility`, `add_review`. New `ActionType` values:
+
+- `CONNECTOR_SUBMIT`, `CONNECTOR_SUSPEND`, `CONNECTOR_REJECT`, `CONNECTOR_POLICY_ADD`
+- `MARKETPLACE_VERSION_UPDATE`, `MARKETPLACE_DEPRECATE`, `MARKETPLACE_REMOVE`, `MARKETPLACE_VISIBILITY_CHANGE`, `MARKETPLACE_REVIEW`
+
+Connector state transitions no longer collapse under shared actions (`submit_for_approval`/`reject` had been reusing `CONNECTOR_PROPOSE`/`CONNECTOR_REVOKE`). `marketplace_install` audit now targets the install record, not the listing — installs are individually addressable.
+
+### Fixed — secret-leakage block was fragile
+
+`check_policy()` used `object_type.lower() == "secret"` only, which let `SecretRef`, `credential`, `api_key`, `private_key`, `password`, and similar variants flow through the connector. The block is now a frozenset of secret-like type names matched case-insensitively.
+
+### Added — FederationProtocol replay protection (m0016)
+
+`FederationProtocol` previously kept its sender sequence in process memory and never checked sequence numbers on the receiver. Replays of captured valid messages were undetectable.
+
+- New tables `federation_sequences` (per-connector sender counter) and `federation_seen_messages` (receiver ledger keyed by `(connector_id, sender_org_id, sequence)`) added by migration `m0016`.
+- `FederationProtocol(shared_key, backend=...)` persists the sender counter across restarts and rejects replays at the database level.
+- New `accept_message()` is the recommended receiver entry point: signature verification + replay check in one call. `mark_seen()` is the standalone replay step.
+- In-memory fallback when no backend is wired keeps tests simple.
+- `negotiate_schema()` now compares major version semver-style — `"1.0"` ↔ `"1.0.0"` no longer false-flags as a mismatch.
+
+### Fixed — exception leakage (P1)
+
+- Duplicate `MarketplacePublisher.add_review()` (same reviewer + listing) raises a clean `MarketplaceError("Reviewer ... already reviewed listing ...")` instead of leaking `sqlalchemy.exc.IntegrityError`.
+- `update_version()` validates new versions: must be valid semver, strictly greater than the current version, and the listing must be `ACTIVE`. Downgrades, equal-version bumps, non-semver strings, and version-bumps on deprecated/archived listings raise `MarketplaceError`.
+
+### Added — module-level namespaces: `scoped.connectors`, `scoped.marketplace`
+
+Two new namespaces with the usual context-aware defaults (acting principal inferred from `ScopedContext`):
+
+- `scoped.connectors.propose(...)`, `.submit(c)`, `.approve(c)`, `.reject(c)`, `.suspend(c)`, `.reactivate(c)`, `.revoke(c)`, `.add_policy(c, ...)`, `.policies(c)`, `.check_policy(c, type)`, `.sync(c, ...)`, `.traffic(c)`, `.federation(shared_key)`, `.get(id)`, `.list(...)`
+- `scoped.marketplace.publish(...)`, `.update_version(l, ...)`, `.deprecate(l)`, `.remove(l)`, `.update_visibility(l, ...)`, `.review(l, rating=...)`, `.reviews(l)`, `.average_rating(l)`, `.browse(...)`, `.search(query, ...)`, `.by_publisher(p)`, `.install(l)`, `.installs(l)`, `.my_installs()`, `.get(id)`
+
+`client.connectors`, `client.marketplace` are exposed on `ScopedClient` directly. `services.connectors`, `services.marketplace_publisher`, `services.marketplace_discovery`, and the factory `services.federation_protocol(shared_key)` are wired into `ScopedServices`.
+
+### Added — rule-engine deny hooks
+
+`ConnectorManager`, `MarketplacePublisher`, and `MarketplaceDiscovery` now accept an optional `rule_engine=...` (auto-injected by `ScopedServices`) and evaluate Layer 5 rules before key operations. DENY rules raise `AccessDeniedError`:
+
+- `connector_propose` (object_type=`connector`)
+- `connector_submit`, `connector_approve`, `connector_reject`, `connector_suspend`, `connector_revoke` (object_id=connector)
+- `connector_sync` (object_id=connector, scope_id=connector.local_scope_id)
+- `marketplace_publish` (object_type=`marketplace_listing`)
+- `marketplace_install` (object_id=listing)
+
+Default-permit when no rules are bound, mirroring the Layer 9 pattern.
+
 ## 1.7.0 (2026-04-30)
 
 ### Layer 12 (Integrations) — graduate to stable

@@ -23,7 +23,7 @@ from __future__ import annotations
 import sys
 from types import ModuleType as _ModuleType
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 from scoped.client import ScopedClient, init  # noqa: F401
 
@@ -32,6 +32,7 @@ _NAMESPACE_NAMES = frozenset({
     "principals", "objects", "scopes", "audit", "secrets", "environments",
     "pipelines", "flow", "promotions",
     "plugins", "integrations", "hooks",
+    "connectors", "marketplace",
 })
 
 
