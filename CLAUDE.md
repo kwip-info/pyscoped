@@ -485,15 +485,69 @@ Tables defined in `scoped.storage._schema` (63 `sa.Table` objects). `compile_for
 
 ## Framework Integrations
 
-### Django
+### Django — `pip install "pyscoped[django]"`
+
+The `[django]` extra pulls in Django (`>=4.2`) and unlocks `scoped.contrib.django`:
+
+| Component | Import path | Purpose |
+|-----------|-------------|---------|
+| App config | `scoped.contrib.django` (in `INSTALLED_APPS`) | Initializes `DjangoORMBackend` on `ready()` so `scoped.*` works in views |
+| Middleware | `scoped.contrib.django.middleware.ScopedContextMiddleware` | Resolves the principal per request, wraps the handler in a `ScopedContext` (sync + async) |
+| Base model | `scoped.contrib.django.models.ScopedModel` | Django model auto-synced with pyscoped's object/version/audit layers |
+| Manager | `ScopedDjangoManager` / `ScopedQuerySet` | `.for_principal(pid)` filters by pyscoped visibility |
+| DRF | `scoped.contrib.django.rest_framework.*` | Auth + permission classes |
+| Helper | `scoped.contrib.django.models.scoped_context_for` | Context manager for commands / Celery |
+| Backend | `scoped.contrib.django.backend.DjangoORMBackend` | Stores pyscoped schema in your existing Django Postgres DB |
+
 ```python
 # settings.py
 INSTALLED_APPS = ["scoped.contrib.django"]
-MIDDLEWARE = ["scoped.contrib.django.middleware.ScopedContextMiddleware"]
+MIDDLEWARE = ["scoped.contrib.django.middleware.ScopedContextMiddleware"]  # after auth middleware
 SCOPED_PRINCIPAL_RESOLVER = "myapp.resolvers.resolve_principal"
-SCOPED_EXEMPT_PATHS = ["/admin/", "/health/"]
+SCOPED_EXEMPT_PATHS = ["/admin/", "/health/", "/docs", "/webhooks/"]
+# Optional: SCOPED_BACKEND_USING="default", SCOPED_API_KEY=..., SCOPED_PRINCIPAL_HEADER="HTTP_X_SCOPED_PRINCIPAL_ID"
 ```
-Supports sync and async views (Django 4.1+).
+
+pyscoped's tables live alongside your own models in the same Postgres DB, so one
+`manage.py migrate` covers both — no second datastore. Supports sync and async views
+(Django 4.1+).
+
+```python
+# myapp/resolvers.py — map your auth identity to a pyscoped Principal
+import scoped
+
+def resolve_principal(request):
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        return None  # request runs without a context
+    return scoped.principals.find(str(user.id)) or scoped.principals.create(
+        user.get_username(), principal_id=str(user.id)
+    )
+```
+
+Once the middleware sets the context, views operate as that principal — actor IDs are
+inferred, nothing to thread through:
+
+```python
+# myapp/views.py
+def create_invoice(request):
+    invoice, version = scoped.objects.create("invoice", data={"amount": 500})
+    return JsonResponse({"id": invoice.id})
+
+def my_invoices(request):
+    # creator-private + projected scopes only
+    return JsonResponse({"ids": [o.id for o in scoped.objects.list(object_type="invoice")]})
+```
+
+Outside the request cycle (management commands, Celery, scripts) there's no request to
+resolve from — set the context explicitly:
+
+```python
+from scoped.contrib.django.models import scoped_context_for
+
+with scoped_context_for(principal_id):
+    Invoice.objects.create(amount=100, currency="USD")  # audited as that principal
+```
 
 ### Django ScopedModel (new in 0.7.0)
 Abstract base model that auto-syncs with pyscoped's object layer:
