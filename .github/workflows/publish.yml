@@ -1,0 +1,72 @@
+name: Publish stable PyScoped
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable release tag (vX.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ref.outputs.tag }}
+    steps:
+      - id: ref
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.tag }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify version and successful CI for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.ref.outputs.tag }}
+        run: |
+          git merge-base --is-ancestor HEAD origin/main
+          python -c 'import os,tomllib; assert "v"+tomllib.load(open("pyproject.toml","rb"))["project"]["version"] == os.environ["RELEASE_TAG"]'
+          gh run list --workflow ci.yml --commit "$(git rev-parse HEAD)" --json conclusion --jq 'any(.[]; .conclusion == "success")' | grep -qx true
+      - run: pip install -e '.[dev]'
+      - run: python -m build
+      - run: twine check dist/*
+      - run: python tests/packaging_smoke.py dist/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-distributions
+          path: dist/
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: validate
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pyscoped/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

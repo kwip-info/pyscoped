@@ -1,397 +1,141 @@
-# Scoped
+# PyScoped
 
-**Universal object-isolation and tenancy framework for Python.**
+**Tenant scoping and transactional audit history for the Django application you already have.**
 
-Scoped guarantees that anything built on it can be isolated, shared, traced, and rolled back — to any degree, at any time, by anyone with the right to do so.
+Keep your models, tables, primary keys, authentication, and business logic. Add PyScoped
+one model at a time. Free and MIT licensed, with no account, API key, paid tier,
+telemetry, or hosted-service dependency.
 
-Postgres ready. 2,210+ tests. Python 3.11+.
+**2.0.0 is the stable Django release.** It is a
+breaking redesign of 1.x. The new import is `pyscoped`; the old `scoped` framework is
+preserved in `legacy/v1/` and excluded from the package.
 
-```bash
-pip install pyscoped
+## Add it to an existing model
+
+Install the stable release:
+
+```sh
+python -m pip install pyscoped==2.0.0
 ```
 
-## Why Scoped
-
-Most frameworks give you a database and leave isolation, sharing, auditing, and rollback as your problem. Scoped makes them structural guarantees:
-
-- **Every object is creator-private by default.** Sharing requires explicit projection into a scope.
-- **Every mutation creates a new version.** No in-place updates. Full history preserved.
-- **Every action is hash-chained.** Tamper-evident audit trail with before/after state.
-- **Everything is rollbackable.** Any action can be reversed to any point in time.
-- **Deny always wins.** When rules conflict, DENY overrides ALLOW. No exceptions.
-
-This makes Scoped the base layer for multi-tenant applications, clinical systems, financial platforms, compliance-sensitive workflows, and AI agent orchestration.
-
-## Quick Start
+Add `"pyscoped"` to `INSTALLED_APPS`, then run `python manage.py migrate`.
+Only PyScoped's history tables are added; your model needs no extra columns.
 
 ```python
-import scoped
+from django.db import models
+from pyscoped import scoped
+from pyscoped.query import ScopedManager
 
-# 1. Initialize (zero config — in-memory SQLite)
-scoped.init()
-# Or: scoped.init(database_url="postgresql://user:pass@localhost/mydb")
+@scoped(scope_field="organization", fields=["amount", "status"])
+class Invoice(models.Model):
+    organization = models.ForeignKey("Organization", on_delete=models.PROTECT)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    status = models.CharField(max_length=32, default="draft")
 
-# 2. Create principals (the acting users)
-alice = scoped.principals.create("Alice")
-bob = scoped.principals.create("Bob")
-
-# 3. Set the acting principal and create objects
-with scoped.as_principal(alice):
-    # Create an object — it's creator-private by default
-    doc, v1 = scoped.objects.create(
-        "document", data={"title": "Q4 Report", "status": "draft"},
-    )
-
-    # Alice can read it
-    assert scoped.objects.get(doc.id) is not None
-
-# Bob cannot (isolation enforced)
-with scoped.as_principal(bob):
-    assert scoped.objects.get(doc.id) is None
-
-# 4. Update creates a new immutable version
-with scoped.as_principal(alice):
-    doc, v2 = scoped.objects.update(
-        doc.id, data={"title": "Q4 Report", "status": "final"},
-    )
-    assert v2.version == 2  # v1 is preserved, untouched
-
-    # 5. Share via scope
-    team = scoped.scopes.create("Finance Team")
-    scoped.scopes.add_member(team, bob, role="viewer")
-    scoped.scopes.project(doc, team)
-
-# 6. Every action was traced with hash-chained audit
-trail = scoped.audit.for_object(doc.id)
-assert len(trail) >= 2  # CREATE + UPDATE, each with before/after state
-assert scoped.audit.verify().valid  # Hash chain is intact
+    objects = ScopedManager()
 ```
 
-## Architecture
-
-16 composable layers. Each depends only on layers below it.
-
-```
-Layer 0   Compliance    Validates all invariants across layers
-Layer 1   Registry      Universal construct registration (URNs)
-Layer 2   Identity      Generic principal machinery + ScopedContext
-Layer 3   Objects       Versioned, isolated data objects
-Layer 4   Tenancy       Scopes, membership, projection (sharing)
-Layer 5   Rules         Deny-overrides policy engine
-Layer 6   Audit         Hash-chained, immutable, append-only trace
-Layer 7   Temporal      Point-in-time reconstruction + rollback
-Layer 8   Environments  Ephemeral workspaces
-Layer 9   Flow          Stages, pipelines, promotions
-Layer 10  Deployments   Graduation to external targets with gates
-Layer 11  Secrets       Encrypted vault with zero-trust access
-Layer 12  Integrations  Sandboxed plugins, hooks, external systems
-Layer 13  Connector     Cross-org meshing, federation, marketplace
-Layer 14  Events        Asynchronous scoped event bus + webhooks
-Layer 15  Notifications Principal-targeted messages
-Layer 16  Scheduling    Recurring schedules, scoped job execution
-```
-
-9 extensions enrich existing layers: Migrations (A1), Contracts (A2), Rule Extensions (A3), Blobs (A4), Config Hierarchy (A5), Search (A6), Templates (A7), Tiering (A8), Import/Export (A9).
-
-## The 10 Invariants
-
-These are absolute. The compliance engine (Layer 0) validates them.
-
-1. **Nothing exists without registration.** Every construct has a URN in the registry.
-2. **Nothing happens without identity.** Every operation requires an acting principal.
-3. **Nothing is shared by default.** Objects start creator-private. Sharing is explicit.
-4. **Nothing happens without a trace.** Every action produces a hash-chained audit entry.
-5. **Nothing is truly deleted.** Objects are tombstoned. Versions retained. Audit is append-only.
-6. **Deny always wins.** DENY overrides ALLOW when rules conflict.
-7. **Revocation is immediate.** Same-transaction enforcement.
-8. **Everything is versioned.** Every mutation creates a new immutable version.
-9. **Everything is rollbackable.** Any action can be reversed to any point in time.
-10. **Secrets never leak.** Values never appear in audit, snapshots, or connector traffic.
-
-## Core API
-
-### Objects (Layer 3)
+Use your existing authenticated user and organization after checking membership:
 
 ```python
-from scoped.objects.manager import ScopedManager
+from pyscoped import scope
 
-manager = ScopedManager(backend, audit_writer=audit)
-
-# Create — returns (ScopedObject, ObjectVersion)
-obj, ver = manager.create(object_type="task", owner_id=user.id, data={"title": "Ship it"})
-
-# Read — returns None if principal cannot access
-obj = manager.get(obj.id, principal_id=user.id)
-
-# Update — creates new version, never modifies old
-obj, ver = manager.update(obj.id, principal_id=user.id, data={"title": "Ship it", "done": True})
-
-# Soft delete — tombstones, never physically deletes
-tombstone = manager.tombstone(obj.id, principal_id=user.id, reason="Obsolete")
+with scope(actor=request.user, scope=organization.pk):
+    invoices = list(Invoice.objects.filter(status="draft"))
+    Invoice.objects.filter(pk=invoice_id).update(status="approved")
 ```
 
-### Tenancy (Layer 4)
+Reads through the scoped manager are filtered **before** aggregation or pagination.
+Supported writes and audit records commit or roll back together. Missing context or
+an instance write to another scope raises. An explicit field allowlist controls what
+is recorded; it is your responsibility to exclude sensitive fields.
+
+`scope()` is an application-level boundary: your application must authenticate the
+actor and authorize scope membership. It does not grant a user permission merely
+because a tenant ID was supplied by a client.
+
+## Adopt gradually
+
+- Begin with `mode="audit"` to retain existing read behavior while adding attributed
+  write history. Writes still require actor context and the supported manager.
+- Use `@scoped(...)` on a current model, or `register(Invoice, ...)` in `AppConfig.ready()`.
+- If convenient, inherit `pyscoped.models.ScopedModel`; it adds a manager, no columns.
+  The registration decorator is still required.
+- Compose existing queryset methods with `ScopedQuerySet`. Supply `ScopedManager`
+  for **every** public manager on a registered model.
+- Baseline existing data, then enable enforcement for that model when its workflows
+  and relationship integrity have been checked.
+
+```sh
+# Preview first; actor and scope are explicit operator assertions.
+python manage.py pyscoped_backfill billing.Invoice --actor migration-operator --scope acme
+python manage.py pyscoped_backfill billing.Invoice --actor migration-operator --scope acme --apply
+```
+
+The baseline preserves existing IDs and records the state observed now. It does not
+invent historical events. Applying is idempotent and resumable per row.
+
+For request context, add `pyscoped.middleware.ScopedMiddleware` after your existing
+session/authentication middleware and configure `PYSCOPED_CONTEXT_RESOLVER` with a
+trusted callable returning `ScopeContext` or `None`. For existing service functions,
+use `@in_scope(resolver)` from `pyscoped.integration`.
+
+## History and restoration
 
 ```python
-from scoped.tenancy.lifecycle import ScopeLifecycle
-from scoped.tenancy.projection import ProjectionManager
-from scoped.tenancy.models import ScopeRole, AccessLevel
+from pyscoped.history import history, verify_history, restore
 
-scopes = ScopeLifecycle(backend, audit_writer=audit)
-projections = ProjectionManager(backend, audit_writer=audit)
-
-# Create scope (owner auto-added as OWNER member)
-scope = scopes.create_scope(name="Team Alpha", owner_id=alice.id)
-
-# Add members
-scopes.add_member(scope.id, principal_id=bob.id, role=ScopeRole.EDITOR, granted_by=alice.id)
-
-# Project an object into the scope (sharing it with members)
-projections.project(scope_id=scope.id, object_id=obj.id, projected_by=alice.id)
-
-# Revoke sharing
-projections.revoke_projection(scope_id=scope.id, object_id=obj.id, revoked_by=alice.id)
+with scope(actor=request.user, scope=organization.pk):
+    events = history(Invoice, invoice_id)
+    verified = verify_history(Invoice, invoice_id)
+    invoice = restore(Invoice, invoice_id, revision=1, expected_revision=3)
 ```
 
-### Rules (Layer 5)
+Restoration updates selected scalar fields on a live row and records a **new** event.
+It checks the expected head revision and detects divergence from recorded state.
+It does not resurrect deleted rows, restore external effects, or change ownership,
+primary keys, or relationships. History is hash-linked per resource; rewriting the
+entire chain and head with database-administrator privileges is outside that guarantee.
 
-```python
-from scoped.rules.engine import RuleStore, RuleEngine
-from scoped.rules.models import RuleType, RuleEffect, BindingTargetType
+## Supported scope
 
-store = RuleStore(backend)
-rule = store.create_rule(
-    name="deny-external-access",
-    rule_type=RuleType.ACCESS,
-    effect=RuleEffect.DENY,
-    priority=10,
-    created_by=admin.id,
-)
-store.bind_rule(rule.id, target_type=BindingTargetType.SCOPE, target_id=scope.id, bound_by=admin.id)
+Django 5.2 and 6.0, on their supported Python versions. SQLite for local development;
+PostgreSQL for concurrent transactional use. There are no non-Django adapters in 2.0.
 
-engine = RuleEngine(backend)
-result = engine.evaluate(action="read", principal_id=user.id, scope_id=scope.id)
-# result.allowed, result.deny_rules, result.allow_rules
+| Operation | Initial 2.0 behavior |
+| --- | --- |
+| Model save, partial save, expression save | Attributed and audited atomically |
+| Scoped query reads, counts, aggregates, pagination | Scope predicate enforced at the root queryset |
+| Queryset update | Native SQL semantics, row locks and per-row audit snapshots in one transaction |
+| Instance/queryset/cascade delete | Django deletion semantics; retained audit events |
+| Async ORM operations | Same contract via Django's async methods |
+| Ordinary `bulk_create`, `bulk_update` | Native Django signal semantics, transactional audit snapshots |
+| Conflict-handling bulk insert, duplicate bulk-update IDs, raw fixture save | Explicitly rejected |
+| `select_related`, joins into enforced models | Scope predicates on joined tables; outer-join semantics preserved |
+| FK / one-to-one reads between enforced models, prefetch | Scoped target queries and context checks |
+| Implicit many-to-many, multi-table inheritance, proxies | Outside initial support; configuration fails |
+| Raw SQL, `RawSQL`, private ORM APIs, historical migration models | Outside enforcement; never use for ordinary registered operations |
+
+This is an ORM integration, not database row-level security or a sandbox against
+untrusted Python code. Unregistered models, external database writers, direct private/base-manager access,
+and already-returned data do not acquire automatic access controls. Preserve valid
+same-scope relationships and use scoped querysets for each protected read boundary.
+
+See [the full guarantees and limitations](docs/guarantees.md),
+[the adoption guide](docs/adoption.md), and the
+[executable existing-app example](examples/existing_app/README.md).
+
+## Develop and contribute
+
+```sh
+python -m pip install -e '.[dev,postgres]'
+python -m pytest -q
+python -m django check --settings=tests.settings
+python -m django makemigrations --check --dry-run --settings=tests.settings
+ruff check pyscoped tests examples
+python -m build
 ```
 
-### Audit (Layer 6)
-
-```python
-from scoped.audit.writer import AuditWriter
-from scoped.audit.query import AuditQuery
-
-writer = AuditWriter(backend)
-entry = writer.record(
-    actor_id=user.id,
-    action=ActionType.CREATE,
-    target_type="document",
-    target_id=obj.id,
-    after_state={"title": "Draft"},
-)
-# entry.hash — SHA-256 hash linking to previous entry
-# entry.previous_hash — hash of the entry before this one
-# entry.sequence — monotonically increasing sequence number
-
-query = AuditQuery(backend)
-trail = query.for_target("document", obj.id)  # full history
-trail = query.for_actor(user.id)               # everything a user did
-```
-
-### Temporal (Layer 7)
-
-```python
-from scoped.temporal.rollback import RollbackExecutor
-from scoped.temporal.reconstruction import StateReconstructor
-
-# Roll back a single action
-executor = RollbackExecutor(backend, audit_writer=audit)
-result = executor.rollback_action(trace_id, actor_id=admin.id, reason="Mistake")
-
-# Roll back to a point in time
-result = executor.rollback_to_timestamp("document", doc.id, at=yesterday, actor_id=admin.id)
-
-# Cascading rollback (action + all dependent actions)
-result = executor.rollback_cascade(trace_id, actor_id=admin.id)
-
-# Reconstruct state at a past timestamp
-reconstructor = StateReconstructor(backend)
-state = reconstructor.at_timestamp("document", doc.id, timestamp)
-```
-
-## Framework Adapters
-
-Install with extras for your framework:
-
-```bash
-pip install pyscoped[django]    # Django ORM backend + middleware
-pip install pyscoped[fastapi]   # FastAPI middleware + Pydantic schemas
-pip install pyscoped[flask]     # Flask extension + admin blueprint
-pip install pyscoped[mcp]       # MCP server for AI agents
-```
-
-### Django
-
-```python
-# settings.py
-INSTALLED_APPS = ["scoped.contrib.django"]
-MIDDLEWARE = ["scoped.contrib.django.middleware.ScopedContextMiddleware"]
-
-# Uses the Django database connection as the storage backend.
-# Management commands: scoped_health, scoped_audit, scoped_compliance
-```
-
-### FastAPI
-
-```python
-from fastapi import FastAPI
-from scoped.contrib.fastapi.middleware import ScopedContextMiddleware
-from scoped.contrib.fastapi.router import router as scoped_router
-
-app = FastAPI()
-app.add_middleware(ScopedContextMiddleware, backend=backend)
-app.include_router(scoped_router)  # /scoped/health, /scoped/audit
-```
-
-### Flask
-
-```python
-from flask import Flask
-from scoped.contrib.flask.extension import ScopedExtension
-
-app = Flask(__name__)
-scoped = ScopedExtension(app)  # auto-inits backend, injects g.scoped_context
-```
-
-### MCP (Model Context Protocol)
-
-```python
-from scoped.contrib.mcp.server import create_scoped_server
-
-mcp = create_scoped_server(backend)
-mcp.run()
-# Tools: create_principal, create_object, get_object, create_scope, list_audit, health_check
-# Resources: scoped://principals, scoped://health, scoped://audit/recent
-```
-
-## Storage
-
-The default backend is SQLite (no additional dependencies beyond pydantic and sqlalchemy). PostgreSQL is supported for production via `psycopg` v3 with connection pooling:
-
-```bash
-pip install pyscoped[postgres]
-```
-
-```python
-from scoped.storage.sa_sqlite import SASQLiteBackend
-
-# In-memory (tests, prototyping)
-backend = SASQLiteBackend(":memory:")
-backend.initialize()
-
-# File-based (production single-node)
-backend = SASQLiteBackend("app.db")
-backend.initialize()
-
-# PostgreSQL (production)
-from scoped.storage.sa_postgres import SAPostgresBackend
-backend = SAPostgresBackend("postgresql://user:pass@localhost/mydb")
-backend.initialize()
-
-# Django ORM backend
-from scoped.contrib.django import get_backend
-backend = get_backend()
-```
-
-### Cloud Integrations
-
-```bash
-pip install pyscoped[aws]     # S3 blob storage + AWS KMS encryption
-pip install pyscoped[gcp]     # GCS blob storage + GCP Cloud KMS encryption
-pip install pyscoped[otel]    # OpenTelemetry instrumentation
-```
-
-```python
-# AWS KMS for secrets (Layer 11)
-from scoped.secrets import AWSKMSBackend
-encryption = AWSKMSBackend(region_name="us-east-1")
-
-# S3 for blob storage (Extension A4)
-from scoped.storage import S3BlobBackend
-blobs = S3BlobBackend("my-bucket")
-
-# OpenTelemetry instrumentation
-from scoped.contrib.otel import instrument
-services = build_services(backend)
-instrument(services)  # All operations now emit OTel spans
-```
-
-## Testing
-
-Scoped includes a compliance testing engine, test factories, assertion helpers, and importable pytest fixtures:
-
-```python
-from scoped.testing.factories import ScopedFactory
-from scoped.testing.assertions import assert_isolated, assert_version_count
-
-def test_isolation(scoped_services, alice, bob):
-    factory = ScopedFactory(scoped_services)
-    doc, _ = factory.object(alice, data={"title": "Private"})
-
-    assert_isolated(scoped_services.backend, doc.id, alice.id, bob.id)
-
-def test_versioning(scoped_services, alice):
-    factory = ScopedFactory(scoped_services)
-    doc, _ = factory.object(alice, data={"v": 1})
-    scoped_services.manager.update(doc.id, principal_id=alice.id, data={"v": 2})
-
-    assert_version_count(scoped_services.backend, doc.id, 2)
-```
-
-Register the fixtures in your `conftest.py`:
-
-```python
-from scoped.testing.fixtures import scoped_backend, scoped_services, alice, bob
-```
-
-```bash
-pip install pyscoped[dev]
-pytest                          # 2,210+ tests
-pytest tests/test_objects/      # one layer
-pytest tests/test_compliance/   # invariant validation
-```
-
-## Test Coverage
-
-| Component | Tests |
-|-----------|-------|
-| Core Layers 1-13 | 1,360+ |
-| Extensions A1-A9 | 386 |
-| Events, Notifications, Scheduling | 117 |
-| Compliance Engine (Layer 0) | 87 |
-| Framework Adapters (D1-D4) | 83 |
-| Cloud Integrations (Postgres, AWS, GCP) | 46 |
-| Auto-Rotation + Testing Utilities | 36 |
-| SDK Client + Namespaces | 58 |
-| OTel Instrumentation | 6 |
-| Sync Agent + Contract Models | 37 |
-| **Total** | **2,210+** |
-
-## Documentation
-
-- [Architecture Overview](https://github.com/kwip-info/pyscoped/blob/main/docs/architecture.md)
-- [Getting Started Guide](https://github.com/kwip-info/pyscoped/blob/main/docs/getting-started.md)
-- [API Reference](https://github.com/kwip-info/pyscoped/blob/main/docs/api-reference.md)
-- [Framework Adapters](https://github.com/kwip-info/pyscoped/blob/main/docs/adapters.md)
-- [Layer Documentation](https://github.com/kwip-info/pyscoped/tree/main/docs/layers) (Layers 0-16)
-- [Extension Documentation](https://github.com/kwip-info/pyscoped/tree/main/docs/extensions) (A1-A9)
-- [Changelog](https://github.com/kwip-info/pyscoped/blob/main/CHANGELOG.md)
-
-## Requirements
-
-- Python 3.11+
-- No required dependencies (SQLite backend included)
-- Optional: `pyscoped[postgres]`, `pyscoped[aws]`, `pyscoped[gcp]`, `pyscoped[otel]`
-
-## License
-
-MIT License. See [LICENSE](https://github.com/kwip-info/pyscoped/blob/main/LICENSE) for details.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for PostgreSQL tests,
+[the phased development plan](docs/development/PLAN.md) for scope and progress,
+and [the release record](docs/development/RELEASE_READINESS.md) for validation evidence.

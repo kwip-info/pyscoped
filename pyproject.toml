@@ -1,63 +1,50 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 
 [project]
 name = "pyscoped"
-version = "1.8.1"
-description = "Universal object-isolation and tenancy-scoping framework"
+version = "2.0.0"
+description = "Incremental tenant scoping and transactional audit history for Django"
 readme = "README.md"
-license = {text = "MIT"}
-requires-python = ">=3.11"
-authors = [{name = "kwip-info"}]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{name = "KWIP"}]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Topic :: Software Development :: Libraries :: Application Frameworks",
+  "Development Status :: 5 - Production/Stable",
+  "Framework :: Django",
+  "Framework :: Django :: 5.2",
+  "Framework :: Django :: 6.0",
+  "Programming Language :: Python :: 3",
 ]
-dependencies = ["pydantic>=2.0", "sqlalchemy>=2.0"]
+dependencies = ["Django>=5.2,<6.1"]
 
 [project.urls]
 Homepage = "https://github.com/kwip-info/pyscoped"
 Repository = "https://github.com/kwip-info/pyscoped"
+Issues = "https://github.com/kwip-info/pyscoped/issues"
 
 [project.optional-dependencies]
-sqlite = ["aiosqlite>=0.19"]
-postgres = ["psycopg[binary]>=3.1", "psycopg_pool>=3.1"]
-aws = ["boto3>=1.28"]
-gcp = ["google-cloud-kms>=2.21", "google-cloud-storage>=2.14"]
-otel = ["opentelemetry-api>=1.20"]
-django = ["django>=4.2"]
-fastapi = ["fastapi>=0.100", "pydantic>=2.0"]
-flask = ["flask>=3.0"]
-mcp = ["mcp>=1.0"]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "boto3>=1.28",
-    "google-cloud-kms>=2.21",
-    "google-cloud-storage>=2.14",
-    "psycopg[binary]>=3.1",
-    "psycopg_pool>=3.1",
-    "ruff>=0.4",
-]
+dev = ["pytest>=8", "pytest-django>=4.11", "pytest-asyncio>=1", "ruff>=0.12", "build>=1.2", "twine>=6"]
+postgres = ["psycopg[binary]>=3.2"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["scoped"]
+packages = ["pyscoped"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/pyscoped", "/tests", "/examples", "/docs", "/README.md", "/CHANGELOG.md", "/CONTRIBUTING.md", "/LICENSE", "/AGENTS.md", "/CLAUDE.md", "/pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+DJANGO_SETTINGS_MODULE = "tests.settings"
 asyncio_mode = "auto"
-markers = [
-    "sqlite_only: Run only with SQLite backend",
-    "postgres_only: Run only with PostgreSQL backend",
-]
+asyncio_default_fixture_loop_scope = "function"
+markers = ["postgres: PostgreSQL-specific concurrency validation"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py310"
 line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]

@@ -1,86 +1,10 @@
-"""Shared test fixtures for the Scoped framework."""
-
-import os
-
 import pytest
-
-from scoped.registry.base import Registry, reset_global_registry
-from scoped.registry.kinds import CustomKind
-from scoped.storage.sa_sqlite import SASQLiteBackend
-
-
-@pytest.fixture
-def registry():
-    """Fresh, isolated registry for each test."""
-    reg = Registry()
-    yield reg
-    reg.clear()
-
-
-@pytest.fixture
-def sqlite_backend():
-    """In-memory SQLite backend (SA Core), initialized with schema."""
-    backend = SASQLiteBackend(":memory:")
-    backend.initialize()
-    yield backend
-    backend.close()
-
-
-def _make_postgres_backend():
-    """Create a PostgresBackend from env, or return None if unavailable."""
-    dsn = os.environ.get("PYSCOPED_TEST_PG_DSN")
-    if not dsn:
-        return None
-    try:
-        from scoped.storage.postgres import PostgresBackend
-    except ImportError:
-        return None
-    backend = PostgresBackend(dsn, pool_min_size=1, pool_max_size=3)
-    backend.initialize()
-    return backend
-
-
-def _clean_postgres(backend) -> None:
-    """Drop all tables so the next test starts fresh."""
-    tables = backend.fetch_all(
-        "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema = 'public'",
-        (),
-    )
-    if tables:
-        names = ", ".join(r["table_name"] for r in tables)
-        backend.execute(f"DROP TABLE IF EXISTS {names} CASCADE")
-
-
-@pytest.fixture
-def sa_sqlite_backend():
-    """In-memory SQLAlchemy SQLite backend, initialized with schema."""
-    backend = SASQLiteBackend(":memory:")
-    backend.initialize()
-    yield backend
-    backend.close()
-
-
-@pytest.fixture(params=["sa_sqlite", "postgres"])
-def storage_backend(request):
-    """Parametrized backend fixture — runs tests on SA SQLite and Postgres."""
-    if request.param == "sa_sqlite":
-        backend = SASQLiteBackend(":memory:")
-        backend.initialize()
-        yield backend
-        backend.close()
-    else:
-        backend = _make_postgres_backend()
-        if backend is None:
-            pytest.skip("PYSCOPED_TEST_PG_DSN not set or psycopg not installed")
-        yield backend
-        _clean_postgres(backend)
-        backend.close()
+from asgiref.sync import sync_to_async
+from django.db import connections
 
 
 @pytest.fixture(autouse=True)
-def _reset_global_state():
-    """Reset global singletons between tests."""
+async def close_async_database_connections(request):
     yield
-    reset_global_registry()
-    CustomKind.reset()
+    if request.node.get_closest_marker("asyncio"):
+        await sync_to_async(connections.close_all, thread_sensitive=True)()
