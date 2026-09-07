@@ -1,5 +1,5 @@
-> Historical pre-cutover inventory. Hosted retirement and stable cutover are now
-> authorized under PHASE_5_STABLE_RELEASE.md.
+> Historical pre-release record. Stable release and cutover are complete;
+> see RELEASE_2_0_0.md for final evidence.
 
 # kwip.tech compatibility and future cutover
 

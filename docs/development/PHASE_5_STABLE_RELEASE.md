@@ -21,5 +21,4 @@ The initial stable API does not imply long-term production soak or universal ORM
 coverage. Application workload/performance and authorization review remain necessary.
 Hosted v1 ingestion/support ends; old local versions/source stay available for migration.
 
-Status: platform has 102 passing tests and migration drift checks; stable SDK and
-remote release validation in progress. See enterprise operations for production receipts.
+Status: complete. See RELEASE_2_0_0.md for verified release and integration evidence.

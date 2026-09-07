@@ -1,5 +1,5 @@
-> Historical alpha checkpoint. Stable promotion and cutover are now authorized;
-> see PHASE_5_STABLE_RELEASE.md for the active release gate.
+> Historical pre-release record. Stable release and cutover are complete;
+> see RELEASE_2_0_0.md for final evidence.
 
 # PyScoped 2.0.0a1 release readiness
 

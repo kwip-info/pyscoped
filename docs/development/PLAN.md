@@ -1,7 +1,7 @@
 # PyScoped 2.0 development plan
 
 Owner: Trevor Ewert. Implementer: Codex. Started: 2026-09-07.
-Status: phases 0–4 complete; phase 5 stable release and production cutover authorized and in progress.
+Status: phases 0–5 complete. Stable 2.0.0 published and the hosted-service cutover verified; see RELEASE_2_0_0.md.
 
 ## Outcome
 
@@ -85,3 +85,9 @@ No package publication, remote CI run, or kwip.tech cutover is claimed by this m
 The later explicit user request authorizes stable publication and the kwip.tech
 cutover. See PHASE_5_STABLE_RELEASE.md; earlier prerelease-only boundaries above
 are historical and superseded for this phase.
+
+## Stable completion
+
+Phase 5 completed 2026-09-07. See RELEASE_2_0_0.md for immutable CI, publication,
+artifact hashes, and existing-application integration evidence. Earlier alpha-only
+scope and expectations above describe the historical phase 0–4 checkpoint.
